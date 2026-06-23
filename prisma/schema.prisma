@@ -1,0 +1,225 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  directUrl  = env("DIRECT_URL")
+  extensions = [vector]
+}
+
+model StreamSession {
+  id                 String   @id @default(cuid())
+  youtubeVideoId     String
+  youtubeUrl         String
+  title              String?
+  description        String?  @db.Text
+  channelTitle       String?
+  channelId          String?
+  thumbnailUrl       String?
+  liveStatus         String?
+  actualStartTime    DateTime?
+  scheduledStartTime DateTime?
+  concurrentViewers  Int?
+  activeLiveChatId   String?
+  metadataJson       Json?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  chatMessages    ChatMessage[]
+  eventWindows    EventWindow[]
+  transcriptChunks TranscriptChunk[]
+  audioEvents     AudioEvent[]
+  visualEvents    VisualEvent[]
+  facecamRegions  FacecamRegion[]
+  sourceMedia     SourceMedia[]
+  clipSuggestions ClipSuggestion[]
+  renderJobs      RenderJob[]
+  chatTracking    ChatTrackingState?
+  liveRecording   LiveRecordingState?
+
+  @@index([youtubeVideoId])
+}
+
+model LiveRecordingState {
+  id              String   @id @default(cuid())
+  streamSessionId String   @unique
+  status          String   @default("idle") // idle | recording | stopped | completed
+  pid             Int?
+  startedAt       DateTime?
+  lastSyncedAt    DateTime?
+  recordedSeconds Float    @default(0)
+  streamSession   StreamSession @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+}
+
+model ChatTrackingState {
+  id              String   @id @default(cuid())
+  streamSessionId String   @unique
+  isActive        Boolean  @default(false)
+  nextPageToken   String?
+  pollingInterval Int      @default(5000)
+  lastPolledAt    DateTime?
+  startedAt       DateTime?
+  streamSession   StreamSession @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+}
+
+model ChatMessage {
+  id               String   @id @default(cuid())
+  streamSessionId  String
+  youtubeMessageId String
+  authorName       String
+  authorChannelId  String?
+  messageText      String   @db.Text
+  publishedAt      DateTime
+  videoTimeSeconds Float?
+  rawJson          Json?
+  createdAt        DateTime @default(now())
+
+  streamSession StreamSession @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+
+  @@unique([streamSessionId, youtubeMessageId])
+  @@index([streamSessionId, publishedAt])
+}
+
+model EventWindow {
+  id               String                       @id @default(cuid())
+  streamSessionId  String
+  startTimeSeconds Float
+  endTimeSeconds   Float
+  type             String                       @default("chat_window")
+  summary          String?                      @db.Text
+  score            Float                        @default(0)
+  embedding        Unsupported("vector(1536)")?
+  rawData          Json?
+  createdAt        DateTime                     @default(now())
+
+  streamSession StreamSession @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+
+  @@index([streamSessionId, startTimeSeconds])
+  @@index([streamSessionId, score])
+}
+
+model TranscriptChunk {
+  id               String                       @id @default(cuid())
+  streamSessionId  String
+  startTimeSeconds Float
+  endTimeSeconds   Float
+  text             String                       @db.Text
+  embedding        Unsupported("vector(1536)")?
+  rawJson          Json?
+  createdAt        DateTime                     @default(now())
+
+  streamSession StreamSession @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+
+  @@index([streamSessionId, startTimeSeconds])
+}
+
+model AudioEvent {
+  id               String   @id @default(cuid())
+  streamSessionId  String
+  startTimeSeconds Float
+  endTimeSeconds   Float
+  type             String
+  score            Float    @default(0)
+  summary          String?  @db.Text
+  rawData          Json?
+  createdAt        DateTime @default(now())
+
+  streamSession StreamSession @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+
+  @@index([streamSessionId, startTimeSeconds])
+}
+
+model VisualEvent {
+  id               String   @id @default(cuid())
+  streamSessionId  String
+  startTimeSeconds Float
+  endTimeSeconds   Float
+  type             String
+  score            Float    @default(0)
+  summary          String?  @db.Text
+  rawData          Json?
+  createdAt        DateTime @default(now())
+
+  streamSession StreamSession @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+
+  @@index([streamSessionId, startTimeSeconds])
+}
+
+model FacecamRegion {
+  id              String   @id @default(cuid())
+  streamSessionId String
+  x               Float
+  y               Float
+  width           Float
+  height          Float
+  confidence      Float    @default(0)
+  sampleCount     Int      @default(0)
+  rawData         Json?
+  createdAt       DateTime @default(now())
+
+  streamSession StreamSession @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+}
+
+model SourceMedia {
+  id               String   @id @default(cuid())
+  streamSessionId  String
+  originalFilename String
+  filePath         String
+  mimeType         String
+  sizeBytes        BigInt
+  durationSeconds  Float?
+  isLiveRecording  Boolean  @default(false)
+  width            Int?
+  height           Int?
+  fps              Float?
+  codecInfo        Json?
+  createdAt        DateTime @default(now())
+
+  streamSession StreamSession @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+  renderJobs      RenderJob[]
+}
+
+model ClipSuggestion {
+  id               String   @id @default(cuid())
+  streamSessionId  String
+  title            String
+  startTimeSeconds Float
+  endTimeSeconds   Float
+  reason           String   @db.Text
+  confidence       Float    @default(0.5)
+  suggestedFormat  String   @default("9:16")
+  suggestedLayout  String   @default("center_crop")
+  status           String   @default("suggested")
+  rawAiJson        Json?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  streamSession StreamSession @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+  renderJobs      RenderJob[]
+
+  @@index([streamSessionId, status])
+}
+
+model RenderJob {
+  id               String   @id @default(cuid())
+  streamSessionId  String
+  clipSuggestionId String?
+  sourceMediaId    String?
+  status           String   @default("queued")
+  progress         Float    @default(0)
+  outputPath       String?
+  errorMessage     String?  @db.Text
+  layout           String   @default("center_crop")
+  includeCaptions  Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  streamSession  StreamSession   @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+  clipSuggestion ClipSuggestion? @relation(fields: [clipSuggestionId], references: [id], onDelete: SetNull)
+  sourceMedia    SourceMedia?    @relation(fields: [sourceMediaId], references: [id], onDelete: SetNull)
+
+  @@index([streamSessionId, status])
+}
