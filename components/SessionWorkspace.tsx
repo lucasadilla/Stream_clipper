@@ -1,62 +1,28 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { EditorHeader } from "@/components/layout/EditorHeader";
 import { YouTubePlayer, type YouTubePlayerHandle } from "@/components/YouTubePlayer";
-import { StreamMetadataCard } from "@/components/StreamMetadataCard";
-import { SourceVideoPanel } from "@/components/SourceVideoPanel";
-import { AIChatBox } from "@/components/AIChatBox";
-import { ClipSuggestionCard, type ClipSuggestionData } from "@/components/ClipSuggestionCard";
-import { Timeline, type TimelineMarker } from "@/components/Timeline";
-import { ChatPanel } from "@/components/ChatPanel";
+import { LiveTimeline, type ClipSelection } from "@/components/LiveTimeline";
+import { LIVE_TICK_MS, LIVE_SEGMENT_SECONDS } from "@/lib/timelineConstants";
+import { TRANSCRIPTION_FAST_TICK_MS } from "@/lib/transcriptionConstants";
+import { buildLiveTimelineSegments } from "@/lib/timelineSegments";
 import { FindClipBar } from "@/components/FindClipBar";
-import { ClipPicker } from "@/components/ClipPicker";
-import { clipDownloadUrl, renderJobDownloadUrl } from "@/lib/downloadUrls";
-import { triggerFileDownload } from "@/lib/clientDownload";
+import { TranscriptChat } from "@/components/TranscriptChat";
+import { fetchJson } from "@/lib/apiClient";
 
 interface SessionData {
   id: string;
   youtubeVideoId: string;
   title?: string | null;
-  description?: string | null;
-  channelTitle?: string | null;
-  thumbnailUrl?: string | null;
   liveStatus?: string | null;
-  actualStartTime?: string | null;
-  scheduledStartTime?: string | null;
-  concurrentViewers?: number | null;
   activeLiveChatId?: string | null;
-  liveRecording?: {
-    status: string;
-    recordedSeconds: number;
-  } | null;
-  sourceMedia?: Array<{
-    id: string;
-    originalFilename: string;
-    durationSeconds?: number | null;
-    isLiveRecording?: boolean;
-    width?: number | null;
-    height?: number | null;
-    fps?: number | null;
-    sizeBytes?: string;
-  }>;
-  clipSuggestions?: ClipSuggestionData[];
-  renderJobs?: Array<{
-    id: string;
-    clipSuggestionId?: string | null;
-    status: string;
-    progress: number;
-    outputPath?: string | null;
-    errorMessage?: string | null;
-    createdAt: string;
-  }>;
-  _count?: {
-    chatMessages: number;
-    eventWindows: number;
-    transcriptChunks: number;
-    audioEvents: number;
-    visualEvents: number;
-  };
+  actualStartTime?: string | null;
+  videoDurationSeconds?: number;
+  liveRecording?: { status: string; recordedSeconds: number } | null;
+  sourceMedia?: Array<{ durationSeconds?: number | null }>;
+  storageLabel?: string;
 }
 
 interface SessionWorkspaceProps {
@@ -64,34 +30,74 @@ interface SessionWorkspaceProps {
 }
 
 export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
+  const router = useRouter();
   const [session, setSession] = useState<SessionData | null>(null);
-  const [clips, setClips] = useState<ClipSuggestionData[]>([]);
-  const [markers, setMarkers] = useState<TimelineMarker[]>([]);
   const [transcripts, setTranscripts] = useState<
     Array<{
       id: string;
       startTimeSeconds: number;
       endTimeSeconds: number;
       text: string;
+      rawJson?: unknown;
     }>
   >([]);
+  const [clipSelection, setClipSelection] = useState<ClipSelection>({
+    start: 0,
+    end: LIVE_SEGMENT_SECONDS,
+  });
+  const [thumbnails, setThumbnails] = useState<
+    Array<{ startTimeSeconds: number; endTimeSeconds: number; url: string }>
+  >([]);
+  const [newSegmentIds, setNewSegmentIds] = useState<Set<string>>(new Set());
+  const prevTranscriptIds = useRef<Set<string>>(new Set());
   const [currentTime, setCurrentTime] = useState(0);
-  const [processing, setProcessing] = useState(false);
+  const [playerDuration, setPlayerDuration] = useState(0);
+  const [liveClock, setLiveClock] = useState(() => Date.now());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [transcriptionError, setTranscriptionError] = useState<string | null>(null);
+  const [transcribingActive, setTranscribingActive] = useState(false);
   const playerRef = useRef<YouTubePlayerHandle>(null);
+  const sourceStarted = useRef(false);
+  const transcribeInFlight = useRef(false);
 
   const seekTo = useCallback((seconds: number) => {
-    playerRef.current?.seekTo(seconds);
+    playerRef.current?.seekTo(seconds, { play: true });
+    setCurrentTime(seconds);
   }, []);
+
+  const seekFromAssistant = useCallback((seconds: number) => {
+    seekTo(seconds);
+    setClipSelection({
+      start: seconds,
+      end: seconds + LIVE_SEGMENT_SECONDS,
+    });
+  }, [seekTo]);
+
+  const scrubTo = useCallback((seconds: number) => {
+    playerRef.current?.seekTo(seconds, { play: true });
+    setCurrentTime(seconds);
+  }, []);
+
+  async function loadThumbnails() {
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/timeline-thumbs`);
+      const data = await res.json();
+      if (res.ok) setThumbnails(data.thumbnails ?? []);
+    } catch {
+      // optional
+    }
+  }
 
   async function loadSession() {
     try {
-      const res = await fetch(`/api/sessions/${sessionId}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Failed to load session");
+      const { ok, data } = await fetchJson<{ session?: SessionData; error?: string }>(
+        `/api/sessions/${sessionId}`
+      );
+      if (!ok) throw new Error(data.error ?? "Failed to load session");
+      if (!data.session) throw new Error("Session not found");
       setSession(data.session);
-      setClips(data.session.clipSuggestions ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load");
     } finally {
@@ -100,54 +106,28 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   }
 
   async function loadEvents() {
-    const res = await fetch(`/api/sessions/${sessionId}/events`);
-    const data = await res.json();
-    if (!res.ok) return;
+    try {
+      const { ok, data } = await fetchJson<{
+        transcriptChunks?: typeof transcripts;
+      }>(`/api/sessions/${sessionId}/events`);
+      if (!ok) return;
 
-    const newMarkers: TimelineMarker[] = [];
-
-    for (const e of data.eventWindows ?? []) {
-      newMarkers.push({
-        id: e.id,
-        type: "chat_window",
-        startTimeSeconds: e.startTimeSeconds,
-        endTimeSeconds: e.endTimeSeconds,
-        label: e.summary?.slice(0, 40) ?? "Chat spike",
-        score: e.score,
-      });
+      const chunks = data.transcriptChunks ?? [];
+    const arrived = new Set<string>();
+    for (const t of chunks) {
+      if (!prevTranscriptIds.current.has(t.id)) arrived.add(t.id);
     }
-    for (const t of data.transcriptChunks ?? []) {
-      newMarkers.push({
-        id: t.id,
-        type: "transcript",
-        startTimeSeconds: t.startTimeSeconds,
-        endTimeSeconds: t.endTimeSeconds,
-        label: t.text?.slice(0, 40) ?? "Transcript",
-      });
-    }
-    for (const a of data.audioEvents ?? []) {
-      newMarkers.push({
-        id: a.id,
-        type: "audio",
-        startTimeSeconds: a.startTimeSeconds,
-        endTimeSeconds: a.endTimeSeconds,
-        label: a.summary?.slice(0, 40) ?? a.type,
-        score: a.score,
-      });
-    }
-    for (const v of data.visualEvents ?? []) {
-      newMarkers.push({
-        id: v.id,
-        type: "visual",
-        startTimeSeconds: v.startTimeSeconds,
-        endTimeSeconds: v.endTimeSeconds,
-        label: v.summary?.slice(0, 40) ?? v.type,
-        score: v.score,
-      });
+    prevTranscriptIds.current = new Set(chunks.map((t: { id: string }) => t.id));
+    if (arrived.size > 0) {
+      setNewSegmentIds(arrived);
+      window.setTimeout(() => setNewSegmentIds(new Set()), 2500);
     }
 
-    setMarkers(newMarkers);
-    setTranscripts(data.transcriptChunks ?? []);
+    setTranscripts(chunks);
+    void loadThumbnails();
+    } catch {
+      // non-fatal
+    }
   }
 
   useEffect(() => {
@@ -155,62 +135,152 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
     loadEvents();
   }, [sessionId]);
 
+  useEffect(() => {
+    if (sourceStarted.current) return;
+    sourceStarted.current = true;
+    fetch(`/api/sessions/${sessionId}/download-source`, { method: "POST" }).catch(
+      () => {}
+    );
+  }, [sessionId]);
+
   const isLive =
     session?.liveStatus === "live" || session?.liveStatus === "upcoming";
 
-  // Live pipeline: sync recording, chat, auto-suggest clips
+  const transcribedSeconds = Math.max(
+    0,
+    ...transcripts
+      .filter((t) => {
+        const raw = t.rawJson as { whisper?: boolean } | null;
+        return raw?.whisper;
+      })
+      .map((t) => t.endTimeSeconds)
+  );
+
+  const recordedSecondsForTx = Math.max(
+    session?.liveRecording?.recordedSeconds ?? 0,
+    session?.sourceMedia?.[0]?.durationSeconds ?? 0,
+    0
+  );
+
+  const transcriptionBehind =
+    recordedSecondsForTx > 5 && transcribedSeconds < recordedSecondsForTx - 15;
+
   useEffect(() => {
     if (!session) return;
 
-    async function tick() {
+    async function liveTick() {
       try {
         await fetch(`/api/sessions/${sessionId}/live-tick`, { method: "POST" });
         await loadSession();
-        await loadEvents();
       } catch {
         // non-fatal
       }
     }
 
-    if (isLive || session.liveStatus === "post_live") {
-      tick();
-      const interval = setInterval(tick, 15000);
-      return () => clearInterval(interval);
-    }
-  }, [sessionId, isLive, session?.liveStatus]);
+    liveTick();
+    const interval = setInterval(liveTick, LIVE_TICK_MS);
+    return () => clearInterval(interval);
+  }, [sessionId, session?.id]);
 
-  async function handleProcessVideo() {
-    setProcessing(true);
+  useEffect(() => {
+    if (!session) return;
+
+    async function runTranscribe() {
+      if (transcribeInFlight.current) return;
+      transcribeInFlight.current = true;
+      setTranscribingActive(true);
+      try {
+        const { ok, data } = await fetchJson<{
+          error?: string;
+          reason?: string;
+          skipped?: boolean;
+          transcribedThrough?: number;
+        }>(`/api/sessions/${sessionId}/transcribe`, { method: "POST" });
+
+        if (!ok) {
+          setTranscriptionError(data.error ?? "Transcription failed");
+        } else if (data.reason === "no_file") {
+          setTranscriptionError("Waiting for local recording to download…");
+        } else if (data.reason === "no_openai_key") {
+          setTranscriptionError("OPENAI_API_KEY missing in .env");
+        } else if (data.reason === "too_short") {
+          setTranscriptionError("Recording too short — wait for more audio");
+        } else {
+          setTranscriptionError(null);
+        }
+
+        if (!data.skipped || (data.transcribedThrough ?? 0) > 0) {
+          await loadEvents();
+        }
+      } catch (err) {
+        setTranscriptionError(
+          err instanceof Error ? err.message : "Transcription request failed"
+        );
+      } finally {
+        transcribeInFlight.current = false;
+        setTranscribingActive(false);
+      }
+    }
+
+    runTranscribe();
+    const ms = transcriptionBehind
+      ? TRANSCRIPTION_FAST_TICK_MS
+      : TRANSCRIPTION_FAST_TICK_MS * 3;
+    const interval = setInterval(runTranscribe, ms);
+    return () => clearInterval(interval);
+  }, [sessionId, session?.id, transcriptionBehind, transcribedSeconds]);
+
+  useEffect(() => {
+    if (session?.liveStatus !== "live" && session?.liveStatus !== "upcoming") return;
+    const id = setInterval(() => setLiveClock(Date.now()), 10_000);
+    return () => clearInterval(id);
+  }, [session?.liveStatus]);
+
+  async function handleDeleteSession() {
+    const size = session?.storageLabel ? ` (${session.storageLabel})` : "";
+    if (
+      !window.confirm(
+        `Delete this session and free disk space${size}?\n\nRemoves local recordings, frames, and rendered clips.`
+      )
+    ) {
+      return;
+    }
+
+    setDeleting(true);
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/process-video`, {
-        method: "POST",
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Processing failed");
-      await loadSession();
-      await loadEvents();
+      const { ok, data } = await fetchJson<{ error?: string; storageLabel?: string }>(
+        `/api/sessions/${sessionId}`,
+        { method: "DELETE" }
+      );
+      if (!ok) throw new Error(data.error ?? "Delete failed");
+      router.push("/");
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Processing failed");
-    } finally {
-      setProcessing(false);
+      alert(err instanceof Error ? err.message : "Delete failed");
+      setDeleting(false);
     }
   }
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-[var(--color-muted)] animate-pulse">Loading session…</p>
+      <div className="min-h-screen flex flex-col bg-[var(--color-background)]">
+        <EditorHeader title="Editor" />
+        <div className="flex-1 flex items-center justify-center">
+          <p className="text-[var(--color-muted)] animate-pulse">Loading…</p>
+        </div>
       </div>
     );
   }
 
   if (error || !session) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center gap-4">
-        <p className="text-[var(--color-danger)]">{error ?? "Session not found"}</p>
-        <Link href="/" className="text-[var(--color-accent)] text-sm">
-          ← Back to home
-        </Link>
+      <div className="min-h-screen flex flex-col bg-[var(--color-background)]">
+        <EditorHeader title="Editor" />
+        <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6">
+          <p className="text-[var(--color-danger)]">{error ?? "Session not found"}</p>
+          <a href="/" className="text-[var(--color-accent)] text-sm hover:underline">
+            ← Back to home
+          </a>
+        </div>
       </div>
     );
   }
@@ -219,206 +289,99 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const recordedSeconds = Math.max(
     session.liveRecording?.recordedSeconds ?? 0,
     sourceMedia?.durationSeconds ?? 0,
-    ...markers.map((m) => m.endTimeSeconds ?? 0),
+    ...transcripts.map((t) => t.endTimeSeconds),
     0
   );
-  const duration = Math.max(recordedSeconds, currentTime, 300);
 
-  function clipCanRender(_clip: ClipSuggestionData): boolean {
-    return true;
-  }
+  const liveElapsedSeconds =
+    session.actualStartTime && isLive
+      ? Math.max(0, (liveClock - new Date(session.actualStartTime).getTime()) / 1000)
+      : 0;
 
-  const clipMarkers: TimelineMarker[] = clips
-    .filter((c) => c.status !== "rejected")
-    .map((c) => ({
-      id: `clip-${c.id}`,
-      type: "clip" as const,
-      startTimeSeconds: c.startTimeSeconds,
-      endTimeSeconds: c.endTimeSeconds,
-      label: c.title,
-      score: c.confidence * 10,
-    }));
+  const streamDuration = Math.max(
+    session.videoDurationSeconds ?? 0,
+    playerDuration,
+    liveElapsedSeconds,
+    recordedSeconds,
+    currentTime,
+    LIVE_SEGMENT_SECONDS
+  );
+
+  const liveSegments = buildLiveTimelineSegments(
+    transcripts.filter((t) => {
+      const raw = t.rawJson as { cursorOnly?: boolean } | null;
+      return !raw?.cursorOnly && t.text !== "[silence]" && t.text !== "[processing error]";
+    }),
+    recordedSeconds,
+    newSegmentIds
+  );
+
+  const progressRecordedSeconds = Math.max(
+    session.liveRecording?.recordedSeconds ?? 0,
+    sourceMedia?.durationSeconds ?? 0,
+    0
+  );
+  const progressTranscribedSeconds = transcribedSeconds;
 
   return (
-    <div className="min-h-screen flex flex-col">
-      <header className="border-b border-[var(--color-card-border)] px-6 py-3">
-        <div className="max-w-[1600px] mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link href="/" className="text-sm text-[var(--color-muted)] hover:text-white">
-              ← Home
-            </Link>
-            <h1 className="text-sm font-semibold truncate max-w-md">
-              {session.title ?? "Stream Workspace"}
-            </h1>
-          </div>
-          {session._count && (
-            <div className="hidden sm:flex gap-4 text-[10px] text-[var(--color-muted)]">
-              <span>{session._count.chatMessages} chat</span>
-              <span>{session._count.eventWindows} windows</span>
-              <span>{session._count.transcriptChunks} transcript</span>
-              <span>{session._count.audioEvents} audio</span>
-              <span>{session._count.visualEvents} visual</span>
-            </div>
-          )}
-        </div>
-      </header>
+    <div className="h-screen flex flex-col bg-[var(--color-background)] overflow-hidden">
+      <EditorHeader
+        title={session.title}
+        storageLabel={session.storageLabel}
+        isLive={isLive}
+        recordedSeconds={recordedSeconds}
+        deleting={deleting}
+        onDelete={handleDeleteSession}
+      />
 
-      <main className="flex-1 max-w-[1600px] mx-auto w-full p-4 lg:p-6">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Main area */}
-          <div className="lg:col-span-2 space-y-4">
+      <div className="flex-1 flex flex-col min-h-0">
+        {/* Video preview — larger */}
+        <div className="shrink-0 px-4 pt-3 pb-2 flex justify-center">
+          <div className="w-full max-w-6xl h-[min(42vh,520px)] min-h-[220px]">
             <YouTubePlayer
               ref={playerRef}
               videoId={session.youtubeVideoId}
               onTimeUpdate={setCurrentTime}
+              onDurationChange={setPlayerDuration}
+              fillContainer
             />
-
-            <FindClipBar
-              sessionId={sessionId}
-              onClipFound={(clip) =>
-                setClips((prev) => [{ ...clip, status: "rendered" }, ...prev])
-              }
-              onComplete={loadSession}
-            />
-
-            <SourceVideoPanel
-              sessionId={sessionId}
-              youtubeVideoId={session.youtubeVideoId}
-              liveStatus={session.liveStatus}
-              sourceMedia={sourceMedia}
-              liveRecording={session.liveRecording}
-              onReady={loadSession}
-              onProcess={handleProcessVideo}
-              processing={processing}
-            />
-
-            <Timeline
-              markers={[...markers, ...clipMarkers]}
-              durationSeconds={duration}
-              currentTime={currentTime}
-              onSeek={seekTo}
-            />
-          </div>
-
-          {/* Sidebar */}
-          <div className="space-y-4">
-            <StreamMetadataCard session={session} />
-            <AIChatBox
-              sessionId={sessionId}
-              onClipSuggestions={(newClips) => {
-                setClips((prev) => [...newClips, ...prev]);
-                loadEvents();
-              }}
-            />
-
-            <ClipPicker
-              sessionId={sessionId}
-              currentTime={currentTime}
-              recordedSeconds={recordedSeconds}
-              isLive={isLive}
-              markers={markers}
-              transcripts={transcripts}
-              onSeek={seekTo}
-              onClipCreated={loadSession}
-            />
-
-            <div className="space-y-3">
-              <h3 className="font-semibold text-sm">Suggested Clips</h3>
-              {clips.filter((c) => c.status !== "rejected").length === 0 ? (
-                <p className="text-xs text-[var(--color-muted)] text-center py-6 rounded-xl border border-[var(--color-card-border)]">
-                  {isLive
-                    ? "Clip suggestions appear automatically as chat heats up…"
-                    : "Ask the AI for clip suggestions"}
-                </p>
-              ) : (
-                clips
-                  .filter((c) => c.status !== "rejected")
-                  .map((clip) => (
-                    <ClipSuggestionCard
-                      key={clip.id}
-                      clip={clip}
-                      canRender={clipCanRender(clip)}
-                      renderHint={
-                        isLive && !clipCanRender(clip)
-                          ? "Waiting for recording…"
-                          : undefined
-                      }
-                      onSeek={seekTo}
-                      onUpdate={(updated) =>
-                        setClips((prev) =>
-                          prev.map((c) => (c.id === updated.id ? updated : c))
-                        )
-                      }
-                    />
-                  ))
-              )}
-            </div>
           </div>
         </div>
 
-        {/* Bottom section */}
-        <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <ChatPanel
+        <div className="shrink-0 px-4 py-1.5 max-w-6xl w-full mx-auto">
+          <FindClipBar sessionId={sessionId} onComplete={loadEvents} />
+        </div>
+
+        {/* Timeline */}
+        <div className="flex-1 min-h-[120px] px-4 py-1">
+          <LiveTimeline
             sessionId={sessionId}
-            hasLiveChat={!!session.activeLiveChatId}
-            autoStart={isLive}
-            onChatStarted={loadEvents}
+            segments={liveSegments}
+            thumbnails={thumbnails}
+            durationSeconds={streamDuration}
+            recordedSeconds={recordedSeconds}
+            currentTime={currentTime}
+            isLive={isLive}
+            selection={clipSelection}
+            onSelectionChange={setClipSelection}
+            onSeek={seekTo}
+            onScrub={scrubTo}
+            onClipCreated={loadEvents}
           />
-
-          <div className="rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-4">
-            <h3 className="font-semibold text-sm mb-3">Signals & Render Jobs</h3>
-            <div className="space-y-2 max-h-48 overflow-y-auto">
-              {markers.slice(0, 20).map((m) => (
-                <button
-                  key={m.id}
-                  onClick={() => seekTo(m.startTimeSeconds)}
-                  className="w-full text-left text-xs p-2 rounded-lg bg-[var(--color-background)] hover:border-[var(--color-accent)] border border-transparent"
-                >
-                  <span className="text-[var(--color-muted)] uppercase text-[10px]">
-                    {m.type}
-                  </span>
-                  <p className="truncate">{m.label}</p>
-                </button>
-              ))}
-              {markers.length === 0 && (
-                <p className="text-xs text-[var(--color-muted)]">No signals yet</p>
-              )}
-            </div>
-
-            {session.renderJobs && session.renderJobs.length > 0 && (
-              <div className="mt-4 space-y-2">
-                <h4 className="text-xs font-medium">Recent Renders</h4>
-                {session.renderJobs.map((job) => (
-                  <div
-                    key={job.id}
-                    className="text-xs p-2 rounded-lg bg-[var(--color-background)]"
-                  >
-                    <span className="capitalize">{job.status}</span>
-                    {job.status === "completed" && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          triggerFileDownload(
-                            job.clipSuggestionId
-                              ? clipDownloadUrl(job.clipSuggestionId)
-                              : renderJobDownloadUrl(job.id),
-                            `short-${job.id}.mp4`
-                          ).catch((err) =>
-                            alert(err instanceof Error ? err.message : "Download failed")
-                          )
-                        }
-                        className="ml-2 text-[var(--color-accent)] hover:underline"
-                      >
-                        Download
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
         </div>
-      </main>
+
+        {/* Chat under timeline */}
+        <div className="shrink-0 h-[min(28vh,240px)] min-h-[160px]">
+          <TranscriptChat
+            sessionId={sessionId}
+            onSeek={seekFromAssistant}
+            transcribedSeconds={progressTranscribedSeconds}
+            recordedSeconds={progressRecordedSeconds}
+            transcribingActive={transcribingActive}
+            transcriptionError={transcriptionError}
+          />
+        </div>
+      </div>
     </div>
   );
 }

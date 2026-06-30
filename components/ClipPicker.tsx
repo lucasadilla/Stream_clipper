@@ -1,11 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { triggerFileDownload } from "@/lib/clientDownload";
-import { clipDownloadUrl } from "@/lib/downloadUrls";
+import { saveAndRenderClip, saveClip } from "@/lib/clipActions";
 import { formatSeconds, formatDuration } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import type { TimelineMarker } from "@/components/Timeline";
+import type { ClipSelection } from "@/components/LiveTimeline";
+import { LIVE_SEGMENT_SECONDS } from "@/lib/timelineConstants";
 
 interface TranscriptItem {
   id: string;
@@ -21,6 +22,8 @@ interface ClipPickerProps {
   isLive: boolean;
   markers: TimelineMarker[];
   transcripts: TranscriptItem[];
+  selection: ClipSelection;
+  onSelectionChange: (selection: ClipSelection) => void;
   onSeek: (seconds: number) => void;
   onClipCreated?: () => void;
 }
@@ -32,11 +35,12 @@ export function ClipPicker({
   isLive,
   markers,
   transcripts,
+  selection,
+  onSelectionChange,
   onSeek,
   onClipCreated,
 }: ClipPickerProps) {
-  const [start, setStart] = useState(0);
-  const [end, setEnd] = useState(30);
+  const { start, end } = selection;
   const [title, setTitle] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,33 +51,12 @@ export function ClipPicker({
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/clips`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: title || `Clip ${formatSeconds(start)}`,
-          startTimeSeconds: start,
-          endTimeSeconds: end,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Failed to create clip");
-
-      onClipCreated?.();
-
-      if (renderAfter && data.clip?.id) {
-        const renderRes = await fetch(`/api/clips/${data.clip.id}/render`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ includeCaptions: false }),
-        });
-        const renderData = await renderRes.json();
-        if (!renderRes.ok) {
-          throw new Error(renderData.error ?? "Render failed");
-        }
-        const url = renderData.downloadUrl ?? clipDownloadUrl(data.clip.id);
-        await triggerFileDownload(url, `${data.clip.title || "short"}.mp4`);
+      if (renderAfter) {
+        await saveAndRenderClip(sessionId, { start, end }, title || undefined);
+      } else {
+        await saveClip(sessionId, { start, end }, title || undefined);
       }
+      onClipCreated?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed");
     } finally {
@@ -83,16 +66,20 @@ export function ClipPicker({
 
   function pickMoment(marker: TimelineMarker) {
     const s = marker.startTimeSeconds;
-    const e = marker.endTimeSeconds ?? s + 30;
-    setStart(s);
-    setEnd(Math.min(e, s + 60));
+    const e = marker.endTimeSeconds ?? s + LIVE_SEGMENT_SECONDS;
+    onSelectionChange({
+      start: s,
+      end: Math.min(e, s + 60),
+    });
     setTitle(marker.label.slice(0, 60));
     onSeek(s);
   }
 
   function pickTranscript(t: TranscriptItem) {
-    setStart(t.startTimeSeconds);
-    setEnd(t.endTimeSeconds);
+    onSelectionChange({
+      start: t.startTimeSeconds,
+      end: t.endTimeSeconds,
+    });
     setTitle(t.text.slice(0, 60));
     onSeek(t.startTimeSeconds);
   }
@@ -114,24 +101,32 @@ export function ClipPicker({
       </div>
 
       <div className="grid grid-cols-2 gap-2">
-        <TimeField label="Start" value={start} onChange={setStart} />
-        <TimeField label="End" value={end} onChange={setEnd} />
+        <TimeField
+          label="Start"
+          value={start}
+          onChange={(v) => onSelectionChange({ start: v, end })}
+        />
+        <TimeField
+          label="End"
+          value={end}
+          onChange={(v) => onSelectionChange({ start, end: v })}
+        />
       </div>
 
       <div className="flex flex-wrap gap-2">
-        <SmallButton onClick={() => setStart(Math.floor(currentTime))}>
+        <SmallButton onClick={() => onSelectionChange({ start: Math.floor(currentTime), end })}>
           Start = player
         </SmallButton>
-        <SmallButton onClick={() => setEnd(Math.floor(currentTime))}>
+        <SmallButton onClick={() => onSelectionChange({ start, end: Math.floor(currentTime) })}>
           End = player
         </SmallButton>
         <SmallButton
           onClick={() => {
-            setStart(Math.floor(currentTime));
-            setEnd(Math.floor(currentTime) + 30);
+            const t = Math.floor(currentTime);
+            onSelectionChange({ start: t, end: t + LIVE_SEGMENT_SECONDS });
           }}
         >
-          Last 30s from player
+          Last {LIVE_SEGMENT_SECONDS}s from player
         </SmallButton>
       </div>
 

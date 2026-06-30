@@ -68,7 +68,23 @@ export async function pollChatMessages(streamSessionId: string) {
   let newCount = 0;
   const streamStart = session.actualStartTime;
 
+  const incomingIds = pollResult.messages.map((m) => m.id);
+  const existing =
+    incomingIds.length > 0
+      ? await prisma.chatMessage.findMany({
+          where: {
+            streamSessionId,
+            youtubeMessageId: { in: incomingIds },
+          },
+          select: { youtubeMessageId: true },
+        })
+      : [];
+  const existingIds = new Set(existing.map((m) => m.youtubeMessageId));
+
+  const toCreate = [];
   for (const msg of pollResult.messages) {
+    if (existingIds.has(msg.id)) continue;
+
     let videoTimeSeconds: number | null = null;
     if (streamStart) {
       videoTimeSeconds =
@@ -76,23 +92,24 @@ export async function pollChatMessages(streamSessionId: string) {
       if (videoTimeSeconds < 0) videoTimeSeconds = null;
     }
 
-    try {
-      await prisma.chatMessage.create({
-        data: {
-          streamSessionId,
-          youtubeMessageId: msg.id,
-          authorName: msg.authorName,
-          authorChannelId: msg.authorChannelId,
-          messageText: msg.messageText,
-          publishedAt: msg.publishedAt,
-          videoTimeSeconds,
-          rawJson: toJsonValue(msg.raw),
-        },
-      });
-      newCount++;
-    } catch {
-      // Duplicate message — skip
-    }
+    toCreate.push({
+      streamSessionId,
+      youtubeMessageId: msg.id,
+      authorName: msg.authorName,
+      authorChannelId: msg.authorChannelId,
+      messageText: msg.messageText,
+      publishedAt: msg.publishedAt,
+      videoTimeSeconds,
+      rawJson: toJsonValue(msg.raw),
+    });
+  }
+
+  if (toCreate.length > 0) {
+    const result = await prisma.chatMessage.createMany({
+      data: toCreate,
+      skipDuplicates: true,
+    });
+    newCount = result.count;
   }
 
   await prisma.chatTrackingState.upsert({

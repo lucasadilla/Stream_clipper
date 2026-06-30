@@ -15,15 +15,24 @@ function getOpenAI(): OpenAI {
 }
 
 export async function createEmbedding(text: string): Promise<number[]> {
+  const [embedding] = await createEmbeddingsBatch([text]);
+  if (!embedding) throw new Error("Failed to create embedding");
+  return embedding;
+}
+
+export async function createEmbeddingsBatch(texts: string[]): Promise<number[][]> {
+  if (texts.length === 0) return [];
+
   const client = getOpenAI();
   const response = await client.embeddings.create({
     model: EMBEDDING_MODEL,
-    input: text.slice(0, 8000),
+    input: texts.map((t) => t.slice(0, 8000)),
     dimensions: EMBEDDING_DIMENSIONS,
   });
-  const embedding = response.data[0]?.embedding;
-  if (!embedding) throw new Error("Failed to create embedding");
-  return embedding;
+
+  return response.data
+    .sort((a, b) => a.index - b.index)
+    .map((row) => row.embedding);
 }
 
 /** Format embedding array for pgvector SQL literal */

@@ -8,6 +8,7 @@ import {
   getUploadDir,
   ensureDir,
   toRelativeStoragePath,
+  findBestSourceFileInDir,
 } from "@/lib/storage";
 
 export function getYtDlpPath(): string {
@@ -25,7 +26,7 @@ function getYtDlpJsRuntimeArg(): string {
   return `node:${process.execPath}`;
 }
 
-function baseYtDlpArgs(): string[] {
+export function baseYtDlpArgs(): string[] {
   return [
     "--js-runtimes",
     getYtDlpJsRuntimeArg(),
@@ -33,6 +34,47 @@ function baseYtDlpArgs(): string[] {
     "--ffmpeg-location",
     getFfmpegLocationDir(),
   ];
+}
+
+const FORMAT_CHAINS = [
+  "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best[height<=1080]/best",
+  "bestvideo+bestaudio/best",
+  "best",
+] as const;
+
+async function runYtDlpWithFormatFallback(
+  baseArgs: string[],
+  url: string
+): Promise<void> {
+  let lastError: Error | null = null;
+
+  for (const format of FORMAT_CHAINS) {
+    const args = [...baseArgs];
+    const formatIdx = args.indexOf("-f");
+    if (formatIdx >= 0) {
+      args[formatIdx + 1] = format;
+    } else {
+      args.unshift("-f", format);
+    }
+
+    if (format.includes("+") && !args.includes("--merge-output-format")) {
+      const oIdx = args.indexOf("-o");
+      if (oIdx >= 0) {
+        args.splice(oIdx, 0, "--merge-output-format", "mp4");
+      } else {
+        args.push("--merge-output-format", "mp4");
+      }
+    }
+
+    try {
+      await runCommand(getYtDlpPath(), [...args, url]);
+      return;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+    }
+  }
+
+  throw lastError ?? new Error("yt-dlp download failed");
 }
 
 export async function isYtDlpAvailable(): Promise<boolean> {
@@ -74,36 +116,39 @@ export async function downloadSourceFromYouTube(streamSessionId: string) {
 
   const outputPath = path.join(uploadDir, "source.mp4");
 
-  const args = [
-    ...baseYtDlpArgs(),
-    "-f",
-    "best[height<=1080][ext=mp4]/best[height<=1080]/best",
-    "-o",
-    outputPath,
-    session.youtubeUrl,
-  ];
-
-  await runCommand(getYtDlpPath(), args);
+  await runYtDlpWithFormatFallback(
+    [
+      ...baseYtDlpArgs(),
+      "-f",
+      FORMAT_CHAINS[0],
+      "-o",
+      outputPath,
+    ],
+    session.youtubeUrl
+  );
 
   // yt-dlp may write source.mp4 or source.f140.m4a etc. — find the output file
   let absolutePath = outputPath;
   try {
     await fs.access(absolutePath);
   } catch {
-    const files = await fs.readdir(uploadDir);
-    const videoFile = files.find(
-      (f) =>
-        f.startsWith("source.") &&
-        !f.endsWith(".part") &&
-        !f.endsWith(".ytdl")
-    );
-    if (!videoFile) {
+    const found = await findBestSourceFileInDir(uploadDir);
+    if (!found) {
       throw new Error("Download completed but output file was not found");
     }
-    absolutePath = path.join(uploadDir, videoFile);
+    absolutePath = found;
   }
 
-  const stat = await fs.stat(absolutePath);
+  let stat;
+  try {
+    stat = await fs.stat(absolutePath);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      throw new Error("Download output disappeared before it could be read");
+    }
+    throw err;
+  }
   const relativePath = toRelativeStoragePath(absolutePath);
 
   let probe;
@@ -154,17 +199,17 @@ export async function downloadClipSegmentFromYouTube(
 
   const section = `*${startTime}-${endTime}`;
 
-  const args = [
-    ...baseYtDlpArgs(),
-    "--download-sections",
-    section,
-    "--force-keyframes-at-cuts",
-    "-f",
-    "best[height<=1080][ext=mp4]/best[height<=1080]/best",
-    "-o",
-    outputPath,
-    youtubeUrl,
-  ];
-
-  await runCommand(getYtDlpPath(), args);
+  await runYtDlpWithFormatFallback(
+    [
+      ...baseYtDlpArgs(),
+      "--download-sections",
+      section,
+      "--force-keyframes-at-cuts",
+      "-f",
+      FORMAT_CHAINS[0],
+      "-o",
+      outputPath,
+    ],
+    youtubeUrl
+  );
 }

@@ -20,6 +20,128 @@ export function getRendersDir(sessionId: string): string {
   return path.join(getStorageRoot(), "renders", sessionId);
 }
 
+export function getSessionStorageDirs(sessionId: string): string[] {
+  return [
+    getUploadDir(sessionId),
+    getFramesDir(sessionId),
+    getRendersDir(sessionId),
+  ];
+}
+
+export async function getDirectorySizeBytes(dirPath: string): Promise<number> {
+  const fs = await import("fs/promises");
+  if (!existsSync(dirPath)) return 0;
+
+  let total = 0;
+  const entries = await fs.readdir(dirPath, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      total += await getDirectorySizeBytes(full);
+    } else {
+      try {
+        total += (await fs.stat(full)).size;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT") throw err;
+      }
+    }
+  }
+  return total;
+}
+
+export async function getSessionStorageBytes(sessionId: string): Promise<number> {
+  let total = 0;
+  for (const dir of getSessionStorageDirs(sessionId)) {
+    total += await getDirectorySizeBytes(dir);
+  }
+  return total;
+}
+
+/** Remove all on-disk files for a session (uploads, frames, renders). */
+export async function deleteSessionStorage(sessionId: string): Promise<void> {
+  const fs = await import("fs/promises");
+  for (const dir of getSessionStorageDirs(sessionId)) {
+    if (existsSync(dir)) {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  }
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
+/** yt-dlp partial / HLS fragment files — not stable recording outputs */
+export function isYtDlpTempFile(filename: string): boolean {
+  const lower = filename.toLowerCase();
+  return (
+    lower.endsWith(".part") ||
+    lower.endsWith(".ytdl") ||
+    lower.includes("-frag") ||
+    lower.endsWith(".tmp") ||
+    lower.endsWith(".temp")
+  );
+}
+
+export function isMergedSourceFile(filename: string): boolean {
+  return /^source\.(mkv|mp4|webm|mov)$/i.test(filename);
+}
+
+async function safeStatSize(filePath: string): Promise<number | null> {
+  const fs = await import("fs/promises");
+  try {
+    return (await fs.stat(filePath)).size;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+/**
+ * Pick the best yt-dlp output file in a session upload folder.
+ * Ignores HLS fragments and tolerates files disappearing during live capture.
+ */
+export async function findBestSourceFileInDir(
+  uploadDir: string
+): Promise<string | null> {
+  const fs = await import("fs/promises");
+  if (!existsSync(uploadDir)) return null;
+
+  const files = await fs.readdir(uploadDir);
+  const candidates = files.filter(
+    (f) => f.startsWith("source.") && !isYtDlpTempFile(f)
+  );
+  if (candidates.length === 0) return null;
+
+  const merged = candidates.filter(isMergedSourceFile);
+  const pool =
+    merged.length > 0
+      ? merged
+      : candidates.filter((f) => !/\.f\d+\./i.test(f));
+
+  const searchPool = pool.length > 0 ? pool : candidates;
+
+  let bestPath: string | null = null;
+  let bestSize = 0;
+
+  for (const name of searchPool) {
+    const full = path.join(uploadDir, name);
+    const size = await safeStatSize(full);
+    if (size == null) continue;
+    if (size > bestSize) {
+      bestSize = size;
+      bestPath = full;
+    }
+  }
+
+  return bestPath;
+}
+
 export async function ensureDir(dirPath: string): Promise<void> {
   const fs = await import("fs/promises");
   await fs.mkdir(dirPath, { recursive: true });
@@ -79,7 +201,29 @@ function contentTypeForFile(filePath: string): string {
   if (ext === ".webm") return "video/webm";
   if (ext === ".mkv") return "video/x-matroska";
   if (ext === ".srt") return "text/plain";
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".png") return "image/png";
   return "application/octet-stream";
+}
+
+/** Serve a file for inline display (images, video preview). */
+export async function serveStorageFileInline(
+  relativePath: string
+): Promise<Response> {
+  const fullPath = resolveStoragePath(relativePath);
+  if (!existsSync(fullPath)) {
+    return new Response("File not found", { status: 404 });
+  }
+
+  const data = await readFileFs(fullPath);
+  return new Response(new Uint8Array(data), {
+    status: 200,
+    headers: {
+      "Content-Type": contentTypeForFile(fullPath),
+      "Content-Length": String(data.byteLength),
+      "Cache-Control": "public, max-age=3600",
+    },
+  });
 }
 
 /** Stream a file from storage with forced-download headers. */

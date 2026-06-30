@@ -10,8 +10,16 @@ import {
   ensureDir,
   toRelativeStoragePath,
   resolveStoragePath,
+  findBestSourceFileInDir,
 } from "@/lib/storage";
-import { getYtDlpPath, isYtDlpAvailable } from "@/services/youtubeDownloadService";
+import {
+  getYtDlpPath,
+  isYtDlpAvailable,
+  baseYtDlpArgs,
+} from "@/services/youtubeDownloadService";
+
+const LIVE_FORMAT =
+  "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best[height<=1080]/best";
 
 /** In-memory handles for active yt-dlp recording processes (dev server). */
 const activeRecordings = new Map<string, ChildProcess>();
@@ -20,36 +28,12 @@ function isLiveStatus(liveStatus: string | null | undefined): boolean {
   return liveStatus === "live" || liveStatus === "upcoming";
 }
 
-function isVodStatus(liveStatus: string | null | undefined): boolean {
-  return (
-    liveStatus === "post_live" ||
-    liveStatus === "none" ||
-    liveStatus === "completed" ||
-    !liveStatus
-  );
+export function shouldUseLiveRecording(liveStatus: string | null | undefined): boolean {
+  return isLiveStatus(liveStatus);
 }
 
 async function findRecordingFile(uploadDir: string): Promise<string | null> {
-  if (!existsSync(uploadDir)) return null;
-  const files = await fs.readdir(uploadDir);
-  const candidates = files.filter(
-    (f) =>
-      f.startsWith("source.") &&
-      !f.endsWith(".part") &&
-      !f.endsWith(".ytdl")
-  );
-  if (candidates.length === 0) return null;
-  // Prefer mkv/mp4 with largest size (active recording)
-  let best = candidates[0];
-  let bestSize = 0;
-  for (const f of candidates) {
-    const stat = await fs.stat(path.join(uploadDir, f));
-    if (stat.size > bestSize) {
-      bestSize = stat.size;
-      best = f;
-    }
-  }
-  return path.join(uploadDir, best);
+  return findBestSourceFileInDir(uploadDir);
 }
 
 async function upsertSourceFromFile(
@@ -58,7 +42,14 @@ async function upsertSourceFromFile(
   youtubeVideoId: string,
   isLiveRecording: boolean
 ) {
-  const stat = await fs.stat(absolutePath);
+  let stat;
+  try {
+    stat = await fs.stat(absolutePath);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return null;
+    throw err;
+  }
   const relativePath = toRelativeStoragePath(absolutePath);
 
   let probe;
@@ -134,12 +125,12 @@ export async function startLiveRecording(streamSessionId: string) {
 
   const ytDlp = getYtDlpPath();
   const args = [
+    ...baseYtDlpArgs(),
     "--live-from-start",
     "-f",
-    "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+    LIVE_FORMAT,
     "--merge-output-format",
     "mkv",
-    "--no-playlist",
     "--no-part",
     "-o",
     outputPath,
@@ -221,6 +212,15 @@ export async function syncLiveRecording(streamSessionId: string) {
     session.liveRecording?.status === "recording"
   );
 
+  if (!sourceMedia) {
+    const state = session.liveRecording;
+    return {
+      status: state?.status ?? "recording",
+      recordedSeconds: state?.recordedSeconds ?? 0,
+      sourceMedia: null,
+    };
+  }
+
   const recordedSeconds = sourceMedia.durationSeconds ?? 0;
 
   await prisma.liveRecordingState.upsert({
@@ -256,6 +256,17 @@ export async function stopLiveRecording(streamSessionId: string) {
   }
   activeRecordings.delete(streamSessionId);
 
+  const state = await prisma.liveRecordingState.findUnique({
+    where: { streamSessionId },
+  });
+  if (state?.pid && !proc?.pid) {
+    try {
+      process.kill(state.pid);
+    } catch {
+      // process may have already exited
+    }
+  }
+
   await prisma.liveRecordingState.updateMany({
     where: { streamSessionId },
     data: { status: "stopped" },
@@ -271,17 +282,30 @@ export async function stopLiveRecording(streamSessionId: string) {
 
 /** Unified entry: live → record, VOD → full download. */
 export async function acquireSourceMedia(streamSessionId: string) {
+  const { refreshSessionLiveMetadata } = await import("@/services/youtubeService");
+  try {
+    await refreshSessionLiveMetadata(streamSessionId);
+  } catch {
+    // continue with cached metadata
+  }
+
   const session = await prisma.streamSession.findUnique({
     where: { id: streamSessionId },
     include: { sourceMedia: { take: 1 } },
   });
   if (!session) throw new Error("Session not found");
 
-  if (isLiveStatus(session.liveStatus) && !isVodStatus(session.liveStatus)) {
+  const useLiveRecording =
+    shouldUseLiveRecording(session.liveStatus) ||
+    (!!session.actualStartTime &&
+      session.liveStatus !== "post_live" &&
+      session.liveStatus !== "completed" &&
+      session.liveStatus !== "none");
+
+  if (useLiveRecording) {
     return startLiveRecording(streamSessionId);
   }
 
-  // VOD / post-live — use full download
   const { downloadSourceFromYouTube } = await import(
     "@/services/youtubeDownloadService"
   );

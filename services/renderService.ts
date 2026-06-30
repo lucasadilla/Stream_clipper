@@ -11,6 +11,7 @@ import {
 import { generateSrt } from "@/lib/time";
 import { getTranscriptChunksForRange } from "@/services/transcriptService";
 import { ensureClipSourceForRender } from "@/services/clipSourceService";
+import type { RenderFormat } from "@/lib/renderFormat";
 
 export interface RenderShortParams {
   streamSessionId: string;
@@ -18,6 +19,7 @@ export interface RenderShortParams {
   clipSuggestionId?: string;
   startTimeSeconds: number;
   endTimeSeconds: number;
+  format?: RenderFormat;
   layout?: "center_crop" | "facecam_overlay" | "facecam_top_gameplay_bottom" | "gameplay_full";
   includeCaptions?: boolean;
 }
@@ -29,6 +31,7 @@ export async function renderShort(params: RenderShortParams) {
     clipSuggestionId,
     startTimeSeconds,
     endTimeSeconds,
+    format = "vertical",
     layout = "center_crop",
     includeCaptions = true,
   } = params;
@@ -64,7 +67,7 @@ export async function renderShort(params: RenderShortParams) {
   const rendersDir = getRendersDir(streamSessionId);
   await ensureDir(rendersDir);
 
-  const outputFilename = `clip-${clipId}.mp4`;
+  const outputFilename = `clip-${clipId}-${format}.mp4`;
   const outputPath = path.join(rendersDir, outputFilename);
   const relativeOutput = toRelativeStoragePath(outputPath);
 
@@ -123,6 +126,7 @@ export async function renderShort(params: RenderShortParams) {
       outputPath,
       startTimeSeconds: renderStart,
       endTimeSeconds: renderEnd,
+      format,
       layout,
       srtPath,
       facecamRegion: facecam

@@ -31,6 +31,29 @@ export async function createStreamSession(youtubeUrl: string) {
   return session;
 }
 
+/** Refresh live status and chat id from YouTube (streams can go live after session creation). */
+export async function refreshSessionLiveMetadata(streamSessionId: string) {
+  const session = await prisma.streamSession.findUnique({
+    where: { id: streamSessionId },
+  });
+  if (!session) return null;
+
+  const metadata = await fetchYouTubeMetadata(session.youtubeVideoId);
+
+  return prisma.streamSession.update({
+    where: { id: streamSessionId },
+    data: {
+      title: metadata.title,
+      liveStatus: metadata.liveStatus,
+      actualStartTime: metadata.actualStartTime,
+      scheduledStartTime: metadata.scheduledStartTime,
+      concurrentViewers: metadata.concurrentViewers,
+      activeLiveChatId: metadata.activeLiveChatId,
+      metadataJson: toJsonValue(metadata.raw),
+    },
+  });
+}
+
 export async function getStreamSession(sessionId: string) {
   return prisma.streamSession.findUnique({
     where: { id: sessionId },

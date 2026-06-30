@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { LIVE_TICK_MS } from "@/lib/timelineConstants";
 
 interface ChatMessage {
   id: string;
@@ -56,17 +57,8 @@ export function ChatPanel({
     }
   }
 
-  async function pollChat() {
-    try {
-      await fetch(`/api/sessions/${sessionId}/chat/start`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "poll" }),
-      });
-      await fetchMessages();
-    } catch {
-      // silent poll failure
-    }
+  async function refreshMessages() {
+    await fetchMessages();
   }
 
   useEffect(() => {
@@ -82,7 +74,8 @@ export function ChatPanel({
 
   useEffect(() => {
     if (tracking) {
-      pollRef.current = setInterval(pollChat, 8000);
+      // Ingestion runs via live-tick; refresh display from DB only
+      pollRef.current = setInterval(refreshMessages, LIVE_TICK_MS);
       return () => {
         if (pollRef.current) clearInterval(pollRef.current);
       };
@@ -90,9 +83,9 @@ export function ChatPanel({
   }, [tracking, sessionId]);
 
   return (
-    <div className="rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] flex flex-col h-64">
-      <div className="p-3 border-b border-[var(--color-card-border)] flex items-center justify-between">
-        <h3 className="font-semibold text-sm">Live Chat</h3>
+    <div className="flex flex-col h-full min-h-[200px] lg:min-h-0 bg-[#141414]">
+      <div className="p-3 border-b border-[#2a2a2a] flex items-center justify-between shrink-0">
+        <h3 className="font-semibold text-xs text-[#aaa]">Live Chat</h3>
         {hasLiveChat && !tracking && (
           <button
             onClick={startTracking}

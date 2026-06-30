@@ -16,33 +16,56 @@ declare global {
 }
 
 export interface YouTubePlayerHandle {
-  seekTo: (seconds: number) => void;
+  seekTo: (seconds: number, options?: { play?: boolean }) => void;
   play: () => void;
   pause: () => void;
   getCurrentTime: () => number;
+  getDuration: () => number;
 }
 
 interface YouTubePlayerProps {
   videoId: string;
   onTimeUpdate?: (time: number) => void;
+  onDurationChange?: (duration: number) => void;
+  /** When true, player fills its parent height instead of using aspect-video */
+  fillContainer?: boolean;
 }
 
 export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>(
-  function YouTubePlayer({ videoId, onTimeUpdate }, ref) {
+  function YouTubePlayer({ videoId, onTimeUpdate, onDurationChange, fillContainer }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
     const playerRef = useRef<YT.Player | null>(null);
     const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const durationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-    const seekTo = useCallback((seconds: number) => {
-      playerRef.current?.seekTo(seconds, true);
-      playerRef.current?.playVideo();
-    }, []);
+    const reportDuration = useCallback(() => {
+      const player = playerRef.current;
+      if (!player?.getDuration) return;
+      const d = player.getDuration();
+      if (d > 0) onDurationChange?.(d);
+    }, [onDurationChange]);
+
+    const seekTo = useCallback((seconds: number, options?: { play?: boolean }) => {
+      const player = playerRef.current;
+      if (!player) return;
+      player.seekTo(seconds, true);
+      if (options?.play === false) {
+        player.pauseVideo();
+      } else {
+        player.playVideo();
+      }
+      // Keep timeline playhead in sync while scrubbing
+      window.setTimeout(() => {
+        onTimeUpdate?.(player.getCurrentTime());
+      }, 80);
+    }, [onTimeUpdate]);
 
     useImperativeHandle(ref, () => ({
       seekTo,
       play: () => playerRef.current?.playVideo(),
       pause: () => playerRef.current?.pauseVideo(),
       getCurrentTime: () => playerRef.current?.getCurrentTime() ?? 0,
+      getDuration: () => playerRef.current?.getDuration?.() ?? 0,
     }));
 
     useEffect(() => {
@@ -58,6 +81,10 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
             modestbranding: 1,
           },
           events: {
+            onReady: () => {
+              reportDuration();
+              durationIntervalRef.current = setInterval(reportDuration, 2000);
+            },
             onStateChange: (event: YT.OnStateChangeEvent) => {
               if (event.data === window.YT.PlayerState.PLAYING) {
                 intervalRef.current = setInterval(() => {
@@ -87,12 +114,19 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
 
       return () => {
         if (intervalRef.current) clearInterval(intervalRef.current);
+        if (durationIntervalRef.current) clearInterval(durationIntervalRef.current);
         playerRef.current?.destroy();
       };
-    }, [videoId, onTimeUpdate]);
+    }, [videoId, onTimeUpdate, reportDuration]);
 
     return (
-      <div className="relative w-full aspect-video rounded-xl overflow-hidden bg-black border border-[var(--color-card-border)]">
+      <div
+        className={
+          fillContainer
+            ? "relative w-full h-full rounded-xl overflow-hidden bg-black border border-[#2a2a2a]"
+            : "relative w-full aspect-video rounded-xl overflow-hidden bg-black border border-[var(--color-card-border)]"
+        }
+      >
         <div ref={containerRef} className="absolute inset-0" />
       </div>
     );

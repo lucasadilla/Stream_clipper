@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { z } from "zod";
 import type { RagSearchResult } from "@/lib/rag";
 import { formatSeconds } from "@/lib/time";
+import { isPlaceholderTranscript } from "@/services/transcriptionSyncService";
 
 const CHAT_MODEL = "gpt-4o-mini";
 
@@ -30,13 +31,96 @@ export const clipSuggestionSchema = z.object({
   ]),
 });
 
+export const timestampReferenceSchema = z.object({
+  timeSeconds: z.number(),
+  label: z.string(),
+  quote: z.string().optional(),
+});
+
+export const askResponseSchema = z.object({
+  found: z.boolean(),
+  answer: z.string(),
+  timestamps: z.array(timestampReferenceSchema).optional(),
+});
+
 export const aiResponseSchema = z.object({
   answer: z.string(),
   clipSuggestions: z.array(clipSuggestionSchema).optional(),
+  timestamps: z.array(timestampReferenceSchema).optional(),
+  found: z.boolean().optional(),
 });
 
 export type AiResponse = z.infer<typeof aiResponseSchema>;
+export type AskResponse = z.infer<typeof askResponseSchema>;
 export type ClipSuggestionInput = z.infer<typeof clipSuggestionSchema>;
+export type TimestampReference = z.infer<typeof timestampReferenceSchema>;
+
+const TRANSCRIPT_SOURCES = new Set<RagSearchResult["sourceType"]>([
+  "transcript",
+  "chat_window",
+]);
+
+export function getTranscriptContext(results: RagSearchResult[]) {
+  return results.filter(
+    (r) =>
+      TRANSCRIPT_SOURCES.has(r.sourceType) &&
+      r.startTimeSeconds != null &&
+      r.endTimeSeconds != null &&
+      !isPlaceholderTranscript(r.text) &&
+      r.text !== "[silence]" &&
+      r.text !== "[processing error]"
+  );
+}
+
+export function bestTranscriptSimilarity(results: RagSearchResult[]) {
+  const hits = results.filter((r) => TRANSCRIPT_SOURCES.has(r.sourceType));
+  if (hits.length === 0) return 0;
+  return Math.max(...hits.map((r) => r.similarity ?? 0));
+}
+
+function timestampInContext(timeSeconds: number, context: RagSearchResult[]) {
+  return context.some(
+    (r) =>
+      r.startTimeSeconds != null &&
+      r.endTimeSeconds != null &&
+      timeSeconds >= r.startTimeSeconds - 3 &&
+      timeSeconds <= r.endTimeSeconds + 3
+  );
+}
+
+function quoteMatchesContext(quote: string, context: RagSearchResult[]) {
+  const needle = quote.toLowerCase().trim();
+  if (needle.length < 4) return true;
+  const slice = needle.slice(0, Math.min(needle.length, 40));
+  return context.some((r) => r.text.toLowerCase().includes(slice));
+}
+
+export function validateAskResponse(
+  raw: AskResponse,
+  context: RagSearchResult[]
+): AskResponse {
+  if (!raw.found) {
+    return { found: false, answer: raw.answer, timestamps: [] };
+  }
+
+  const transcriptCtx = getTranscriptContext(context);
+  const timestamps = (raw.timestamps ?? []).filter(
+    (ts) =>
+      timestampInContext(ts.timeSeconds, transcriptCtx) &&
+      (!ts.quote || quoteMatchesContext(ts.quote, transcriptCtx))
+  );
+
+  if ((raw.timestamps?.length ?? 0) > 0 && timestamps.length === 0) {
+    return {
+      found: false,
+      answer:
+        "I couldn't find that in the transcript. It may not have happened in this stream, or that part hasn't been transcribed yet.",
+      timestamps: [],
+    };
+  }
+
+  return { found: true, answer: raw.answer, timestamps };
+}
 
 function buildContextBlock(results: RagSearchResult[]): string {
   return results
@@ -110,53 +194,69 @@ STRICT RULES:
 export async function askStreamAI(
   userMessage: string,
   contextResults: RagSearchResult[],
-  streamTitle?: string
-): Promise<AiResponse> {
+  streamTitle?: string,
+  history: Array<{ role: "user" | "assistant"; content: string }> = []
+): Promise<AskResponse> {
   const client = getOpenAI();
-  const context = buildContextBlock(contextResults);
+  const context = buildContextBlock(getTranscriptContext(contextResults));
 
-  const systemPrompt = `You help creators clip specific moments from YouTube livestreams.
+  const systemPrompt = `You answer questions about a YouTube livestream using ONLY the transcript/chat excerpts provided.
 
 Stream title: ${streamTitle ?? "Unknown"}
 
 Return JSON:
 {
-  "answer": "Brief helpful response",
-  "clipSuggestions": [{
-    "title": "Use REAL chat quotes or transcript words (max 60 chars)",
-    "startTimeSeconds": 840,
-    "endTimeSeconds": 870,
-    "reason": "Quote exact chat messages from context. Explain WHAT happened in plain language.",
-    "confidence": 0.85,
-    "suggestedLayout": "center_crop"
-  }]
+  "found": true,
+  "answer": "Conversational reply — like a helpful chat assistant",
+  "timestamps": [
+    {
+      "timeSeconds": 872,
+      "label": "Short label",
+      "quote": "Exact words copied from the provided context"
+    }
+  ]
+}
+
+CRITICAL — when the user asks about something NOT in the context:
+{
+  "found": false,
+  "answer": "I couldn't find that in the transcript so far. [brief suggestion: rephrase, wait for more transcript, or try a different description]",
+  "timestamps": []
 }
 
 RULES:
-- NEVER use generic titles like "Chat hype" or "Loud moment" — use actual quotes
-- reason MUST include quoted chat/transcript from the context provided
-- Clips 20-45 seconds, centered on the action
-- Include clipSuggestions when user asks for clips/moments/shorts
-- suggestedLayout: center_crop unless facecam mentioned`;
+- found MUST be false if the event/topic is not clearly supported by the context excerpts
+- NEVER guess, infer, or fabricate moments — if unsure, set found: false
+- When found is true, timestamps.timeSeconds MUST fall inside a context time range
+- quote MUST be copied verbatim from context (short excerpt)
+- Only include timestamps when the user wants a time/moment; general questions can omit them
+- Keep answers short and conversational (1-3 sentences)
+- Do NOT return clipSuggestions`;
+
+  const chatMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+    { role: "system", content: systemPrompt },
+    ...history.slice(-8).map((m) => ({
+      role: m.role as "user" | "assistant",
+      content: m.content,
+    })),
+    {
+      role: "user",
+      content: `Transcript excerpts:\n${context || "(empty — no transcript yet)"}\n\nQuestion: ${userMessage}`,
+    },
+  ];
 
   const response = await client.chat.completions.create({
     model: CHAT_MODEL,
-    messages: [
-      { role: "system", content: systemPrompt },
-      {
-        role: "user",
-        content: `Context from stream analysis:\n${context}\n\nUser question: ${userMessage}`,
-      },
-    ],
+    messages: chatMessages,
     response_format: { type: "json_object" },
-    temperature: 0.5,
+    temperature: 0.1,
   });
 
   const content = response.choices[0]?.message?.content;
   if (!content) throw new Error("No AI response");
 
   const parsed = JSON.parse(content) as unknown;
-  return aiResponseSchema.parse(parsed);
+  return askResponseSchema.parse(parsed);
 }
 
 export async function generateChatWindowSummary(

@@ -1,7 +1,13 @@
 import path from "path";
 import { toJsonValue } from "@/lib/utils";
+import { LIVE_SEGMENT_SECONDS } from "@/lib/timelineConstants";
+import { TRANSCRIPTION_HEAVY_BACKLOG_SECONDS } from "@/lib/transcriptionConstants";
 import { prisma } from "@/lib/db";
 import { probeMedia } from "@/lib/ffmpeg";
+import {
+  getTranscriptionBacklog,
+  syncTranscription,
+} from "@/services/transcriptionSyncService";
 import {
   getUploadDir,
   ensureDir,
@@ -9,10 +15,9 @@ import {
   isAllowedVideoFile,
 } from "@/lib/storage";
 
-export async function saveSourceMedia(
-  streamSessionId: string,
-  file: File
-) {
+const MIN_SEGMENT_SECONDS = 3;
+
+export async function saveSourceMedia(streamSessionId: string, file: File) {
   if (!isAllowedVideoFile(file.name, file.type)) {
     throw new Error("Invalid file type. Accepted: mp4, mov, webm, mkv");
   }
@@ -49,7 +54,6 @@ export async function saveSourceMedia(
     };
   }
 
-  // Remove previous source media records
   await prisma.sourceMedia.deleteMany({ where: { streamSessionId } });
 
   return prisma.sourceMedia.create({
@@ -76,61 +80,44 @@ export async function processVideoIncremental(streamSessionId: string) {
   if (!sourceMedia) return { skipped: true, reason: "no_media" };
 
   const recorded = sourceMedia.durationSeconds ?? 0;
-  if (recorded < 25) return { skipped: true, reason: "too_short" };
+  if (recorded < MIN_SEGMENT_SECONDS) return { skipped: true, reason: "too_short" };
 
-  const lastChunk = await prisma.transcriptChunk.findFirst({
-    where: { streamSessionId },
-    orderBy: { endTimeSeconds: "desc" },
+  const session = await prisma.streamSession.findUnique({
+    where: { id: streamSessionId },
+    select: { liveStatus: true },
   });
-  const fromSeconds = lastChunk?.endTimeSeconds ?? 0;
-  if (recorded - fromSeconds < 20) {
-    return { skipped: true, reason: "already_processed" };
+  const isLive =
+    session?.liveStatus === "live" || session?.liveStatus === "upcoming";
+
+  const { backlogSeconds } = await getTranscriptionBacklog(streamSessionId);
+  const transcription = await syncTranscription(streamSessionId, { isLive });
+  const heavyBacklog = backlogSeconds > TRANSCRIPTION_HEAVY_BACKLOG_SECONDS;
+
+  if (
+    !heavyBacklog &&
+    !transcription.skipped &&
+    (transcription.transcribedSegments ?? 0) > 0 &&
+    isLive
+  ) {
+    const { analyzeAudioSegment } = await import("@/services/audioAnalysisService");
+    const segmentEnd = transcription.transcribedThrough ?? LIVE_SEGMENT_SECONDS;
+    const fromSeconds = Math.max(0, segmentEnd - LIVE_SEGMENT_SECONDS);
+    await analyzeAudioSegment(
+      streamSessionId,
+      sourceMedia.filePath,
+      fromSeconds,
+      segmentEnd
+    );
   }
-
-  const segmentEnd = Math.min(fromSeconds + 30, recorded);
-  const segments = [
-    {
-      startTimeSeconds: fromSeconds,
-      endTimeSeconds: segmentEnd,
-      text: `[Live transcript ${Math.floor(fromSeconds)}s–${Math.floor(segmentEnd)}s]`,
-    },
-  ];
-
-  const { createEmbedding } = await import("@/lib/embeddings");
-  const { storeEmbedding } = await import("@/lib/rag");
-
-  for (const seg of segments) {
-    const chunk = await prisma.transcriptChunk.create({
-      data: {
-        streamSessionId,
-        startTimeSeconds: seg.startTimeSeconds,
-        endTimeSeconds: seg.endTimeSeconds,
-        text: seg.text,
-        rawJson: toJsonValue({ live: true, segment: true }),
-      },
-    });
-
-    try {
-      const embedding = await createEmbedding(seg.text);
-      await storeEmbedding("TranscriptChunk", chunk.id, embedding);
-    } catch {
-      // embeddings optional during live
-    }
-  }
-
-  const { analyzeAudioSegment } = await import("@/services/audioAnalysisService");
-  await analyzeAudioSegment(
-    streamSessionId,
-    sourceMedia.filePath,
-    fromSeconds,
-    segmentEnd
-  );
 
   return {
-    skipped: false,
-    transcriptChunks: 1,
-    fromSeconds,
-    toSeconds: segmentEnd,
+    skipped: transcription.skipped,
+    reason: transcription.reason,
+    transcriptChunks: transcription.transcribedSegments ?? 0,
+    transcribedThrough: transcription.transcribedThrough,
+    recordedSeconds: transcription.recordedSeconds,
+    audioSecondsProcessed: transcription.audioSecondsProcessed,
+    chunksProcessed: transcription.chunksProcessed,
   };
 }
 
@@ -140,18 +127,15 @@ export async function processVideo(streamSessionId: string) {
     orderBy: { createdAt: "desc" },
   });
   if (!sourceMedia) {
-    throw new Error(
-      "Source video not ready. Wait for YouTube download to finish or click Download from YouTube."
-    );
+    throw new Error("Source video not ready. Wait for YouTube download to finish.");
   }
 
   const { generateTranscript } = await import("@/services/transcriptService");
   const { analyzeAudio } = await import("@/services/audioAnalysisService");
   const { analyzeVisual } = await import("@/services/visualAnalysisService");
   const { detectFacecamRegion } = await import("@/services/facecamDetectionService");
-  const { getFramesDir } = await import("@/lib/storage");
+  const { getFramesDir, resolveStoragePath } = await import("@/lib/storage");
   const { extractFrames } = await import("@/lib/ffmpeg");
-  const { resolveStoragePath } = await import("@/lib/storage");
 
   const transcript = await generateTranscript(
     streamSessionId,
@@ -160,7 +144,6 @@ export async function processVideo(streamSessionId: string) {
   const audio = await analyzeAudio(streamSessionId, sourceMedia.filePath);
   const visual = await analyzeVisual(streamSessionId, sourceMedia.filePath);
 
-  // Facecam detection on extracted frames
   const framesDir = getFramesDir(streamSessionId);
   const fullPath = resolveStoragePath(sourceMedia.filePath);
   const framePaths = await extractFrames(fullPath, framesDir, 2);

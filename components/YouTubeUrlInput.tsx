@@ -1,29 +1,41 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { fetchJson } from "@/lib/apiClient";
+import { normalizeUserYoutubeUrl } from "@/lib/youtube";
 
 export function YouTubeUrlInput() {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const router = useRouter();
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+
+    const normalized = normalizeUserYoutubeUrl(url);
+    if (!normalized.trim()) {
+      setError("Please enter a YouTube URL");
+      return;
+    }
+
     setLoading(true);
 
     try {
-      const res = await fetch("/api/sessions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ youtubeUrl: url }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Failed to create session");
-      router.push(`/sessions/${data.session.id}`);
+      const { ok, data } = await fetchJson<{ session?: { id: string }; error?: string }>(
+        "/api/sessions",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ youtubeUrl: normalized }),
+        }
+      );
+      if (!ok) throw new Error(data.error ?? "Failed to create session");
+      if (!data.session?.id) throw new Error("Failed to create session");
+      // Full navigation avoids dev-mode RSC flight parse errors on client routing
+      window.location.assign(`/sessions/${data.session.id}`);
+      return;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
@@ -35,10 +47,10 @@ export function YouTubeUrlInput() {
     <form onSubmit={handleSubmit} className="w-full max-w-2xl">
       <div className="flex flex-col sm:flex-row gap-3">
         <input
-          type="url"
+          type="text"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          placeholder="https://www.youtube.com/watch?v=..."
+          placeholder="youtube.com/watch?v=... or paste live link"
           required
           className={cn(
             "flex-1 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)]",

@@ -14,10 +14,26 @@ export async function GET(
         prisma.eventWindow.findMany({
           where: { streamSessionId: sessionId },
           orderBy: { startTimeSeconds: "asc" },
+          select: {
+            id: true,
+            startTimeSeconds: true,
+            endTimeSeconds: true,
+            type: true,
+            summary: true,
+            score: true,
+            rawData: true,
+          },
         }),
         prisma.transcriptChunk.findMany({
           where: { streamSessionId: sessionId },
           orderBy: { startTimeSeconds: "asc" },
+          select: {
+            id: true,
+            startTimeSeconds: true,
+            endTimeSeconds: true,
+            text: true,
+            rawJson: true,
+          },
         }),
         prisma.audioEvent.findMany({
           where: { streamSessionId: sessionId },

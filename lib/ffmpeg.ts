@@ -1,5 +1,6 @@
 import { spawn } from "child_process";
 import path from "path";
+import type { RenderFormat } from "@/lib/renderFormat";
 
 export function getFfmpegPath(): string {
   return process.env.FFMPEG_PATH ?? "ffmpeg";
@@ -66,7 +67,19 @@ export async function probeMedia(filePath: string): Promise<MediaProbeResult> {
     filePath,
   ]);
 
-  const data = JSON.parse(stdout) as {
+  if (!stdout.trim()) {
+    return {
+      durationSeconds: 0,
+      width: 0,
+      height: 0,
+      fps: 0,
+      videoCodec: null,
+      audioCodec: null,
+      raw: {},
+    };
+  }
+
+  let data: {
     format?: { duration?: string };
     streams?: Array<{
       codec_type?: string;
@@ -77,6 +90,19 @@ export async function probeMedia(filePath: string): Promise<MediaProbeResult> {
       avg_frame_rate?: string;
     }>;
   };
+  try {
+    data = JSON.parse(stdout) as typeof data;
+  } catch {
+    return {
+      durationSeconds: 0,
+      width: 0,
+      height: 0,
+      fps: 0,
+      videoCodec: null,
+      audioCodec: null,
+      raw: {},
+    };
+  }
 
   const videoStream = data.streams?.find((s) => s.codec_type === "video");
   const audioStream = data.streams?.find((s) => s.codec_type === "audio");
@@ -102,6 +128,32 @@ export async function extractAudio(
 ): Promise<void> {
   await runCommand(getFfmpegPath(), [
     "-y",
+    "-i",
+    inputPath,
+    "-vn",
+    "-acodec",
+    "pcm_s16le",
+    "-ar",
+    "16000",
+    "-ac",
+    "1",
+    outputPath,
+  ]);
+}
+
+/** Extract mono 16 kHz WAV for a time range (Whisper-friendly). */
+export async function extractAudioSegment(
+  inputPath: string,
+  outputPath: string,
+  startSeconds: number,
+  durationSeconds: number
+): Promise<void> {
+  await runCommand(getFfmpegPath(), [
+    "-y",
+    "-ss",
+    String(Math.max(0, startSeconds)),
+    "-t",
+    String(Math.max(0.1, durationSeconds)),
     "-i",
     inputPath,
     "-vn",
@@ -178,6 +230,25 @@ export async function analyzeAudioVolume(
   return samples;
 }
 
+export async function extractFrameAt(
+  inputPath: string,
+  outputPath: string,
+  timeSeconds: number
+): Promise<void> {
+  await runCommand(getFfmpegPath(), [
+    "-y",
+    "-ss",
+    String(Math.max(0, timeSeconds)),
+    "-i",
+    inputPath,
+    "-frames:v",
+    "1",
+    "-q:v",
+    "3",
+    outputPath,
+  ]);
+}
+
 export async function extractFrames(
   inputPath: string,
   outputDir: string,
@@ -208,6 +279,7 @@ export interface RenderShortOptions {
   outputPath: string;
   startTimeSeconds: number;
   endTimeSeconds: number;
+  format?: RenderFormat;
   layout: "center_crop" | "facecam_overlay" | "facecam_top_gameplay_bottom" | "gameplay_full";
   width?: number;
   height?: number;
@@ -216,12 +288,18 @@ export interface RenderShortOptions {
   facecamRegion?: { x: number; y: number; width: number; height: number };
 }
 
+function subtitleFilter(srtPath: string): string {
+  const escapedSrt = srtPath.replace(/\\/g, "/").replace(/:/g, "\\:");
+  return `subtitles='${escapedSrt}':force_style='FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2,MarginV=80'`;
+}
+
 export async function renderShort(options: RenderShortOptions): Promise<void> {
   const {
     inputPath,
     outputPath,
     startTimeSeconds,
     endTimeSeconds,
+    format = "vertical",
     layout,
     width = 1080,
     height = 1920,
@@ -232,16 +310,62 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
   const duration = endTimeSeconds - startTimeSeconds;
   if (duration <= 0) throw new Error("Invalid clip duration");
 
+  if (format === "native") {
+    if (srtPath) {
+      const args = [
+        "-y",
+        "-ss",
+        String(startTimeSeconds),
+        "-t",
+        String(duration),
+        "-i",
+        inputPath,
+        "-vf",
+        subtitleFilter(srtPath),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "23",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        outputPath,
+      ];
+      await runCommand(getFfmpegPath(), args);
+      return;
+    }
+
+    const args = [
+      "-y",
+      "-ss",
+      String(startTimeSeconds),
+      "-t",
+      String(duration),
+      "-i",
+      inputPath,
+      "-c",
+      "copy",
+      "-avoid_negative_ts",
+      "make_zero",
+      outputPath,
+    ];
+    await runCommand(getFfmpegPath(), args);
+    return;
+  }
+
   let vf: string;
 
   switch (layout) {
     case "center_crop":
-      // Scale to cover 9:16 then crop center
       vf = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`;
       break;
     case "facecam_overlay":
     case "facecam_top_gameplay_bottom":
-      // MVP: fall back to center crop; full layout in renderService
       vf = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`;
       break;
     default:
@@ -249,9 +373,7 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
   }
 
   if (srtPath) {
-    // Escape path for ffmpeg subtitles filter (Windows-safe)
-    const escapedSrt = srtPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-    vf += `,subtitles='${escapedSrt}':force_style='FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2,MarginV=80'`;
+    vf += `,${subtitleFilter(srtPath)}`;
   }
 
   const args = [

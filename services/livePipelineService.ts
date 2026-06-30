@@ -1,9 +1,11 @@
 import { prisma } from "@/lib/db";
+import { TRANSCRIPTION_HEAVY_BACKLOG_SECONDS } from "@/lib/transcriptionConstants";
 import { syncLiveRecording } from "@/services/liveRecordingService";
 import { pollChatMessages } from "@/services/chatIngestionService";
 import { processChatWindows } from "@/services/eventWindowService";
-import { autoSuggestClips } from "@/services/suggestClipsService";
-import { processVideoIncremental } from "@/services/mediaService";
+import { syncTimelineThumbnails } from "@/services/timelineThumbnailService";
+import { getTranscriptionBacklog } from "@/services/transcriptionSyncService";
+import { refreshSessionLiveMetadata } from "@/services/youtubeService";
 
 function isLiveStatus(liveStatus: string | null | undefined): boolean {
   return (
@@ -26,23 +28,61 @@ export async function runLivePipeline(streamSessionId: string) {
 
   const results: Record<string, unknown> = {};
 
+  const fresh = await prisma.streamSession.findUnique({
+    where: { id: streamSessionId },
+    include: { chatTracking: true, liveRecording: true },
+  });
+  if (!fresh) throw new Error("Session not found");
+
+  try {
+    if (isLiveStatus(fresh.liveStatus)) {
+      results.metadata = await refreshSessionLiveMetadata(streamSessionId);
+      if (results.metadata && typeof results.metadata === "object") {
+        const m = results.metadata as {
+          liveStatus?: string | null;
+          title?: string | null;
+          concurrentViewers?: number | null;
+        };
+        results.metadata = {
+          liveStatus: m.liveStatus,
+          title: m.title,
+          concurrentViewers: m.concurrentViewers,
+        };
+      }
+    }
+  } catch (e) {
+    results.metadataError = e instanceof Error ? e.message : String(e);
+  }
+
   // Sync growing recording file
   if (
-    session.liveRecording?.status === "recording" ||
-    session.liveStatus === "live"
+    fresh.liveRecording?.status === "recording" ||
+    fresh.liveStatus === "live" ||
+    fresh.liveStatus === "upcoming"
   ) {
+    if (fresh.liveRecording?.status !== "recording") {
+      try {
+        const { acquireSourceMedia } = await import(
+          "@/services/liveRecordingService"
+        );
+        results.recordingStart = await acquireSourceMedia(streamSessionId);
+      } catch (e) {
+        results.recordingStartError =
+          e instanceof Error ? e.message : String(e);
+      }
+    }
     results.recording = await syncLiveRecording(streamSessionId);
   }
 
   // Poll chat if tracking is on
-  if (session.chatTracking?.isActive && session.activeLiveChatId) {
+  if (fresh.chatTracking?.isActive && fresh.activeLiveChatId) {
     try {
       results.chat = await pollChatMessages(streamSessionId);
       results.chatWindows = await processChatWindows(streamSessionId);
     } catch (e) {
       results.chatError = e instanceof Error ? e.message : String(e);
     }
-  } else if (session.activeLiveChatId && isLiveStatus(session.liveStatus)) {
+  } else if (fresh.activeLiveChatId && isLiveStatus(fresh.liveStatus)) {
     // Auto-start chat on first live tick
     try {
       const { startChatTracking } = await import(
@@ -55,25 +95,27 @@ export async function runLivePipeline(streamSessionId: string) {
     }
   }
 
-  // Auto-suggest clips from hype moments
-  if (isLiveStatus(session.liveStatus) || session.liveStatus === "post_live") {
-    results.suggestions = await autoSuggestClips(streamSessionId, 3);
-  }
+  // Auto-suggest clips removed from UI — skip to reduce API load
+  // if (isLiveStatus(session.liveStatus) || session.liveStatus === "post_live") {
+  //   results.suggestions = await autoSuggestClips(streamSessionId, 3);
+  // }
 
-  // Incremental media analysis on recorded portion (lightweight)
+  // Recording + chat only — transcription runs on /transcribe (avoids 2min+ live-tick hangs)
   const sourceMedia = await prisma.sourceMedia.findFirst({
     where: { streamSessionId },
     orderBy: { createdAt: "desc" },
   });
-  if (
-    sourceMedia &&
-    (sourceMedia.durationSeconds ?? 0) > 30 &&
-    isLiveStatus(session.liveStatus)
-  ) {
-    try {
-      results.processing = await processVideoIncremental(streamSessionId);
-    } catch (e) {
-      results.processingError = e instanceof Error ? e.message : String(e);
+
+  if (sourceMedia && (sourceMedia.durationSeconds ?? 0) >= 3) {
+    const { backlogSeconds } = await getTranscriptionBacklog(streamSessionId);
+    const heavyBacklog = backlogSeconds > TRANSCRIPTION_HEAVY_BACKLOG_SECONDS;
+
+    if (!heavyBacklog) {
+      try {
+        results.thumbnails = await syncTimelineThumbnails(streamSessionId);
+      } catch {
+        // thumbnails optional
+      }
     }
   }
 

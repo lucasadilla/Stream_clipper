@@ -6,6 +6,11 @@ import { extractAudio } from "@/lib/ffmpeg";
 import { createEmbedding } from "@/lib/embeddings";
 import { storeEmbedding } from "@/lib/rag";
 import { resolveStoragePath } from "@/lib/storage";
+import {
+  isWhisperAvailable,
+  transcribeWhisperAudio,
+} from "@/services/whisperTranscription";
+import { syncTranscription } from "@/services/transcriptionSyncService";
 
 export interface TranscriptSegment {
   startTimeSeconds: number;
@@ -18,32 +23,24 @@ export interface TranscriptionProvider {
   transcribe(audioPath: string): Promise<TranscriptSegment[]>;
 }
 
-/**
- * Stub transcription provider — replace with OpenAI Whisper or other provider.
- * Returns placeholder segments based on audio duration for MVP demo flow.
- */
-export class StubTranscriptionProvider implements TranscriptionProvider {
+export class OpenAIWhisperProvider implements TranscriptionProvider {
   async transcribe(audioPath: string): Promise<TranscriptSegment[]> {
-    const { probeMedia } = await import("@/lib/ffmpeg");
-    const probe = await probeMedia(audioPath);
-    const duration = probe.durationSeconds;
-    const segments: TranscriptSegment[] = [];
-    const chunkSize = 10;
-
-    for (let start = 0; start < duration; start += chunkSize) {
-      const end = Math.min(start + chunkSize, duration);
-      segments.push({
-        startTimeSeconds: start,
-        endTimeSeconds: end,
-        text: `[Transcript placeholder ${Math.floor(start)}s-${Math.floor(end)}s — connect Whisper API for real transcription]`,
-      });
-    }
-
-    return segments;
+    return transcribeWhisperAudio(audioPath, 0);
   }
 }
 
-let transcriptionProvider: TranscriptionProvider = new StubTranscriptionProvider();
+/**
+ * Fallback when OPENAI_API_KEY is missing — returns empty (no fake placeholders).
+ */
+export class NoOpTranscriptionProvider implements TranscriptionProvider {
+  async transcribe(): Promise<TranscriptSegment[]> {
+    return [];
+  }
+}
+
+let transcriptionProvider: TranscriptionProvider = isWhisperAvailable()
+  ? new OpenAIWhisperProvider()
+  : new NoOpTranscriptionProvider();
 
 export function setTranscriptionProvider(provider: TranscriptionProvider) {
   transcriptionProvider = provider;
@@ -53,42 +50,61 @@ export async function generateTranscript(
   streamSessionId: string,
   sourceFilePath: string
 ) {
-  const audioDir = path.join(
-    path.dirname(resolveStoragePath(sourceFilePath)),
-    "audio"
-  );
-  await fs.mkdir(audioDir, { recursive: true });
-  const audioPath = path.join(audioDir, "extracted.wav");
-
-  await extractAudio(resolveStoragePath(sourceFilePath), audioPath);
-  const segments = await transcriptionProvider.transcribe(audioPath);
-
-  // Clear existing chunks
-  await prisma.transcriptChunk.deleteMany({ where: { streamSessionId } });
-
-  const created = [];
-  for (const seg of segments) {
-    const chunk = await prisma.transcriptChunk.create({
-      data: {
-        streamSessionId,
-        startTimeSeconds: seg.startTimeSeconds,
-        endTimeSeconds: seg.endTimeSeconds,
-        text: seg.text,
-        rawJson: toJsonValue(seg),
-      },
-    });
-
-    try {
-      const embedding = await createEmbedding(seg.text);
-      await storeEmbedding("TranscriptChunk", chunk.id, embedding);
-    } catch (e) {
-      console.warn("Failed to embed transcript chunk:", e);
-    }
-
-    created.push(chunk);
+  if (!isWhisperAvailable()) {
+    throw new Error(
+      "OPENAI_API_KEY is required for transcription. Add it to your .env file."
+    );
   }
 
-  return { chunks: created.length };
+  await prisma.transcriptChunk.deleteMany({ where: { streamSessionId } });
+
+  let totalSegments = 0;
+  for (let pass = 0; pass < 200; pass++) {
+    const result = await syncTranscription(streamSessionId, {
+      isLive: false,
+      parallel: 4,
+    });
+    if (result.reason === "already_processed") break;
+    if (result.skipped && !result.transcribedSegments) break;
+    totalSegments += result.transcribedSegments ?? 0;
+    if ((result.transcribedThrough ?? 0) >= (result.recordedSeconds ?? 0)) break;
+  }
+
+  if (totalSegments === 0) {
+    const audioDir = path.join(
+      path.dirname(resolveStoragePath(sourceFilePath)),
+      "audio"
+    );
+    await fs.mkdir(audioDir, { recursive: true });
+    const audioPath = path.join(audioDir, "extracted.wav");
+    await extractAudio(resolveStoragePath(sourceFilePath), audioPath);
+
+    const segments = await transcriptionProvider.transcribe(audioPath);
+    for (const seg of segments) {
+      const chunk = await prisma.transcriptChunk.create({
+        data: {
+          streamSessionId,
+          startTimeSeconds: seg.startTimeSeconds,
+          endTimeSeconds: seg.endTimeSeconds,
+          text: seg.text,
+          rawJson: toJsonValue({ whisper: true }),
+        },
+      });
+      try {
+        const embedding = await createEmbedding(seg.text);
+        await storeEmbedding("TranscriptChunk", chunk.id, embedding);
+      } catch (e) {
+        console.warn("Failed to embed transcript chunk:", e);
+      }
+      totalSegments++;
+    }
+  }
+
+  const count = await prisma.transcriptChunk.count({
+    where: { streamSessionId },
+  });
+
+  return { chunks: count };
 }
 
 export async function getTranscriptChunksForRange(
@@ -104,4 +120,44 @@ export async function getTranscriptChunksForRange(
     },
     orderBy: { startTimeSeconds: "asc" },
   });
+}
+
+export async function getTranscriptionProgress(streamSessionId: string) {
+  const sourceMedia = await prisma.sourceMedia.findFirst({
+    where: { streamSessionId },
+    orderBy: { createdAt: "desc" },
+    select: { durationSeconds: true },
+  });
+
+  const recordedSeconds = sourceMedia?.durationSeconds ?? 0;
+
+  const lastWhisper = await prisma.transcriptChunk.findFirst({
+    where: {
+      streamSessionId,
+      NOT: {
+        text: { contains: "placeholder", mode: "insensitive" },
+      },
+    },
+    orderBy: { endTimeSeconds: "desc" },
+    select: { endTimeSeconds: true, rawJson: true, text: true },
+  });
+
+  const transcribedSeconds =
+    lastWhisper &&
+    (lastWhisper.rawJson as { whisper?: boolean } | null)?.whisper
+      ? lastWhisper.endTimeSeconds
+      : 0;
+
+  const chunkCount = await prisma.transcriptChunk.count({
+    where: { streamSessionId },
+  });
+
+  return {
+    recordedSeconds,
+    transcribedSeconds,
+    chunkCount,
+    isComplete:
+      recordedSeconds > 0 && transcribedSeconds >= recordedSeconds - 3,
+    whisperEnabled: isWhisperAvailable(),
+  };
 }

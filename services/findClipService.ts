@@ -168,6 +168,7 @@ export async function findClipFromDescription(
       clipSuggestionId: clip.id,
       startTimeSeconds: ai.startTimeSeconds,
       endTimeSeconds: ai.endTimeSeconds,
+      format: "vertical",
       layout: ai.suggestedLayout,
       includeCaptions: false,
     });
