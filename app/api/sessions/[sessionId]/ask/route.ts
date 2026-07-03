@@ -5,26 +5,46 @@ import { searchStreamContext } from "@/lib/rag";
 import {
   askStreamAI,
   bestTranscriptSimilarity,
+  buildKeywordAnswer,
   getTranscriptContext,
   validateAskResponse,
 } from "@/lib/ai";
-import { keywordTranscriptSearch } from "@/services/transcriptSearchService";
+import {
+  USE_KEYWORD_FAST_PATH,
+  USE_VECTOR_SEARCH_ON_ASK,
+  KEYWORD_FAST_PATH_MIN_HITS,
+  KEYWORD_FAST_PATH_MIN_SIMILARITY,
+} from "@/lib/aiCostConstants";
+import {
+  isTemporalQuestion,
+  keywordTranscriptSearch,
+} from "@/services/transcriptSearchService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import type { RagSearchResult } from "@/lib/rag";
 
 const SIMILARITY_THRESHOLD = 0.25;
 
+function sortByRelevance(results: RagSearchResult[]): RagSearchResult[] {
+  return [...results].sort((a, b) => {
+    const simDiff = (b.similarity ?? 0) - (a.similarity ?? 0);
+    if (simDiff !== 0) return simDiff;
+    return (b.score ?? 0) - (a.score ?? 0);
+  });
+}
+
 function mergeContext(
   vector: RagSearchResult[],
   keyword: RagSearchResult[]
 ): RagSearchResult[] {
-  const seen = new Set(vector.map((r) => r.id));
-  const merged = [...vector];
-  for (const hit of keyword) {
-    if (!seen.has(hit.id)) {
-      merged.push(hit);
-      seen.add(hit.id);
-    }
+  const seen = new Set<string>();
+  const merged: RagSearchResult[] = [];
+  for (const hit of [...keyword, ...vector]) {
+    // Key on content+time as well as id: duplicate transcript rows can exist.
+    const key = `${hit.startTimeSeconds ?? ""}|${hit.text}`;
+    if (seen.has(hit.id) || seen.has(key)) continue;
+    seen.add(hit.id);
+    seen.add(key);
+    merged.push(hit);
   }
   return merged;
 }
@@ -64,15 +84,19 @@ export async function POST(
     if (!session) return errorResponse("Session not found", 404);
 
     const timeFilter = parseTimeFilter(message);
-    const [vectorContext, keywordContext] = await Promise.all([
-      searchStreamContext(sessionId, message, {
-        limit: 20,
-        ...timeFilter,
-      }),
-      keywordTranscriptSearch(sessionId, message, 12),
-    ]);
+    const keywordContext = await keywordTranscriptSearch(sessionId, message, 12);
 
-    const context = mergeContext(vectorContext, keywordContext);
+    let vectorContext: RagSearchResult[] = [];
+    if (USE_VECTOR_SEARCH_ON_ASK || keywordContext.length === 0) {
+      vectorContext = await searchStreamContext(sessionId, message, {
+        limit: 12,
+        ...timeFilter,
+      });
+    }
+
+    const context = sortByRelevance(
+      mergeContext(vectorContext, keywordContext)
+    );
 
     const transcriptCtx = getTranscriptContext(context);
 
@@ -98,6 +122,26 @@ export async function POST(
       });
     }
 
+    const bestKeywordSim = keywordContext[0]?.similarity ?? 0;
+
+    // Strong keyword hit → return excerpt + timestamp without GPT (saves $ per question).
+    // Skip for "when did X happen?" — those need GPT to pick the right moment.
+    if (
+      USE_KEYWORD_FAST_PATH &&
+      !isTemporalQuestion(message) &&
+      keywordContext.length >= KEYWORD_FAST_PATH_MIN_HITS &&
+      bestKeywordSim >= KEYWORD_FAST_PATH_MIN_SIMILARITY
+    ) {
+      const fast = buildKeywordAnswer(message, keywordContext);
+      const validated = validateAskResponse(fast, context);
+      return jsonResponse({
+        found: validated.found,
+        answer: validated.answer,
+        timestamps: validated.timestamps ?? [],
+        contextUsed: transcriptCtx.length,
+      });
+    }
+
     const aiResponse = await askStreamAI(
       message,
       context,
@@ -118,6 +162,23 @@ export async function POST(
       return errorResponse(error.errors[0]?.message ?? "Invalid input", 400);
     }
     const message = error instanceof Error ? error.message : "AI request failed";
+    if (/invalid JSON|missing required fields/i.test(message)) {
+      return jsonResponse({
+        found: false,
+        answer: "Something went wrong formatting the AI reply — please try again.",
+        timestamps: [],
+        contextUsed: 0,
+      });
+    }
+    if (/exceeded your current quota/i.test(message)) {
+      return jsonResponse({
+        found: false,
+        answer:
+          "The AI provider is out of credits, so I can't search the transcript right now. Add credits and try again.",
+        timestamps: [],
+        contextUsed: 0,
+      });
+    }
     return errorResponse(message, 500);
   }
 }

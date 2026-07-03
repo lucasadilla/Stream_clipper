@@ -53,10 +53,16 @@ export function SessionStorageList() {
       const { ok, data } = await fetchJson<{
         error?: string;
         storageLabel?: string;
+        fullyRemoved?: boolean;
       }>(`/api/sessions/${sessionId}`, { method: "DELETE" });
       if (!ok) throw new Error(data.error ?? "Delete failed");
       await load();
       router.refresh();
+      if (data.fullyRemoved === false) {
+        console.warn(
+          "Session removed; some files were quarantined under storage/.orphaned/"
+        );
+      }
     } catch (err) {
       alert(err instanceof Error ? err.message : "Delete failed");
     } finally {

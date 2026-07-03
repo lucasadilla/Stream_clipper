@@ -1,14 +1,16 @@
 import path from "path";
 import fs from "fs/promises";
 import { prisma } from "@/lib/db";
-import { renderShort as ffmpegRender, isFfmpegAvailable } from "@/lib/ffmpeg";
+import { renderShort as ffmpegRender, isFfmpegAvailable, probeMedia } from "@/lib/ffmpeg";
+import { generateSrt } from "@/lib/time";
+import { formatCaptionTextForBurn } from "@/lib/captionStyles";
+import { buildCaptionTrack } from "@/lib/captionTrack";
 import {
   getRendersDir,
   ensureDir,
   resolveStoragePath,
   toRelativeStoragePath,
 } from "@/lib/storage";
-import { generateSrt } from "@/lib/time";
 import { getTranscriptChunksForRange } from "@/services/transcriptService";
 import { ensureClipSourceForRender } from "@/services/clipSourceService";
 import type { RenderFormat } from "@/lib/renderFormat";
@@ -91,6 +93,16 @@ export async function renderShort(params: RenderShortParams) {
 
     const inputPath = resolveStoragePath(renderSource.filePath);
     let srtPath: string | undefined;
+    let outputHeight = format === "vertical" ? 1920 : 1080;
+
+    if (format === "native") {
+      try {
+        const probe = await probeMedia(inputPath);
+        outputHeight = probe.height > 0 ? probe.height : 1080;
+      } catch {
+        outputHeight = 1080;
+      }
+    }
 
     if (includeCaptions) {
       const chunks = await getTranscriptChunksForRange(
@@ -99,11 +111,23 @@ export async function renderShort(params: RenderShortParams) {
         endTimeSeconds
       );
       if (chunks.length > 0) {
+        const captionLines = buildCaptionTrack(
+          chunks
+            .filter((c) => c.text.trim().length > 0)
+            .map((c) => ({
+              id: c.id ?? `chunk-${c.startTimeSeconds}`,
+              startTimeSeconds: c.startTimeSeconds,
+              endTimeSeconds: c.endTimeSeconds,
+              text: c.text,
+              rawJson: c.rawJson,
+            })),
+          format
+        );
         const srtContent = generateSrt(
-          chunks.map((c) => ({
+          captionLines.map((c) => ({
             startTimeSeconds: Math.max(0, c.startTimeSeconds - startTimeSeconds),
             endTimeSeconds: c.endTimeSeconds - startTimeSeconds,
-            text: c.text,
+            text: formatCaptionTextForBurn(c.text, format),
           }))
         );
         srtPath = path.join(rendersDir, `clip-${clipId}.srt`);
@@ -129,6 +153,8 @@ export async function renderShort(params: RenderShortParams) {
       format,
       layout,
       srtPath,
+      subtitleFormat: format,
+      outputHeight,
       facecamRegion: facecam
         ? {
             x: facecam.x,

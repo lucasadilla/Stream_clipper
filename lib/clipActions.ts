@@ -23,11 +23,15 @@ export async function saveClip(
   return data.clip as { id: string; title: string };
 }
 
-export async function renderClip(clipId: string, format: RenderFormat = "vertical") {
+export async function renderClip(
+  clipId: string,
+  format: RenderFormat = "vertical",
+  includeCaptions = true
+) {
   const res = await fetch(`/api/clips/${clipId}/render`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ includeCaptions: false, format }),
+    body: JSON.stringify({ includeCaptions, format }),
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error ?? "Render failed");
@@ -38,10 +42,11 @@ export async function saveAndRenderClip(
   sessionId: string,
   selection: ClipSelection,
   title?: string,
-  format: RenderFormat = "vertical"
+  format: RenderFormat = "vertical",
+  includeCaptions = true
 ) {
   const clip = await saveClip(sessionId, selection, title);
-  const result = await renderClip(clip.id, format);
+  const result = await renderClip(clip.id, format, includeCaptions);
   const url = result.downloadUrl ?? clipDownloadUrl(clip.id);
   const suffix = format === "native" ? "-native" : "-vertical";
   await triggerFileDownload(url, `${clip.title || "clip"}${suffix}.mp4`);

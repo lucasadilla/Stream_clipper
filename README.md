@@ -96,7 +96,9 @@ storage/          # Local uploads, frames, renders
 | Variable | Description |
 |----------|-------------|
 | `DATABASE_URL` | PostgreSQL connection string |
-| `OPENAI_API_KEY` | OpenAI API key |
+| `OPENAI_API_KEY` | OpenAI API key (optional if using OpenRouter) |
+| `OPENROUTER_API_KEY` | OpenRouter key — routes chat/embeddings/Whisper through cheaper models |
+| `OPENROUTER_CHAT_MODEL` | Chat model slug (default: `google/gemini-2.0-flash-001`) |
 | `YOUTUBE_API_KEY` | YouTube Data API v3 key |
 | `STORAGE_ROOT` | Local storage path (default: `./storage`) |
 | `FFMPEG_PATH` | FFmpeg binary (default: `ffmpeg`) |

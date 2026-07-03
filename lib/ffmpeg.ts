@@ -1,6 +1,7 @@
 import { spawn } from "child_process";
 import path from "path";
 import type { RenderFormat } from "@/lib/renderFormat";
+import { getFfmpegCaptionForceStyle } from "@/lib/captionStyles";
 
 export function getFfmpegPath(): string {
   return process.env.FFMPEG_PATH ?? "ffmpeg";
@@ -122,6 +123,30 @@ export async function probeMedia(filePath: string): Promise<MediaProbeResult> {
   };
 }
 
+/** Fast check whether a media file contains an audio stream (limited probe for growing files). */
+export async function hasAudioStream(filePath: string): Promise<boolean> {
+  try {
+    const { stdout } = await runCommand(getFfprobePath(), [
+      "-v",
+      "error",
+      "-probesize",
+      "5000000",
+      "-analyzeduration",
+      "5000000",
+      "-select_streams",
+      "a",
+      "-show_entries",
+      "stream=codec_type",
+      "-of",
+      "csv=p=0",
+      filePath,
+    ]);
+    return stdout.includes("audio");
+  } catch {
+    return false;
+  }
+}
+
 export async function extractAudio(
   inputPath: string,
   outputPath: string
@@ -146,16 +171,24 @@ export async function extractAudioSegment(
   inputPath: string,
   outputPath: string,
   startSeconds: number,
-  durationSeconds: number
+  durationSeconds: number,
+  options?: { accurateSeek?: boolean }
 ): Promise<void> {
-  await runCommand(getFfmpegPath(), [
-    "-y",
-    "-ss",
-    String(Math.max(0, startSeconds)),
+  const start = String(Math.max(0, startSeconds));
+  const duration = String(Math.max(0.1, durationSeconds));
+  const accurate = options?.accurateSeek ?? false;
+
+  const args = ["-y"];
+  if (!accurate) {
+    args.push("-ss", start);
+  }
+  args.push("-i", inputPath);
+  if (accurate) {
+    args.push("-ss", start);
+  }
+  args.push(
     "-t",
-    String(Math.max(0.1, durationSeconds)),
-    "-i",
-    inputPath,
+    duration,
     "-vn",
     "-acodec",
     "pcm_s16le",
@@ -163,8 +196,10 @@ export async function extractAudioSegment(
     "16000",
     "-ac",
     "1",
-    outputPath,
-  ]);
+    outputPath
+  );
+
+  await runCommand(getFfmpegPath(), args);
 }
 
 /** Extract volume levels per second using FFmpeg astats/volumedetect approach */
@@ -235,18 +270,82 @@ export async function extractFrameAt(
   outputPath: string,
   timeSeconds: number
 ): Promise<void> {
-  await runCommand(getFfmpegPath(), [
-    "-y",
-    "-ss",
-    String(Math.max(0, timeSeconds)),
+  await extractFastTimelineFrame(inputPath, outputPath, timeSeconds, 160, 5);
+}
+
+/** One keyframe grab — ~1s, used for instant live-edge / head thumbnails. */
+export async function extractFastTimelineFrame(
+  inputPath: string,
+  outputPath: string,
+  timeSeconds: number,
+  width = 96,
+  quality = 9
+): Promise<void> {
+  const args = ["-y", "-ss", String(Math.max(0, timeSeconds))];
+  if (process.platform === "win32" || process.platform === "darwin") {
+    args.push("-hwaccel", "auto");
+  }
+  args.push(
+    "-skip_frame",
+    "nokey",
     "-i",
     inputPath,
+    "-an",
+    "-sn",
+    "-dn",
     "-frames:v",
     "1",
+    "-vf",
+    `scale=${width}:-2:flags=fast_bilinear`,
     "-q:v",
-    "3",
-    outputPath,
-  ]);
+    String(quality),
+    outputPath
+  );
+  await runCommand(getFfmpegPath(), args);
+}
+
+/**
+ * Extract a strip of tiny timeline thumbnails in ONE ffmpeg pass.
+ * Decodes keyframes only (`-skip_frame nokey`), so it runs ~70x faster than
+ * per-frame seeking and produces ~3 KB images at the given width.
+ */
+export async function extractThumbnailStrip(
+  inputPath: string,
+  outputPattern: string,
+  startSeconds: number,
+  durationSeconds: number,
+  intervalSeconds: number,
+  width = 96
+): Promise<void> {
+  const args = [
+    "-y",
+    "-ss",
+    String(Math.max(0, startSeconds)),
+    "-t",
+    String(Math.max(1, durationSeconds)),
+  ];
+  if (process.platform === "win32" || process.platform === "darwin") {
+    args.push("-hwaccel", "auto");
+  }
+  args.push(
+    "-skip_frame",
+    "nokey",
+    "-i",
+    inputPath,
+    "-an",
+    "-sn",
+    "-dn",
+    "-threads",
+    "0",
+    "-vf",
+    `fps=1/${intervalSeconds},scale=${width}:-2:flags=fast_bilinear`,
+    "-q:v",
+    "9",
+    "-fps_mode",
+    "vfr",
+    outputPattern
+  );
+  await runCommand(getFfmpegPath(), args);
 }
 
 export async function extractFrames(
@@ -285,12 +384,19 @@ export interface RenderShortOptions {
   height?: number;
   fps?: number;
   srtPath?: string;
+  subtitleFormat?: RenderFormat;
+  outputHeight?: number;
   facecamRegion?: { x: number; y: number; width: number; height: number };
 }
 
-function subtitleFilter(srtPath: string): string {
+function subtitleFilter(
+  srtPath: string,
+  format: RenderFormat = "vertical",
+  outputHeight = 1080
+): string {
   const escapedSrt = srtPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-  return `subtitles='${escapedSrt}':force_style='FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2,MarginV=80'`;
+  const style = getFfmpegCaptionForceStyle(format, outputHeight);
+  return `subtitles='${escapedSrt}':force_style='${style}'`;
 }
 
 export async function renderShort(options: RenderShortOptions): Promise<void> {
@@ -305,6 +411,8 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
     height = 1920,
     fps = 30,
     srtPath,
+    subtitleFormat = format,
+    outputHeight = format === "vertical" ? height : 1080,
   } = options;
 
   const duration = endTimeSeconds - startTimeSeconds;
@@ -321,7 +429,7 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
         "-i",
         inputPath,
         "-vf",
-        subtitleFilter(srtPath),
+        subtitleFilter(srtPath, subtitleFormat, outputHeight),
         "-c:v",
         "libx264",
         "-preset",
@@ -373,7 +481,7 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
   }
 
   if (srtPath) {
-    vf += `,${subtitleFilter(srtPath)}`;
+    vf += `,${subtitleFilter(srtPath, subtitleFormat, height)}`;
   }
 
   const args = [

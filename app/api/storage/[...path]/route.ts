@@ -12,9 +12,9 @@ export async function GET(
     const relativePath = pathSegments.join("/");
     const inline = request.nextUrl.searchParams.get("inline") === "1";
     if (inline) {
-      return serveStorageFileInline(relativePath);
+      return await serveStorageFileInline(relativePath, request);
     }
-    return serveStorageFile(relativePath);
+    return await serveStorageFile(relativePath);
   } catch {
     return new Response("Not found", { status: 404 });
   }

@@ -1,8 +1,9 @@
 "use client";
 
-import { useRef, useCallback, useState, useEffect, useLayoutEffect } from "react";
+import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo } from "react";
 import { formatSeconds, formatDuration } from "@/lib/time";
 import { LIVE_SEGMENT_SECONDS } from "@/lib/timelineConstants";
+import { buildCaptionTrack, type TranscriptChunkInput } from "@/lib/captionTrack";
 import { cn } from "@/lib/utils";
 import type { LiveTimelineSegment } from "@/lib/timelineSegments";
 import type { TimelineThumbnail } from "@/services/timelineThumbnailService";
@@ -25,9 +26,15 @@ interface LiveTimelineProps {
   selection: ClipSelection;
   onSelectionChange: (selection: ClipSelection) => void;
   onSeek: (seconds: number) => void;
+  onPause: () => void;
   onScrub: (seconds: number) => void;
   onClipCreated?: () => void;
+  includeCaptions?: boolean;
+  captionChunks?: TranscriptChunkInput[];
 }
+
+const VIDEO_TRACK_H = "min(22vh,100px)";
+const CAPTION_TRACK_H = "min(10vh,56px)";
 
 const MIN_CLIP_SECONDS = 3;
 const TRACK_LABEL_W = 52;
@@ -86,8 +93,11 @@ export function LiveTimeline({
   selection,
   onSelectionChange,
   onSeek,
+  onPause,
   onScrub,
   onClipCreated,
+  includeCaptions = true,
+  captionChunks = [],
 }: LiveTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const rulerRef = useRef<HTMLDivElement>(null);
@@ -108,6 +118,13 @@ export function LiveTimeline({
 
   const trackContentWidth =
     viewportWidth > 0 ? viewportWidth * normalizeZoom(zoom) : 0;
+
+  const captionCues = useMemo(
+    () => (includeCaptions ? buildCaptionTrack(captionChunks, "native") : []),
+    [captionChunks, includeCaptions]
+  );
+
+  const showCaptionTrack = captionCues.length > 0;
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -188,31 +205,34 @@ export function LiveTimeline({
     if (!el) return;
 
     function onWheel(e: WheelEvent) {
-      if (e.ctrlKey || e.metaKey) {
-        e.preventDefault();
-        const rect = videoTrackRef.current?.getBoundingClientRect();
-        let anchorTime = currentTime;
-        if (rect && rect.width > 0) {
-          const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-          anchorTime = ratio * maxTime;
-        }
-        if (e.deltaY < 0) {
-          setZoomAroundTime(zoom * ZOOM_STEP, anchorTime);
-        } else {
-          setZoomAroundTime(zoom / ZOOM_STEP, anchorTime);
-        }
-        return;
-      }
-
       const scroll = scrollRef.current;
       if (!scroll) return;
+
+      // Trackpad horizontal swipe — scroll the timeline.
       if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
         scroll.scrollLeft += e.deltaX;
         return;
       }
+
+      // Shift+wheel — horizontal scroll (when zoomed in).
       if (e.shiftKey) {
         e.preventDefault();
         scroll.scrollLeft += e.deltaY;
+        return;
+      }
+
+      // Wheel — zoom in/out around cursor position.
+      e.preventDefault();
+      const rect = videoTrackRef.current?.getBoundingClientRect();
+      let anchorTime = currentTime;
+      if (rect && rect.width > 0) {
+        const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+        anchorTime = ratio * maxTime;
+      }
+      if (e.deltaY < 0) {
+        setZoomAroundTime(zoom * ZOOM_STEP, anchorTime);
+      } else {
+        setZoomAroundTime(zoom / ZOOM_STEP, anchorTime);
       }
     }
 
@@ -312,7 +332,8 @@ export function LiveTimeline({
         sessionId,
         selection,
         clipTitle || `Clip ${formatSeconds(selection.start)}`,
-        format
+        format,
+        includeCaptions
       );
       onClipCreated?.();
     } catch (err) {
@@ -376,8 +397,11 @@ export function LiveTimeline({
           <ToolBtn onClick={setOutPoint} title="Mark Out (O)">
             ]
           </ToolBtn>
-          <ToolBtn onClick={() => onSeek(selection.start)} title="Play In to Out">
+          <ToolBtn onClick={() => onSeek(selection.start)} title="Play from In point">
             ▶
+          </ToolBtn>
+          <ToolBtn onClick={onPause} title="Pause">
+            ⏸
           </ToolBtn>
         </div>
 
@@ -407,7 +431,7 @@ export function LiveTimeline({
           >
             {zoomLabel}
           </button>
-          <ToolBtn onClick={zoomIn} title="Zoom in (Ctrl+scroll)" disabled={zoom >= MAX_ZOOM}>
+          <ToolBtn onClick={zoomIn} title="Zoom in (scroll wheel)" disabled={zoom >= MAX_ZOOM}>
             +
           </ToolBtn>
         </div>
@@ -472,9 +496,20 @@ export function LiveTimeline({
             style={{ width: TRACK_LABEL_W }}
           >
             <div className="h-7 border-b border-[#2a2a2a]" />
-            <div className="h-[min(22vh,100px)] flex items-center justify-center border-b border-[#2a2a2a]">
+            <div
+              className="flex items-center justify-center border-b border-[#2a2a2a]"
+              style={{ height: VIDEO_TRACK_H }}
+            >
               <span className="text-[10px] font-semibold text-[#888]">V1</span>
             </div>
+            {showCaptionTrack && (
+              <div
+                className="flex items-center justify-center border-b border-[#2a2a2a]"
+                style={{ height: CAPTION_TRACK_H }}
+              >
+                <span className="text-[10px] font-semibold text-[#7eb8ff]">CC</span>
+              </div>
+            )}
           </div>
 
           {/* Tracks + ruler */}
@@ -507,16 +542,19 @@ export function LiveTimeline({
               <Playhead percent={playheadPct} tall onScrub={(e) => beginDrag("scrub", e)} />
             </div>
 
-            {/* V1 Video track */}
-            <div
-              ref={videoTrackRef}
-              className="relative h-[min(22vh,100px)] bg-[#0d0d0d] border-b border-[#2a2a2a] cursor-crosshair shrink-0"
-              onPointerDown={handleVideoTrackPointerDown}
-            >
+            {/* Tracks stack — shared playhead spans video + captions */}
+            <div className="relative shrink-0">
+              {/* V1 Video track */}
+              <div
+                ref={videoTrackRef}
+                className="relative bg-[#0d0d0d] border-b border-[#2a2a2a] cursor-crosshair"
+                style={{ height: VIDEO_TRACK_H }}
+                onPointerDown={handleVideoTrackPointerDown}
+              >
               {/* Filmstrip */}
               <div className="absolute inset-0 pointer-events-none">
                 {thumbnails.length > 0
-                  ? thumbnails.map((thumb) => (
+                  ? thumbnails.map((thumb, index) => (
                       <div
                         key={thumb.startTimeSeconds}
                         className="absolute top-0 bottom-0 border-r border-[#000]/60 overflow-hidden"
@@ -534,6 +572,9 @@ export function LiveTimeline({
                           alt=""
                           className="w-full h-full object-cover"
                           draggable={false}
+                          loading={index < 80 ? "eager" : "lazy"}
+                          decoding="async"
+                          fetchPriority={index < 20 ? "high" : "auto"}
                         />
                       </div>
                     ))
@@ -590,7 +631,47 @@ export function LiveTimeline({
                 />
               </div>
 
-              <Playhead percent={playheadPct} onScrub={(e) => beginDrag("scrub", e)} />
+            </div>
+
+            {/* CC Caption track — independent timeline layer */}
+            {showCaptionTrack && (
+              <div
+                className="relative bg-[#0a0f14] border-b border-[#2a2a2a] shrink-0 overflow-hidden"
+                style={{ height: CAPTION_TRACK_H }}
+              >
+                {captionCues.map((cue) => {
+                  const isActive =
+                    currentTime >= cue.startTimeSeconds &&
+                    currentTime < cue.endTimeSeconds;
+                  return (
+                    <button
+                      key={cue.id}
+                      type="button"
+                      title={cue.text}
+                      onClick={() => onSeek(cue.startTimeSeconds)}
+                      className={cn(
+                        "absolute top-1 bottom-1 rounded-sm border text-left overflow-hidden",
+                        "px-1 py-0.5 text-[9px] leading-tight truncate",
+                        isActive
+                          ? "border-[#7eb8ff] bg-[#7eb8ff]/25 text-[#dceeff] z-[4]"
+                          : "border-[#2a4a66] bg-[#152535]/80 text-[#8ab4d4] hover:bg-[#1a3045]"
+                      )}
+                      style={{
+                        left: `${pct(cue.startTimeSeconds, maxTime)}%`,
+                        width: `${Math.max(
+                          pct(cue.endTimeSeconds - cue.startTimeSeconds, maxTime),
+                          0.35
+                        )}%`,
+                      }}
+                    >
+                      {cue.text.replace(/\n/g, " ")}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            <Playhead percent={playheadPct} tall onScrub={(e) => beginDrag("scrub", e)} />
             </div>
           </div>
         </div>

@@ -1,10 +1,8 @@
 import { prisma } from "@/lib/db";
-import { TRANSCRIPTION_HEAVY_BACKLOG_SECONDS } from "@/lib/transcriptionConstants";
 import { syncLiveRecording } from "@/services/liveRecordingService";
 import { pollChatMessages } from "@/services/chatIngestionService";
 import { processChatWindows } from "@/services/eventWindowService";
-import { syncTimelineThumbnails } from "@/services/timelineThumbnailService";
-import { getTranscriptionBacklog } from "@/services/transcriptionSyncService";
+import { syncTimelineThumbnails, capturePriorityThumbs } from "@/services/timelineThumbnailService";
 import { refreshSessionLiveMetadata } from "@/services/youtubeService";
 
 function isLiveStatus(liveStatus: string | null | undefined): boolean {
@@ -107,16 +105,14 @@ export async function runLivePipeline(streamSessionId: string) {
   });
 
   if (sourceMedia && (sourceMedia.durationSeconds ?? 0) >= 3) {
-    const { backlogSeconds } = await getTranscriptionBacklog(streamSessionId);
-    const heavyBacklog = backlogSeconds > TRANSCRIPTION_HEAVY_BACKLOG_SECONDS;
-
-    if (!heavyBacklog) {
-      try {
-        results.thumbnails = await syncTimelineThumbnails(streamSessionId);
-      } catch {
-        // thumbnails optional
-      }
-    }
+    const isLive = isLiveStatus(fresh.liveStatus);
+    void capturePriorityThumbs(streamSessionId, { prioritizeTail: isLive }).catch(
+      () => {}
+    );
+    void syncTimelineThumbnails(streamSessionId, { prioritizeTail: isLive }).catch(
+      () => {}
+    );
+    results.thumbnailsQueued = true;
   }
 
   return results;

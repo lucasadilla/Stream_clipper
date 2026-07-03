@@ -30,7 +30,7 @@ export class OpenAIWhisperProvider implements TranscriptionProvider {
 }
 
 /**
- * Fallback when OPENAI_API_KEY is missing — returns empty (no fake placeholders).
+ * Fallback when no AI key is configured — returns empty (no fake placeholders).
  */
 export class NoOpTranscriptionProvider implements TranscriptionProvider {
   async transcribe(): Promise<TranscriptSegment[]> {
@@ -52,7 +52,7 @@ export async function generateTranscript(
 ) {
   if (!isWhisperAvailable()) {
     throw new Error(
-      "OPENAI_API_KEY is required for transcription. Add it to your .env file."
+      "Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env for transcription."
     );
   }
 

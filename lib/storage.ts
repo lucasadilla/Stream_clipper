@@ -1,6 +1,6 @@
 import path from "path";
-import { existsSync } from "fs";
-import { readFile as readFileFs } from "fs/promises";
+import { existsSync, createReadStream } from "fs";
+import { readFile as readFileFs, stat as statFs } from "fs/promises";
 
 const STORAGE_ROOT = process.env.STORAGE_ROOT ?? "./storage";
 
@@ -58,14 +58,130 @@ export async function getSessionStorageBytes(sessionId: string): Promise<number>
   return total;
 }
 
-/** Remove all on-disk files for a session (uploads, frames, renders). */
-export async function deleteSessionStorage(sessionId: string): Promise<void> {
+/** Remove all on-disk files for a session (uploads, frames, renders). Never throws. */
+export interface StorageDeleteResult {
+  freedBytes: number;
+  fullyRemoved: boolean;
+  orphanedPaths: string[];
+}
+
+export async function deleteSessionStorage(
+  sessionId: string
+): Promise<StorageDeleteResult> {
   const fs = await import("fs/promises");
+  const freedBytes = await getSessionStorageBytes(sessionId);
+  const orphanedPaths: string[] = [];
+
   for (const dir of getSessionStorageDirs(sessionId)) {
-    if (existsSync(dir)) {
-      await fs.rm(dir, { recursive: true, force: true });
+    const orphaned = await removeDirectoryBestEffort(dir, fs, sessionId);
+    if (orphaned) orphanedPaths.push(orphaned);
+  }
+
+  const remaining = await getSessionStorageBytes(sessionId);
+  return {
+    freedBytes,
+    fullyRemoved: remaining === 0 && orphanedPaths.length === 0,
+    orphanedPaths,
+  };
+}
+
+const BUSY_DELETE_CODES = new Set(["EBUSY", "EPERM", "ENOTEMPTY", "EACCES"]);
+
+async function sleep(ms: number) {
+  await new Promise((r) => setTimeout(r, ms));
+}
+
+function quarantinePath(sessionId: string, originalDir: string): string {
+  const kind = path.basename(path.dirname(originalDir));
+  return path.join(
+    getStorageRoot(),
+    ".orphaned",
+    sessionId,
+    `${kind}-${Date.now()}`
+  );
+}
+
+/** Delete a directory; on lock, rename aside so the session can always be removed from the app. */
+async function removeDirectoryBestEffort(
+  dirPath: string,
+  fs: typeof import("fs/promises"),
+  sessionId: string
+): Promise<string | null> {
+  if (!existsSync(dirPath)) return null;
+
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      await fs.rm(dirPath, {
+        recursive: true,
+        force: true,
+        maxRetries: 2,
+        retryDelay: 200,
+      });
+      return null;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (!code || !BUSY_DELETE_CODES.has(code)) break;
+      await sleep(250 * attempt);
     }
   }
+
+  try {
+    await removeDirectoryFileByFile(dirPath, fs);
+    if (!existsSync(dirPath)) return null;
+  } catch {
+    // fall through to quarantine
+  }
+
+  const dest = quarantinePath(sessionId, dirPath);
+  try {
+    await ensureDir(path.dirname(dest));
+    await fs.rename(dirPath, dest);
+    return dest;
+  } catch {
+    // Last resort: leave path but never block session delete.
+    console.warn(`[storage] could not remove or quarantine ${dirPath}`);
+    return dirPath;
+  }
+}
+
+/** Best-effort file-by-file delete; swallows per-file errors. */
+async function removeDirectoryFileByFile(
+  dirPath: string,
+  fs: typeof import("fs/promises")
+): Promise<void> {
+  if (!existsSync(dirPath)) return;
+
+  let entries: import("fs").Dirent[];
+  try {
+    entries = await fs.readdir(dirPath, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    const full = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      await removeDirectoryFileByFile(full, fs);
+      await fs.rmdir(full).catch(() => {});
+    } else {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await fs.unlink(full);
+          break;
+        } catch {
+          if (attempt === 3) {
+            const trash = `${full}.locked-${Date.now()}`;
+            await fs.rename(full, trash).catch(() => {});
+            await fs.unlink(trash).catch(() => {});
+          } else {
+            await sleep(200 * attempt);
+          }
+        }
+      }
+    }
+  }
+
+  await fs.rmdir(dirPath).catch(() => {});
 }
 
 export function formatBytes(bytes: number): string {
@@ -142,6 +258,36 @@ export async function findBestSourceFileInDir(
   return bestPath;
 }
 
+/**
+ * All plausible source files in a session upload dir, ordered for audio lookup:
+ * merged file first, then split-format files smallest first (audio tracks are
+ * far smaller than video tracks, so the audio file is probed first).
+ */
+export async function listSourceCandidateFiles(
+  uploadDir: string
+): Promise<string[]> {
+  const fs = await import("fs/promises");
+  if (!existsSync(uploadDir)) return [];
+
+  const files = await fs.readdir(uploadDir);
+  const candidates = files.filter(
+    (f) => f.startsWith("source.") && !isYtDlpTempFile(f)
+  );
+
+  const withMeta: Array<{ full: string; size: number; merged: boolean }> = [];
+  for (const name of candidates) {
+    const full = path.join(uploadDir, name);
+    const size = await safeStatSize(full);
+    if (size == null || size <= 0) continue;
+    withMeta.push({ full, size, merged: isMergedSourceFile(name) });
+  }
+
+  withMeta.sort(
+    (a, b) => Number(b.merged) - Number(a.merged) || a.size - b.size
+  );
+  return withMeta.map((c) => c.full);
+}
+
 export async function ensureDir(dirPath: string): Promise<void> {
   const fs = await import("fs/promises");
   await fs.mkdir(dirPath, { recursive: true });
@@ -208,20 +354,69 @@ function contentTypeForFile(filePath: string): string {
 
 /** Serve a file for inline display (images, video preview). */
 export async function serveStorageFileInline(
-  relativePath: string
+  relativePath: string,
+  request?: Request
 ): Promise<Response> {
   const fullPath = resolveStoragePath(relativePath);
   if (!existsSync(fullPath)) {
     return new Response("File not found", { status: 404 });
   }
 
+  const contentType = contentTypeForFile(fullPath);
+  const isVideo = contentType.startsWith("video/");
+  const stat = await statFs(fullPath);
+  const fileSize = stat.size;
+
+  const rangeHeader = request?.headers.get("range");
+  if (isVideo && rangeHeader) {
+    const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+    if (match) {
+      const start = Number.parseInt(match[1]!, 10);
+      const end = match[2] ? Number.parseInt(match[2], 10) : fileSize - 1;
+      if (start <= end && start < fileSize) {
+        const chunkSize = end - start + 1;
+        const stream = createReadStream(fullPath, { start, end });
+        return new Response(stream as unknown as BodyInit, {
+          status: 206,
+          headers: {
+            "Content-Type": contentType,
+            "Content-Length": String(chunkSize),
+            "Content-Range": `bytes ${start}-${end}/${fileSize}`,
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "public, max-age=3600",
+          },
+        });
+      }
+    }
+  }
+
+  // Timeline thumbnails are content-addressed by block start and never change
+  // once written — let the browser cache them forever.
+  const immutable = /[\\/]frames[\\/]/.test(fullPath);
+
+  if (isVideo && fileSize > 8 * 1024 * 1024) {
+    const stream = createReadStream(fullPath);
+    return new Response(stream as unknown as BodyInit, {
+      status: 200,
+      headers: {
+        "Content-Type": contentType,
+        "Content-Length": String(fileSize),
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "public, max-age=3600",
+      },
+    });
+  }
+
   const data = await readFileFs(fullPath);
   return new Response(new Uint8Array(data), {
     status: 200,
     headers: {
-      "Content-Type": contentTypeForFile(fullPath),
+      "Content-Type": contentType,
       "Content-Length": String(data.byteLength),
-      "Cache-Control": "public, max-age=3600",
+      ...(isVideo ? { "Accept-Ranges": "bytes" } : {}),
+      "Cache-Control": immutable
+        ? "public, max-age=31536000, immutable"
+        : "public, max-age=3600",
     },
   });
 }

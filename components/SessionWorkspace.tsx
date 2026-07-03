@@ -3,14 +3,23 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { EditorHeader } from "@/components/layout/EditorHeader";
-import { YouTubePlayer, type YouTubePlayerHandle } from "@/components/YouTubePlayer";
+import { VideoPreview } from "@/components/VideoPreview";
+import type { YouTubePlayerHandle } from "@/components/YouTubePlayer";
 import { LiveTimeline, type ClipSelection } from "@/components/LiveTimeline";
 import { LIVE_TICK_MS, LIVE_SEGMENT_SECONDS } from "@/lib/timelineConstants";
-import { TRANSCRIPTION_FAST_TICK_MS } from "@/lib/transcriptionConstants";
+import { THUMB_POLL_MS } from "@/lib/thumbnailConstants";
+import {
+  TRANSCRIPTION_FAST_TICK_MS,
+  TRANSCRIPTION_SLOW_TICK_MS,
+} from "@/lib/transcriptionConstants";
 import { buildLiveTimelineSegments } from "@/lib/timelineSegments";
 import { FindClipBar } from "@/components/FindClipBar";
 import { TranscriptChat } from "@/components/TranscriptChat";
 import { fetchJson } from "@/lib/apiClient";
+import {
+  readCaptionsEnabledPreference,
+  writeCaptionsEnabledPreference,
+} from "@/lib/captionStyles";
 
 interface SessionData {
   id: string;
@@ -58,9 +67,12 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const [deleting, setDeleting] = useState(false);
   const [transcriptionError, setTranscriptionError] = useState<string | null>(null);
   const [transcribingActive, setTranscribingActive] = useState(false);
+  const [captionsEnabled, setCaptionsEnabled] = useState(true);
   const playerRef = useRef<YouTubePlayerHandle>(null);
   const sourceStarted = useRef(false);
   const transcribeInFlight = useRef(false);
+  const captionRebuildAttempted = useRef(false);
+  const sessionLoadedOnce = useRef(false);
 
   const seekTo = useCallback((seconds: number) => {
     playerRef.current?.seekTo(seconds, { play: true });
@@ -80,17 +92,34 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
     setCurrentTime(seconds);
   }, []);
 
+  const pausePlayback = useCallback(() => {
+    playerRef.current?.pause();
+  }, []);
+
   async function loadThumbnails() {
     try {
       const res = await fetch(`/api/sessions/${sessionId}/timeline-thumbs`);
       const data = await res.json();
-      if (res.ok) setThumbnails(data.thumbnails ?? []);
+      if (!res.ok) return;
+      const next = (data.thumbnails ?? []) as typeof thumbnails;
+      setThumbnails((prev) => {
+        if (
+          next.length === prev.length &&
+          next.every(
+            (t, i) => t.startTimeSeconds === prev[i]?.startTimeSeconds
+          )
+        ) {
+          return prev;
+        }
+        return next;
+      });
     } catch {
       // optional
     }
   }
 
   async function loadSession() {
+    const isInitialLoad = !sessionLoadedOnce.current;
     try {
       const { ok, data } = await fetchJson<{ session?: SessionData; error?: string }>(
         `/api/sessions/${sessionId}`
@@ -98,8 +127,12 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       if (!ok) throw new Error(data.error ?? "Failed to load session");
       if (!data.session) throw new Error("Session not found");
       setSession(data.session);
+      sessionLoadedOnce.current = true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load");
+      // Background refresh failures (dev recompile blips) must not kill the editor.
+      if (isInitialLoad) {
+        setError(err instanceof Error ? err.message : "Failed to load");
+      }
     } finally {
       setLoading(false);
     }
@@ -131,9 +164,20 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   }
 
   useEffect(() => {
+    setCaptionsEnabled(readCaptionsEnabledPreference());
+  }, []);
+
+  useEffect(() => {
     loadSession();
     loadEvents();
+    void loadThumbnails();
   }, [sessionId]);
+
+  useEffect(() => {
+    if (!session) return;
+    const id = setInterval(() => void loadThumbnails(), THUMB_POLL_MS);
+    return () => clearInterval(id);
+  }, [sessionId, session?.id]);
 
   useEffect(() => {
     if (sourceStarted.current) return;
@@ -165,6 +209,38 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const transcriptionBehind =
     recordedSecondsForTx > 5 && transcribedSeconds < recordedSecondsForTx - 15;
 
+  function transcriptsNeedTimingRebuild(
+    chunks: typeof transcripts
+  ): boolean {
+    const whisper = chunks.filter((c) => {
+      const m = c.rawJson as { whisper?: boolean } | null;
+      return m?.whisper;
+    });
+    if (whisper.length === 0) return false;
+    if (
+      whisper.some((c) => {
+        const m = c.rawJson as { words?: unknown[] } | null;
+        return Array.isArray(m?.words) && m!.words!.length > 0;
+      })
+    ) {
+      return false;
+    }
+    return whisper.some(
+      (c) =>
+        (c.rawJson as { estimatedTiming?: boolean } | null)?.estimatedTiming !==
+          false || c.endTimeSeconds - c.startTimeSeconds > 12
+    );
+  }
+
+  useEffect(() => {
+    if (captionRebuildAttempted.current || transcripts.length === 0) return;
+    if (!transcriptsNeedTimingRebuild(transcripts)) return;
+    captionRebuildAttempted.current = true;
+    fetch(`/api/sessions/${sessionId}/transcribe?rebuild=1`, { method: "POST" })
+      .then(() => loadEvents())
+      .catch(() => {});
+  }, [sessionId, transcripts]);
+
   useEffect(() => {
     if (!session) return;
 
@@ -172,6 +248,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       try {
         await fetch(`/api/sessions/${sessionId}/live-tick`, { method: "POST" });
         await loadSession();
+        void loadThumbnails();
       } catch {
         // non-fatal
       }
@@ -202,9 +279,17 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         } else if (data.reason === "no_file") {
           setTranscriptionError("Waiting for local recording to download…");
         } else if (data.reason === "no_openai_key") {
-          setTranscriptionError("OPENAI_API_KEY missing in .env");
+          setTranscriptionError(
+            "Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env"
+          );
         } else if (data.reason === "too_short") {
           setTranscriptionError("Recording too short — wait for more audio");
+        } else if (data.reason === "provider_unavailable") {
+          setTranscriptionError(
+            /quota/i.test(data.error ?? "")
+              ? "AI provider quota exceeded — add credits and transcription will resume automatically"
+              : "AI provider unreachable — retrying automatically"
+          );
         } else {
           setTranscriptionError(null);
         }
@@ -225,7 +310,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
     runTranscribe();
     const ms = transcriptionBehind
       ? TRANSCRIPTION_FAST_TICK_MS
-      : TRANSCRIPTION_FAST_TICK_MS * 3;
+      : TRANSCRIPTION_SLOW_TICK_MS;
     const interval = setInterval(runTranscribe, ms);
     return () => clearInterval(interval);
   }, [sessionId, session?.id, transcriptionBehind, transcribedSeconds]);
@@ -337,15 +422,18 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       <div className="flex-1 flex flex-col min-h-0">
         {/* Video preview — larger */}
         <div className="shrink-0 px-4 pt-3 pb-2 flex justify-center">
-          <div className="w-full max-w-6xl h-[min(42vh,520px)] min-h-[220px]">
-            <YouTubePlayer
-              ref={playerRef}
-              videoId={session.youtubeVideoId}
-              onTimeUpdate={setCurrentTime}
-              onDurationChange={setPlayerDuration}
-              fillContainer
-            />
-          </div>
+          <VideoPreview
+            videoId={session.youtubeVideoId}
+            playerRef={playerRef}
+            transcripts={transcripts}
+            captionsEnabled={captionsEnabled}
+            onCaptionsEnabledChange={(enabled) => {
+              setCaptionsEnabled(enabled);
+              writeCaptionsEnabledPreference(enabled);
+            }}
+            onTimeUpdate={setCurrentTime}
+            onDurationChange={setPlayerDuration}
+          />
         </div>
 
         <div className="shrink-0 px-4 py-1.5 max-w-6xl w-full mx-auto">
@@ -365,8 +453,11 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
             selection={clipSelection}
             onSelectionChange={setClipSelection}
             onSeek={seekTo}
+            onPause={pausePlayback}
             onScrub={scrubTo}
             onClipCreated={loadEvents}
+            includeCaptions={captionsEnabled}
+            captionChunks={transcripts}
           />
         </div>
 

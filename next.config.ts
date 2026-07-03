@@ -6,6 +6,21 @@ const nextConfig: NextConfig = {
       bodySizeLimit: "500mb",
     },
   },
+  // Stop thumbnail/recording writes in ./storage from triggering hot reloads.
+  webpack: (config, { dev }) => {
+    if (dev) {
+      config.watchOptions = {
+        ...config.watchOptions,
+        ignored: [
+          "**/node_modules/**",
+          "**/.git/**",
+          "**/.next/**",
+          "**/storage/**",
+        ],
+      };
+    }
+    return config;
+  },
   // Allow serving rendered files from storage in dev if needed
   async headers() {
     return [

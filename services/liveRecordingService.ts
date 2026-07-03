@@ -1,7 +1,7 @@
 import path from "path";
 import fs from "fs/promises";
 import { existsSync } from "fs";
-import { type ChildProcess, spawn } from "child_process";
+import { type ChildProcess, spawn, spawnSync } from "child_process";
 import { prisma } from "@/lib/db";
 import { probeMedia } from "@/lib/ffmpeg";
 import { toJsonValue } from "@/lib/utils";
@@ -245,31 +245,27 @@ export async function syncLiveRecording(streamSessionId: string) {
   };
 }
 
-export async function stopLiveRecording(streamSessionId: string) {
+export async function stopLiveRecording(
+  streamSessionId: string,
+  options?: { skipSync?: boolean }
+) {
   const proc = activeRecordings.get(streamSessionId);
-  if (proc?.pid) {
-    try {
-      proc.kill();
-    } catch {
-      // process may have already exited
-    }
-  }
+  const pids = new Set<number>();
+  if (proc?.pid) pids.add(proc.pid);
   activeRecordings.delete(streamSessionId);
 
   const state = await prisma.liveRecordingState.findUnique({
     where: { streamSessionId },
   });
-  if (state?.pid && !proc?.pid) {
-    try {
-      process.kill(state.pid);
-    } catch {
-      // process may have already exited
-    }
+  if (state?.pid) pids.add(state.pid);
+
+  for (const pid of pids) {
+    killProcessTree(pid);
   }
 
   await prisma.liveRecordingState.updateMany({
     where: { streamSessionId },
-    data: { status: "stopped" },
+    data: { status: "stopped", pid: null },
   });
 
   await prisma.sourceMedia.updateMany({
@@ -277,7 +273,38 @@ export async function stopLiveRecording(streamSessionId: string) {
     data: { isLiveRecording: false },
   });
 
+  if (options?.skipSync) {
+    return {
+      status: "stopped" as const,
+      recordedSeconds: state?.recordedSeconds ?? 0,
+      sourceMedia: null,
+    };
+  }
+
+  // Let Windows release file handles after yt-dlp/ffmpeg exit.
+  await delay(800);
   return syncLiveRecording(streamSessionId);
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Kill process + children (yt-dlp spawns ffmpeg on Windows). */
+function killProcessTree(pid: number) {
+  if (!pid || pid <= 0) return;
+  try {
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } else {
+      process.kill(pid, "SIGTERM");
+    }
+  } catch {
+    // already exited
+  }
 }
 
 /** Unified entry: live → record, VOD → full download. */

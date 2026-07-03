@@ -1,13 +1,16 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
-import { syncTranscription } from "@/services/transcriptionSyncService";
+import {
+  clearWhisperTranscriptChunks,
+  syncTranscription,
+} from "@/services/transcriptionSyncService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 export async function POST(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ sessionId: string }> }
 ) {
   try {
@@ -18,11 +21,17 @@ export async function POST(
     });
     if (!session) return errorResponse("Session not found", 404);
 
+    const rebuild = request.nextUrl.searchParams.get("rebuild") === "1";
+    let cleared = 0;
+    if (rebuild) {
+      cleared = await clearWhisperTranscriptChunks(sessionId);
+    }
+
     const isLive =
       session.liveStatus === "live" || session.liveStatus === "upcoming";
 
     const result = await syncTranscription(sessionId, { isLive });
-    return jsonResponse({ success: true, ...result });
+    return jsonResponse({ success: true, cleared, ...result });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Transcription failed";

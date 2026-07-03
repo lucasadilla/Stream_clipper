@@ -3,19 +3,8 @@ import { z } from "zod";
 import type { RagSearchResult } from "@/lib/rag";
 import { formatSeconds } from "@/lib/time";
 import { isPlaceholderTranscript } from "@/services/transcriptionSyncService";
-
-const CHAT_MODEL = "gpt-4o-mini";
-
-let openaiClient: OpenAI | null = null;
-
-function getOpenAI(): OpenAI {
-  if (!openaiClient) {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) throw new Error("OPENAI_API_KEY is not configured");
-    openaiClient = new OpenAI({ apiKey });
-  }
-  return openaiClient;
-}
+import { estimateTimestampInChunk } from "@/services/transcriptSearchService";
+import { getAiClient, getChatModel } from "@/lib/aiProvider";
 
 export const clipSuggestionSchema = z.object({
   title: z.string(),
@@ -122,16 +111,134 @@ export function validateAskResponse(
   return { found: true, answer: raw.answer, timestamps };
 }
 
+function sanitizeContextText(text: string): string {
+  return text.replace(/"/g, "'").replace(/\r?\n/g, " ").trim();
+}
+
+function parseModelJson(content: string): unknown {
+  let text = content.trim();
+  const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)```$/i);
+  if (fenced) text = fenced[1].trim();
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      return JSON.parse(text.slice(start, end + 1));
+    }
+    throw new Error("AI returned invalid JSON — try asking again.");
+  }
+}
+
+const askModelResponseSchema = z.object({
+  found: z.boolean(),
+  answer: z.string(),
+  /** Index into the numbered transcript excerpts (0 = best match). */
+  sourceIndex: z.union([z.number().int().min(0), z.null()]).optional(),
+  timestamps: z.array(timestampReferenceSchema).optional(),
+});
+
 function buildContextBlock(results: RagSearchResult[]): string {
   return results
-    .map((r) => {
+    .map((r, index) => {
       const time =
         r.startTimeSeconds != null
           ? `[${formatSeconds(r.startTimeSeconds)}${r.endTimeSeconds != null ? ` - ${formatSeconds(r.endTimeSeconds)}` : ""}]`
           : "[metadata]";
-      return `${time} (${r.sourceType}, score=${r.score.toFixed(1)}): ${r.text}`;
+      return `[${index}] ${time} (${r.sourceType}, score=${(r.score ?? 0).toFixed(1)}): ${sanitizeContextText(r.text)}`;
     })
     .join("\n");
+}
+
+function timestampsFromSourceIndex(
+  sourceIndex: number | undefined,
+  contextResults: RagSearchResult[],
+  userMessage: string
+): TimestampReference[] {
+  const transcriptCtx = getTranscriptContext(contextResults);
+  if (sourceIndex == null || sourceIndex < 0 || sourceIndex >= transcriptCtx.length) {
+    return [];
+  }
+
+  const hit = transcriptCtx[sourceIndex]!;
+  const start = hit.startTimeSeconds ?? 0;
+  const end = hit.endTimeSeconds ?? start;
+  const timeSeconds = estimateTimestampInChunk(hit.text, start, end, userMessage);
+  const quote = hit.text.trim().slice(0, 120);
+
+  return [
+    {
+      timeSeconds,
+      label: "Transcript match",
+      quote,
+    },
+  ];
+}
+
+function normalizeAskModelResponse(
+  raw: z.infer<typeof askModelResponseSchema>,
+  contextResults: RagSearchResult[],
+  userMessage: string
+): AskResponse {
+  if (!raw.found) {
+    return { found: false, answer: raw.answer, timestamps: [] };
+  }
+
+  if (raw.timestamps && raw.timestamps.length > 0) {
+    return {
+      found: true,
+      answer: raw.answer,
+      timestamps: raw.timestamps,
+    };
+  }
+
+  const timestamps = timestampsFromSourceIndex(
+    raw.sourceIndex ?? undefined,
+    contextResults,
+    userMessage
+  );
+
+  return {
+    found: true,
+    answer: raw.answer,
+    timestamps: timestamps.length > 0 ? timestamps : undefined,
+  };
+}
+
+export function buildKeywordAnswer(
+  query: string,
+  hits: RagSearchResult[]
+): AskResponse {
+  if (hits.length === 0) {
+    return {
+      found: false,
+      answer:
+        "I couldn't find that in the transcript so far. Try different wording or wait for more audio to be transcribed.",
+      timestamps: [],
+    };
+  }
+
+  const best = hits[0]!;
+  const start = best.startTimeSeconds ?? 0;
+  const end = best.endTimeSeconds ?? start;
+  const timeSeconds = estimateTimestampInChunk(best.text, start, end, query);
+  const excerpt = best.text.trim();
+  const short =
+    excerpt.length > 220 ? `${excerpt.slice(0, 217).trim()}…` : excerpt;
+
+  return {
+    found: true,
+    answer: `Around ${formatSeconds(timeSeconds)}: "${short}"`,
+    timestamps: [
+      {
+        timeSeconds,
+        label: "Transcript match",
+        quote: excerpt.slice(0, 120),
+      },
+    ],
+  };
 }
 
 export async function findClipAI(
@@ -139,7 +246,7 @@ export async function findClipAI(
   contextResults: RagSearchResult[],
   streamTitle?: string
 ): Promise<AiResponse & { clipSuggestions: [ClipSuggestionInput] }> {
-  const client = getOpenAI();
+  const client = getAiClient();
   const context = buildContextBlock(contextResults);
 
   const systemPrompt = `You find ONE specific clip moment from a livestream based on what the user describes.
@@ -168,7 +275,7 @@ STRICT RULES:
 - If user describes a specific event (goal, fail, joke), find the closest matching timestamp`;
 
   const response = await client.chat.completions.create({
-    model: CHAT_MODEL,
+    model: getChatModel(),
     messages: [
       { role: "system", content: systemPrompt },
       {
@@ -183,7 +290,7 @@ STRICT RULES:
   const content = response.choices[0]?.message?.content;
   if (!content) throw new Error("No AI response");
 
-  const parsed = JSON.parse(content) as unknown;
+  const parsed = parseModelJson(content);
   const result = aiResponseSchema.parse(parsed);
   if (!result.clipSuggestions?.[0]) {
     throw new Error("Could not find a matching moment — try describing it differently.");
@@ -197,41 +304,37 @@ export async function askStreamAI(
   streamTitle?: string,
   history: Array<{ role: "user" | "assistant"; content: string }> = []
 ): Promise<AskResponse> {
-  const client = getOpenAI();
-  const context = buildContextBlock(getTranscriptContext(contextResults));
+  const client = getAiClient();
+  const transcriptCtx = getTranscriptContext(contextResults);
+  const context = buildContextBlock(transcriptCtx);
 
-  const systemPrompt = `You answer questions about a YouTube livestream using ONLY the transcript/chat excerpts provided.
+  const systemPrompt = `You answer questions about a YouTube livestream using ONLY the numbered transcript excerpts provided.
 
 Stream title: ${streamTitle ?? "Unknown"}
 
-Return JSON:
+Return valid JSON only (no markdown). Do NOT put double-quote characters inside string values — use apostrophes instead.
+
+When the answer IS in the excerpts:
 {
   "found": true,
-  "answer": "Conversational reply — like a helpful chat assistant",
-  "timestamps": [
-    {
-      "timeSeconds": 872,
-      "label": "Short label",
-      "quote": "Exact words copied from the provided context"
-    }
-  ]
+  "answer": "Short conversational reply in 1-3 sentences",
+  "sourceIndex": 0
 }
 
-CRITICAL — when the user asks about something NOT in the context:
+When the answer is NOT in the excerpts:
 {
   "found": false,
-  "answer": "I couldn't find that in the transcript so far. [brief suggestion: rephrase, wait for more transcript, or try a different description]",
-  "timestamps": []
+  "answer": "I couldn't find that in the transcript so far. Try different wording or wait for more audio.",
+  "sourceIndex": null
 }
 
 RULES:
-- found MUST be false if the event/topic is not clearly supported by the context excerpts
-- NEVER guess, infer, or fabricate moments — if unsure, set found: false
-- When found is true, timestamps.timeSeconds MUST fall inside a context time range
-- quote MUST be copied verbatim from context (short excerpt)
-- Only include timestamps when the user wants a time/moment; general questions can omit them
-- Keep answers short and conversational (1-3 sentences)
-- Do NOT return clipSuggestions`;
+- sourceIndex is the [N] index of the excerpt that best answers the question (0 = first / most relevant)
+- found MUST be false if the topic is not clearly in the excerpts
+- NEVER guess or fabricate — if unsure, set found: false
+- For when/where questions, pick the excerpt where the topic is actually discussed
+- Keep answer brief; do not paste long transcript quotes into answer
+- Omit timestamps — the server adds them from sourceIndex`;
 
   const chatMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: "system", content: systemPrompt },
@@ -245,18 +348,37 @@ RULES:
     },
   ];
 
-  const response = await client.chat.completions.create({
-    model: CHAT_MODEL,
-    messages: chatMessages,
-    response_format: { type: "json_object" },
-    temperature: 0.1,
-  });
+  const request = () =>
+    client.chat.completions.create({
+      model: getChatModel(),
+      messages: chatMessages,
+      response_format: { type: "json_object" },
+      temperature: 0.1,
+      max_tokens: 512,
+    });
 
-  const content = response.choices[0]?.message?.content;
-  if (!content) throw new Error("No AI response");
+  let content: string | null | undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await request();
+    content = response.choices[0]?.message?.content;
+    if (!content) continue;
 
-  const parsed = JSON.parse(content) as unknown;
-  return askResponseSchema.parse(parsed);
+    try {
+      const parsed = parseModelJson(content);
+      const model = askModelResponseSchema.parse(parsed);
+      return normalizeAskModelResponse(model, contextResults, userMessage);
+    } catch (err) {
+      if (attempt === 1) {
+        if (err instanceof z.ZodError) {
+          throw new Error("AI response was missing required fields — try again.");
+        }
+        throw err;
+      }
+      console.warn("[ask] invalid JSON from model, retrying:", content.slice(0, 200));
+    }
+  }
+
+  throw new Error("No AI response");
 }
 
 export async function generateChatWindowSummary(

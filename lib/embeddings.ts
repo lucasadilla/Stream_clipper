@@ -1,18 +1,9 @@
-import OpenAI from "openai";
+import {
+  getAiClient,
+  getEmbeddingModel,
+} from "@/lib/aiProvider";
 
-const EMBEDDING_MODEL = "text-embedding-3-small";
 const EMBEDDING_DIMENSIONS = 1536;
-
-let openaiClient: OpenAI | null = null;
-
-function getOpenAI(): OpenAI {
-  if (!openaiClient) {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) throw new Error("OPENAI_API_KEY is not configured");
-    openaiClient = new OpenAI({ apiKey });
-  }
-  return openaiClient;
-}
 
 export async function createEmbedding(text: string): Promise<number[]> {
   const [embedding] = await createEmbeddingsBatch([text]);
@@ -23,9 +14,9 @@ export async function createEmbedding(text: string): Promise<number[]> {
 export async function createEmbeddingsBatch(texts: string[]): Promise<number[][]> {
   if (texts.length === 0) return [];
 
-  const client = getOpenAI();
+  const client = getAiClient();
   const response = await client.embeddings.create({
-    model: EMBEDDING_MODEL,
+    model: getEmbeddingModel(),
     input: texts.map((t) => t.slice(0, 8000)),
     dimensions: EMBEDDING_DIMENSIONS,
   });

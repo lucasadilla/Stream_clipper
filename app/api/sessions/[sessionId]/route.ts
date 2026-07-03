@@ -7,6 +7,7 @@ import {
 } from "@/services/sessionCleanupService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import { resolveVideoDurationFromMetadata } from "@/lib/youtube";
+import { fileExists } from "@/lib/storage";
 
 export async function GET(
   _request: NextRequest,
@@ -59,12 +60,19 @@ export async function GET(
               recordedSeconds: session.liveRecording.recordedSeconds,
             }
           : null,
-        sourceMedia: session.sourceMedia.map((m) => ({
-          id: m.id,
-          durationSeconds: m.durationSeconds,
-          isLiveRecording: m.isLiveRecording,
-          sizeBytes: m.sizeBytes.toString(),
-        })),
+        sourceMedia: session.sourceMedia.map((m) => {
+          const hasFile = m.filePath ? fileExists(m.filePath) : false;
+          const sourceVideoUrl = hasFile
+            ? `/api/storage/${m.filePath.replace(/\\/g, "/")}?inline=1`
+            : null;
+          return {
+            id: m.id,
+            durationSeconds: m.durationSeconds,
+            isLiveRecording: m.isLiveRecording,
+            sizeBytes: m.sizeBytes.toString(),
+            sourceVideoUrl,
+          };
+        }),
         storageBytes: storage?.storageBytes ?? 0,
         storageLabel: storage?.storageLabel ?? "0 B",
       },
@@ -92,9 +100,14 @@ export async function DELETE(
       filesOnly,
       freedBytes: result.freedBytes,
       storageLabel: result.storageLabel,
+      fullyRemoved: result.fullyRemoved,
+      orphanedPaths: result.orphanedPaths,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to delete session";
+    if (message === "Session not found") {
+      return errorResponse(message, 404);
+    }
     return errorResponse(message, 500);
   }
 }

@@ -1,6 +1,7 @@
 import { toJsonValue } from "@/lib/utils";
 import { prisma } from "@/lib/db";
 import { createEmbedding } from "@/lib/embeddings";
+import { EMBED_CHAT_WINDOWS } from "@/lib/aiCostConstants";
 import { storeEmbedding } from "@/lib/rag";
 import {
   scoreChatWindow,
@@ -89,13 +90,26 @@ export async function processChatWindows(
       windowsCreated++;
     }
 
-    // Embed high-scoring windows
-    if (metrics.score >= MIN_SCORE_FOR_SUMMARY && summary) {
-      try {
-        const embedding = await createEmbedding(summary);
-        await storeEmbedding("EventWindow", eventWindow.id, embedding);
-      } catch (e) {
-        console.warn("Failed to embed chat window:", e);
+    // Embed high-scoring windows once (live-tick used to re-embed every poll).
+    if (
+      EMBED_CHAT_WINDOWS &&
+      metrics.score >= MIN_SCORE_FOR_SUMMARY &&
+      summary
+    ) {
+      const raw = (existing?.rawData ?? {}) as { embedded?: boolean };
+      if (!raw.embedded) {
+        try {
+          const embedding = await createEmbedding(summary);
+          await storeEmbedding("EventWindow", eventWindow.id, embedding);
+          await prisma.eventWindow.update({
+            where: { id: eventWindow.id },
+            data: {
+              rawData: toJsonValue({ ...rawData, embedded: true }),
+            },
+          });
+        } catch (e) {
+          console.warn("Failed to embed chat window:", e);
+        }
       }
     }
   }

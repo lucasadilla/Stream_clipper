@@ -102,12 +102,17 @@ export async function processVideoIncremental(streamSessionId: string) {
     const { analyzeAudioSegment } = await import("@/services/audioAnalysisService");
     const segmentEnd = transcription.transcribedThrough ?? LIVE_SEGMENT_SECONDS;
     const fromSeconds = Math.max(0, segmentEnd - LIVE_SEGMENT_SECONDS);
-    await analyzeAudioSegment(
-      streamSessionId,
-      sourceMedia.filePath,
-      fromSeconds,
-      segmentEnd
-    );
+    try {
+      await analyzeAudioSegment(
+        streamSessionId,
+        sourceMedia.filePath,
+        fromSeconds,
+        segmentEnd
+      );
+    } catch (err) {
+      // Video-only live files have no audio track; never block transcription on this.
+      console.warn("[media] audio segment analysis failed:", err);
+    }
   }
 
   return {

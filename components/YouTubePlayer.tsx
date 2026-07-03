@@ -123,7 +123,7 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
       <div
         className={
           fillContainer
-            ? "relative w-full h-full rounded-xl overflow-hidden bg-black border border-[#2a2a2a]"
+            ? "relative w-full h-full overflow-hidden bg-black"
             : "relative w-full aspect-video rounded-xl overflow-hidden bg-black border border-[var(--color-card-border)]"
         }
       >
