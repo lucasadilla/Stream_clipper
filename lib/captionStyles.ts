@@ -48,49 +48,6 @@ export function formatCaptionTextForBurn(
   return wrapCaptionText(text, maxCharsPerCaptionLine(format));
 }
 
-/** FFmpeg `force_style` tuned per output aspect ratio. */
-export function getFfmpegCaptionForceStyle(
-  format: RenderFormat,
-  outputHeight = 1080
-): string {
-  if (format === "vertical") {
-    return [
-      "FontName=Arial",
-      "FontSize=20",
-      "Bold=1",
-      "PrimaryColour=&HFFFFFF",
-      "OutlineColour=&H000000",
-      "Outline=2",
-      "BorderStyle=1",
-      "Alignment=2",
-      "MarginV=168",
-      "MarginL=56",
-      "MarginR=56",
-      "WrapStyle=0",
-    ].join(",");
-  }
-
-  const scale = Math.max(0.65, Math.min(1.25, outputHeight / 1080));
-  const fontSize = Math.round(24 * scale);
-  const marginV = Math.round(48 * scale);
-  const marginH = Math.round(80 * scale);
-
-  return [
-    "FontName=Arial",
-    `FontSize=${fontSize}`,
-    "Bold=1",
-    "PrimaryColour=&HFFFFFF",
-    "OutlineColour=&H000000",
-    "Outline=2",
-    "BorderStyle=1",
-    "Alignment=2",
-    `MarginV=${marginV}`,
-    `MarginL=${marginH}`,
-    `MarginR=${marginH}`,
-    "WrapStyle=0",
-  ].join(",");
-}
-
 export const CAPTIONS_STORAGE_KEY = "stream-clipper-captions-enabled";
 
 export function readCaptionsEnabledPreference(): boolean {

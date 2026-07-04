@@ -20,6 +20,11 @@ import {
   readCaptionsEnabledPreference,
   writeCaptionsEnabledPreference,
 } from "@/lib/captionStyles";
+import {
+  readCaptionAppearancePreference,
+  writeCaptionAppearancePreference,
+  type CaptionAppearance,
+} from "@/lib/captionAppearance";
 
 interface SessionData {
   id: string;
@@ -68,6 +73,9 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const [transcriptionError, setTranscriptionError] = useState<string | null>(null);
   const [transcribingActive, setTranscribingActive] = useState(false);
   const [captionsEnabled, setCaptionsEnabled] = useState(true);
+  const [captionAppearance, setCaptionAppearance] = useState<CaptionAppearance>(
+    readCaptionAppearancePreference
+  );
   const playerRef = useRef<YouTubePlayerHandle>(null);
   const sourceStarted = useRef(false);
   const transcribeInFlight = useRef(false);
@@ -165,6 +173,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
 
   useEffect(() => {
     setCaptionsEnabled(readCaptionsEnabledPreference());
+    setCaptionAppearance(readCaptionAppearancePreference());
   }, []);
 
   useEffect(() => {
@@ -427,9 +436,14 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
             playerRef={playerRef}
             transcripts={transcripts}
             captionsEnabled={captionsEnabled}
+            captionAppearance={captionAppearance}
             onCaptionsEnabledChange={(enabled) => {
               setCaptionsEnabled(enabled);
               writeCaptionsEnabledPreference(enabled);
+            }}
+            onCaptionAppearanceChange={(appearance) => {
+              setCaptionAppearance(appearance);
+              writeCaptionAppearancePreference(appearance);
             }}
             onTimeUpdate={setCurrentTime}
             onDurationChange={setPlayerDuration}
@@ -458,6 +472,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
             onClipCreated={loadEvents}
             includeCaptions={captionsEnabled}
             captionChunks={transcripts}
+            captionAppearance={captionAppearance}
           />
         </div>
 

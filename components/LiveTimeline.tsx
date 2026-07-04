@@ -4,6 +4,7 @@ import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo } fr
 import { formatSeconds, formatDuration } from "@/lib/time";
 import { LIVE_SEGMENT_SECONDS } from "@/lib/timelineConstants";
 import { buildCaptionTrack, type TranscriptChunkInput } from "@/lib/captionTrack";
+import type { CaptionAppearance } from "@/lib/captionAppearance";
 import { cn } from "@/lib/utils";
 import type { LiveTimelineSegment } from "@/lib/timelineSegments";
 import type { TimelineThumbnail } from "@/services/timelineThumbnailService";
@@ -31,6 +32,7 @@ interface LiveTimelineProps {
   onClipCreated?: () => void;
   includeCaptions?: boolean;
   captionChunks?: TranscriptChunkInput[];
+  captionAppearance?: CaptionAppearance;
 }
 
 const VIDEO_TRACK_H = "min(22vh,100px)";
@@ -98,6 +100,7 @@ export function LiveTimeline({
   onClipCreated,
   includeCaptions = true,
   captionChunks = [],
+  captionAppearance,
 }: LiveTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const rulerRef = useRef<HTMLDivElement>(null);
@@ -333,7 +336,8 @@ export function LiveTimeline({
         selection,
         clipTitle || `Clip ${formatSeconds(selection.start)}`,
         format,
-        includeCaptions
+        includeCaptions,
+        captionAppearance
       );
       onClipCreated?.();
     } catch (err) {

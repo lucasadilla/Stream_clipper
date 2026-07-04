@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { renderShort } from "@/services/renderService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import { parseRenderFormat } from "@/lib/renderFormat";
+import { normalizeCaptionAppearance, type CaptionAppearance } from "@/lib/captionAppearance";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -16,6 +17,9 @@ export async function POST(
     const body = await request.json().catch(() => ({}));
     const includeCaptions = (body as { includeCaptions?: boolean }).includeCaptions ?? false;
     const format = parseRenderFormat((body as { format?: unknown }).format);
+    const captionAppearance = normalizeCaptionAppearance(
+      (body as { captionAppearance?: Partial<CaptionAppearance> }).captionAppearance
+    );
 
     const clip = await prisma.clipSuggestion.findUnique({
       where: { id: clipSuggestionId },
@@ -42,6 +46,7 @@ export async function POST(
       format,
       layout: clip.suggestedLayout as "center_crop",
       includeCaptions,
+      captionAppearance,
     });
 
     return jsonResponse(

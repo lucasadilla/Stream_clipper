@@ -7,33 +7,51 @@ import {
   lookupCueAtTime,
   type TranscriptChunkInput,
 } from "@/lib/captionTrack";
-import { cn } from "@/lib/utils";
+import {
+  captionPreviewStyle,
+  type CaptionAppearance,
+} from "@/lib/captionAppearance";
 import type { RefObject } from "react";
 
 interface CaptionTrackLayerProps {
   enabled: boolean;
   playerRef: RefObject<YouTubePlayerHandle | null>;
   chunks: TranscriptChunkInput[];
+  appearance: CaptionAppearance;
   showVerticalSafeArea?: boolean;
 }
 
-/**
- * Caption layer with its own playback clock (reads player ref directly).
- * Rendered above the video iframe — bottom-center placement.
- */
 export function CaptionTrackLayer({
   enabled,
   playerRef,
   chunks,
+  appearance,
   showVerticalSafeArea = false,
 }: CaptionTrackLayerProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
   const track = useMemo(
     () => buildCaptionTrack(chunks, showVerticalSafeArea ? "vertical" : "native"),
     [chunks, showVerticalSafeArea]
   );
 
   const [activeText, setActiveText] = useState<string | null>(null);
+  const [containerHeight, setContainerHeight] = useState(400);
   const activeIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      setContainerHeight(entry?.contentRect.height ?? 400);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const previewStyles = useMemo(
+    () => captionPreviewStyle(appearance, containerHeight),
+    [appearance, containerHeight]
+  );
 
   useEffect(() => {
     if (!enabled) {
@@ -66,7 +84,10 @@ export function CaptionTrackLayer({
   if (!enabled) return null;
 
   return (
-    <div className="absolute inset-0 z-50 pointer-events-none overflow-hidden">
+    <div
+      ref={containerRef}
+      className="absolute inset-0 z-50 pointer-events-none overflow-hidden"
+    >
       {showVerticalSafeArea && (
         <div
           className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-[min(56.25%,100%)] border-x border-dashed border-white/15"
@@ -74,17 +95,11 @@ export function CaptionTrackLayer({
         />
       )}
 
-      <div className="flex h-full w-full flex-col items-center justify-end pb-[10%] px-[5%]">
+      <div style={previewStyles.container}>
         {activeText && (
           <p
-            className={cn(
-              "max-w-full text-center font-bold leading-snug text-white",
-              "text-[clamp(14px,2.2vw,22px)]",
-              "px-3 py-1.5 rounded-md",
-              "bg-black/80",
-              "drop-shadow-[0_2px_10px_rgba(0,0,0,1)]",
-              "whitespace-pre-line line-clamp-2"
-            )}
+            style={previewStyles.text}
+            className="px-2 py-1 rounded-md bg-black/50 whitespace-pre-line line-clamp-2"
           >
             {activeText}
           </p>

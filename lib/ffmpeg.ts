@@ -1,7 +1,8 @@
 import { spawn } from "child_process";
 import path from "path";
 import type { RenderFormat } from "@/lib/renderFormat";
-import { getFfmpegCaptionForceStyle } from "@/lib/captionStyles";
+import type { CaptionAppearance } from "@/lib/captionAppearance";
+import { getFfmpegCaptionForceStyle } from "@/lib/captionAppearance";
 
 export function getFfmpegPath(): string {
   return process.env.FFMPEG_PATH ?? "ffmpeg";
@@ -386,16 +387,18 @@ export interface RenderShortOptions {
   srtPath?: string;
   subtitleFormat?: RenderFormat;
   outputHeight?: number;
+  captionAppearance?: CaptionAppearance;
   facecamRegion?: { x: number; y: number; width: number; height: number };
 }
 
 function subtitleFilter(
   srtPath: string,
   format: RenderFormat = "vertical",
-  outputHeight = 1080
+  outputHeight = 1080,
+  appearance?: CaptionAppearance
 ): string {
   const escapedSrt = srtPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-  const style = getFfmpegCaptionForceStyle(format, outputHeight);
+  const style = getFfmpegCaptionForceStyle(format, outputHeight, appearance);
   return `subtitles='${escapedSrt}':force_style='${style}'`;
 }
 
@@ -413,6 +416,7 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
     srtPath,
     subtitleFormat = format,
     outputHeight = format === "vertical" ? height : 1080,
+    captionAppearance,
   } = options;
 
   const duration = endTimeSeconds - startTimeSeconds;
@@ -429,7 +433,7 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
         "-i",
         inputPath,
         "-vf",
-        subtitleFilter(srtPath, subtitleFormat, outputHeight),
+        subtitleFilter(srtPath, subtitleFormat, outputHeight, captionAppearance),
         "-c:v",
         "libx264",
         "-preset",
@@ -481,7 +485,7 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
   }
 
   if (srtPath) {
-    vf += `,${subtitleFilter(srtPath, subtitleFormat, height)}`;
+    vf += `,${subtitleFilter(srtPath, subtitleFormat, height, captionAppearance)}`;
   }
 
   const args = [

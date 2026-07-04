@@ -14,6 +14,8 @@ import {
 import { getTranscriptChunksForRange } from "@/services/transcriptService";
 import { ensureClipSourceForRender } from "@/services/clipSourceService";
 import type { RenderFormat } from "@/lib/renderFormat";
+import type { CaptionAppearance } from "@/lib/captionAppearance";
+import { DEFAULT_CAPTION_APPEARANCE } from "@/lib/captionAppearance";
 
 export interface RenderShortParams {
   streamSessionId: string;
@@ -24,6 +26,7 @@ export interface RenderShortParams {
   format?: RenderFormat;
   layout?: "center_crop" | "facecam_overlay" | "facecam_top_gameplay_bottom" | "gameplay_full";
   includeCaptions?: boolean;
+  captionAppearance?: CaptionAppearance;
 }
 
 export async function renderShort(params: RenderShortParams) {
@@ -36,6 +39,7 @@ export async function renderShort(params: RenderShortParams) {
     format = "vertical",
     layout = "center_crop",
     includeCaptions = true,
+    captionAppearance = DEFAULT_CAPTION_APPEARANCE,
   } = params;
 
   const ffmpegOk = await isFfmpegAvailable();
@@ -155,6 +159,7 @@ export async function renderShort(params: RenderShortParams) {
       srtPath,
       subtitleFormat: format,
       outputHeight,
+      captionAppearance,
       facecamRegion: facecam
         ? {
             x: facecam.x,
