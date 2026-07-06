@@ -3,9 +3,9 @@
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { fetchJson } from "@/lib/apiClient";
-import { normalizeUserYoutubeUrl } from "@/lib/youtube";
+import { normalizeUserStreamUrl, parseStreamUrl } from "@/lib/streamPlatform";
 
-export function YouTubeUrlInput() {
+export function StreamUrlInput() {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -14,9 +14,16 @@ export function YouTubeUrlInput() {
     e.preventDefault();
     setError(null);
 
-    const normalized = normalizeUserYoutubeUrl(url);
+    const normalized = normalizeUserStreamUrl(url);
     if (!normalized.trim()) {
-      setError("Please enter a YouTube URL");
+      setError("Please enter a stream URL");
+      return;
+    }
+
+    if (!parseStreamUrl(normalized)) {
+      setError(
+        "Use a YouTube, Twitch (twitch.tv/channel or /videos/…), or Kick (kick.com/channel) link"
+      );
       return;
     }
 
@@ -28,12 +35,11 @@ export function YouTubeUrlInput() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ youtubeUrl: normalized }),
+          body: JSON.stringify({ streamUrl: normalized }),
         }
       );
       if (!ok) throw new Error(data.error ?? "Failed to create session");
       if (!data.session?.id) throw new Error("Failed to create session");
-      // Full navigation avoids dev-mode RSC flight parse errors on client routing
       window.location.assign(`/sessions/${data.session.id}`);
       return;
     } catch (err) {
@@ -50,7 +56,7 @@ export function YouTubeUrlInput() {
           type="text"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          placeholder="youtube.com/watch?v=... or paste live link"
+          placeholder="YouTube, Twitch, or Kick live / VOD link"
           required
           className={cn(
             "flex-1 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)]",
@@ -67,7 +73,7 @@ export function YouTubeUrlInput() {
             "disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           )}
         >
-          {loading ? "Analyzing…" : "Analyze YouTube Stream"}
+          {loading ? "Analyzing…" : "Analyze stream"}
         </button>
       </div>
       {error && (
@@ -76,3 +82,6 @@ export function YouTubeUrlInput() {
     </form>
   );
 }
+
+/** @deprecated Use StreamUrlInput */
+export const YouTubeUrlInput = StreamUrlInput;

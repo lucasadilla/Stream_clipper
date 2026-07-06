@@ -1,0 +1,178 @@
+import {
+  extractYouTubeVideoId,
+  normalizeYouTubeUrl,
+  normalizeUserYoutubeUrl,
+} from "@/lib/youtube";
+
+export type StreamPlatform = "youtube" | "twitch" | "kick";
+
+export interface StreamEmbedInfo {
+  twitchChannel?: string;
+  twitchVideoId?: string;
+  kickChannel?: string;
+}
+
+export interface ParsedStreamUrl {
+  platform: StreamPlatform;
+  /** Video id (YouTube/Twitch VOD) or channel login (live Twitch/Kick). */
+  sourceId: string;
+  canonicalUrl: string;
+  embed: StreamEmbedInfo;
+}
+
+const TWITCH_RESERVED = new Set([
+  "videos",
+  "directory",
+  "clips",
+  "p",
+  "settings",
+  "downloads",
+  "search",
+  "turbo",
+  "prime",
+]);
+
+export function normalizeUserStreamUrl(input: string): string {
+  return normalizeUserYoutubeUrl(input);
+}
+
+export function parseStreamUrl(input: string): ParsedStreamUrl | null {
+  const url = normalizeUserStreamUrl(input);
+  if (!url) return null;
+
+  const youtubeId = extractYouTubeVideoId(url);
+  if (youtubeId) {
+    return {
+      platform: "youtube",
+      sourceId: youtubeId,
+      canonicalUrl: normalizeYouTubeUrl(youtubeId),
+      embed: {},
+    };
+  }
+
+  const twitchVideo = url.match(/twitch\.tv\/videos\/(\d+)/i);
+  if (twitchVideo?.[1]) {
+    const videoId = twitchVideo[1];
+    return {
+      platform: "twitch",
+      sourceId: videoId,
+      canonicalUrl: `https://www.twitch.tv/videos/${videoId}`,
+      embed: { twitchVideoId: videoId },
+    };
+  }
+
+  const twitchChannel = url.match(/twitch\.tv\/([a-zA-Z0-9_]{2,25})(?:[/?#]|$)/i);
+  if (
+    twitchChannel?.[1] &&
+    !TWITCH_RESERVED.has(twitchChannel[1].toLowerCase())
+  ) {
+    const channel = twitchChannel[1].toLowerCase();
+    return {
+      platform: "twitch",
+      sourceId: channel,
+      canonicalUrl: `https://www.twitch.tv/${channel}`,
+      embed: { twitchChannel: channel },
+    };
+  }
+
+  const kickVideo = url.match(/kick\.com\/([^/]+)\/videos\/([a-f0-9-]+)/i);
+  if (kickVideo?.[1] && kickVideo?.[2]) {
+    const channel = kickVideo[1].toLowerCase();
+    return {
+      platform: "kick",
+      sourceId: kickVideo[2],
+      canonicalUrl: `https://kick.com/${channel}/videos/${kickVideo[2]}`,
+      embed: { kickChannel: channel },
+    };
+  }
+
+  const kickChannel = url.match(/kick\.com\/([a-zA-Z0-9_-]{2,30})(?:[/?#]|$)/i);
+  if (kickChannel?.[1]) {
+    const channel = kickChannel[1].toLowerCase();
+    const reserved = new Set(["terms", "privacy", "dmca", "community-guidelines"]);
+    if (!reserved.has(channel)) {
+      return {
+        platform: "kick",
+        sourceId: channel,
+        canonicalUrl: `https://kick.com/${channel}`,
+        embed: { kickChannel: channel },
+      };
+    }
+  }
+
+  return null;
+}
+
+export function platformLabel(platform: StreamPlatform): string {
+  if (platform === "twitch") return "Twitch";
+  if (platform === "kick") return "Kick";
+  return "YouTube";
+}
+
+export function readStreamEmbed(metadataJson: unknown): StreamEmbedInfo {
+  if (!metadataJson || typeof metadataJson !== "object") return {};
+  const embed = (metadataJson as { streamEmbed?: StreamEmbedInfo }).streamEmbed;
+  return embed ?? {};
+}
+
+export function isLiveStatus(liveStatus: string | null | undefined): boolean {
+  return liveStatus === "live" || liveStatus === "upcoming";
+}
+
+/** Browsers reliably play these in <video>; live captures are usually .mkv. */
+export function isBrowserPlayableVideoUrl(
+  url: string | null | undefined
+): boolean {
+  if (!url) return false;
+  return /\.(mp4|webm|m4v)(\?|#|$)/i.test(url);
+}
+
+/** Fill missing Twitch/Kick channel or VOD id from session sourceId. */
+export function resolveStreamEmbed(
+  platform: StreamPlatform,
+  sourceId: string,
+  embed: StreamEmbedInfo
+): StreamEmbedInfo {
+  if (platform === "twitch") {
+    const twitchVideoId =
+      embed.twitchVideoId ?? (/^\d+$/.test(sourceId) ? sourceId : undefined);
+    const twitchChannel =
+      embed.twitchChannel ??
+      (twitchVideoId ? undefined : sourceId.toLowerCase());
+    return { twitchChannel, twitchVideoId };
+  }
+  if (platform === "kick") {
+    return {
+      kickChannel: embed.kickChannel ?? sourceId.toLowerCase(),
+    };
+  }
+  return embed;
+}
+
+export function shouldPreferLocalVideoPreview(options: {
+  platform: StreamPlatform;
+  previewVideoUrl?: string | null;
+  sourceVideoUrl?: string | null;
+  sourceIsPlayableMp4?: boolean;
+  isLiveRecording?: boolean;
+  isLive?: boolean;
+  durationSeconds?: number | null;
+}): boolean {
+  if (options.platform === "youtube") return false;
+
+  // Twitch live embed is live-edge only — local capture enables timeline scrub.
+  if (
+    options.platform === "twitch" &&
+    (options.isLive || options.isLiveRecording)
+  ) {
+    return true;
+  }
+
+  const playbackUrl =
+    options.previewVideoUrl ??
+    (options.sourceIsPlayableMp4 ? options.sourceVideoUrl : null);
+
+  if (!isBrowserPlayableVideoUrl(playbackUrl)) return false;
+
+  return (options.durationSeconds ?? 0) >= 2;
+}

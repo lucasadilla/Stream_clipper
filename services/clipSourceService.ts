@@ -1,4 +1,5 @@
 import path from "path";
+import { existsSync } from "fs";
 import { prisma } from "@/lib/db";
 import { probeMedia } from "@/lib/ffmpeg";
 import { toJsonValue } from "@/lib/utils";
@@ -13,6 +14,7 @@ import {
   downloadClipSegmentFromYouTube,
   isYtDlpAvailable,
 } from "@/services/youtubeDownloadService";
+import { getPreviewMp4Path } from "@/services/previewVideoService";
 
 function formatYtDlpTime(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds));
@@ -64,23 +66,68 @@ export function isActivelyRecordingLive(session: {
   return isLive && recording;
 }
 
+async function resolveSourceDurationSeconds(
+  sourceMedia: { filePath: string; durationSeconds?: number | null },
+  liveRecordedSeconds?: number
+): Promise<number> {
+  let duration = Math.max(
+    sourceMedia.durationSeconds ?? 0,
+    liveRecordedSeconds ?? 0
+  );
+
+  if (duration > 0) return duration;
+
+  if (!fileExists(sourceMedia.filePath)) return 0;
+
+  try {
+    duration = (await probeMedia(resolveStoragePath(sourceMedia.filePath)))
+      .durationSeconds;
+  } catch {
+    return liveRecordedSeconds ?? 0;
+  }
+
+  return Math.max(duration, liveRecordedSeconds ?? 0);
+}
+
 async function localSourceCoversRange(
   sourceMedia: { filePath: string; durationSeconds?: number | null },
-  endTimeSeconds: number
+  endTimeSeconds: number,
+  liveRecordedSeconds?: number
 ): Promise<boolean> {
   if (!fileExists(sourceMedia.filePath)) return false;
 
-  let duration = sourceMedia.durationSeconds ?? 0;
-  if (duration <= 0) {
-    try {
-      duration = (await probeMedia(resolveStoragePath(sourceMedia.filePath)))
-        .durationSeconds;
-    } catch {
-      return false;
-    }
-  }
+  const duration = await resolveSourceDurationSeconds(
+    sourceMedia,
+    liveRecordedSeconds
+  );
 
-  return duration >= endTimeSeconds;
+  return duration >= endTimeSeconds - 0.5;
+}
+
+async function ensurePreviewSourceMedia(
+  streamSessionId: string,
+  absolutePath: string,
+  durationSeconds: number
+) {
+  const relativePath = toRelativeStoragePath(absolutePath);
+  const existing = await prisma.sourceMedia.findFirst({
+    where: { streamSessionId, filePath: relativePath },
+  });
+  if (existing) return existing;
+
+  const stat = await import("fs/promises").then((fs) => fs.stat(absolutePath));
+
+  return prisma.sourceMedia.create({
+    data: {
+      streamSessionId,
+      originalFilename: "preview.mp4",
+      filePath: relativePath,
+      mimeType: "video/mp4",
+      sizeBytes: BigInt(stat.size),
+      durationSeconds,
+      isLiveRecording: true,
+    },
+  });
 }
 
 /**
@@ -99,28 +146,98 @@ export async function ensureClipSourceForRender(
 }> {
   const session = await prisma.streamSession.findUnique({
     where: { id: streamSessionId },
+    include: { liveRecording: true },
   });
   if (!session) throw new Error("Session not found");
 
-  let sourceMedia = preferredSourceMediaId
-    ? await prisma.sourceMedia.findUnique({ where: { id: preferredSourceMediaId } })
-    : await prisma.sourceMedia.findFirst({
-        where: { streamSessionId },
-        orderBy: { createdAt: "desc" },
-      });
+  const liveRecordedSeconds = session.liveRecording?.recordedSeconds ?? 0;
 
-  if (sourceMedia && (await localSourceCoversRange(sourceMedia, endTimeSeconds))) {
-    return {
-      sourceMediaId: sourceMedia.id,
-      renderStart: startTimeSeconds,
-      renderEnd: endTimeSeconds,
-    };
+  if (isActivelyRecordingLive(session)) {
+    const buffer = 2;
+    if (
+      liveRecordedSeconds > 0 &&
+      endTimeSeconds > liveRecordedSeconds - buffer
+    ) {
+      throw new Error(
+        `Only ${Math.floor(liveRecordedSeconds)}s has been captured so far. Wait for recording to catch up, then try again.`
+      );
+    }
+  }
+
+  const allSources = await prisma.sourceMedia.findMany({
+    where: { streamSessionId },
+    orderBy: { createdAt: "desc" },
+  });
+
+  const orderedSources = preferredSourceMediaId
+    ? [
+        ...allSources.filter((s) => s.id === preferredSourceMediaId),
+        ...allSources.filter((s) => s.id !== preferredSourceMediaId),
+      ]
+    : allSources;
+
+  for (const sourceMedia of orderedSources) {
+    if (
+      await localSourceCoversRange(
+        sourceMedia,
+        endTimeSeconds,
+        liveRecordedSeconds
+      )
+    ) {
+      const segmentMatch = sourceMedia.originalFilename.match(
+        /^segment-(\d+)-(\d+)\.mp4$/i
+      );
+      if (segmentMatch) {
+        const segmentStart = parseInt(segmentMatch[1], 10);
+        return {
+          sourceMediaId: sourceMedia.id,
+          renderStart: startTimeSeconds - segmentStart,
+          renderEnd: endTimeSeconds - segmentStart,
+        };
+      }
+
+      return {
+        sourceMediaId: sourceMedia.id,
+        renderStart: startTimeSeconds,
+        renderEnd: endTimeSeconds,
+      };
+    }
+  }
+
+  const previewPath = getPreviewMp4Path(streamSessionId);
+  if (existsSync(previewPath)) {
+    let previewDuration = 0;
+    try {
+      previewDuration = (await probeMedia(previewPath)).durationSeconds;
+    } catch {
+      previewDuration = liveRecordedSeconds;
+    }
+    previewDuration = Math.max(previewDuration, liveRecordedSeconds);
+
+    if (previewDuration >= endTimeSeconds - 0.5) {
+      const previewMedia = await ensurePreviewSourceMedia(
+        streamSessionId,
+        previewPath,
+        previewDuration
+      );
+      return {
+        sourceMediaId: previewMedia.id,
+        renderStart: startTimeSeconds,
+        renderEnd: endTimeSeconds,
+      };
+    }
   }
 
   const ytDlpOk = await isYtDlpAvailable();
   if (!ytDlpOk) {
     throw new Error(
-      "No local video for this timestamp yet. Install yt-dlp to fetch clips directly from YouTube."
+      "No local video for this clip yet. Wait for the source download to finish, or install yt-dlp."
+    );
+  }
+
+  if (isActivelyRecordingLive(session)) {
+    throw new Error(
+      "Local recording does not cover this clip range yet. Wait a few seconds and try again."
     );
   }
 
@@ -134,12 +251,14 @@ export async function ensureClipSourceForRender(
   const segmentName = `segment-${Math.floor(segmentStart)}-${Math.floor(segmentEnd)}.mp4`;
   const absolutePath = path.join(uploadDir, segmentName);
 
-  await downloadClipSegmentFromYouTube(
-    session.youtubeUrl,
-    formatYtDlpTime(segmentStart),
-    formatYtDlpTime(segmentEnd),
-    absolutePath
-  );
+  if (!existsSync(absolutePath)) {
+    await downloadClipSegmentFromYouTube(
+      session.youtubeUrl,
+      formatYtDlpTime(segmentStart),
+      formatYtDlpTime(segmentEnd),
+      absolutePath
+    );
+  }
 
   const relativePath = toRelativeStoragePath(absolutePath);
   let probe;
@@ -159,21 +278,24 @@ export async function ensureClipSourceForRender(
 
   const stat = await import("fs/promises").then((fs) => fs.stat(absolutePath));
 
-  const segmentMedia = await prisma.sourceMedia.create({
-    data: {
-      streamSessionId,
-      originalFilename: segmentName,
-      filePath: relativePath,
-      mimeType: "video/mp4",
-      sizeBytes: BigInt(stat.size),
-      durationSeconds: probe.durationSeconds || segmentEnd - segmentStart,
-      width: probe.width || null,
-      height: probe.height || null,
-      fps: probe.fps || null,
-      codecInfo: toJsonValue(probe.raw),
-      isLiveRecording: false,
-    },
-  });
+  const existingSegment = allSources.find((s) => s.filePath === relativePath);
+  const segmentMedia =
+    existingSegment ??
+    (await prisma.sourceMedia.create({
+      data: {
+        streamSessionId,
+        originalFilename: segmentName,
+        filePath: relativePath,
+        mimeType: "video/mp4",
+        sizeBytes: BigInt(stat.size),
+        durationSeconds: probe.durationSeconds || segmentEnd - segmentStart,
+        width: probe.width || null,
+        height: probe.height || null,
+        fps: probe.fps || null,
+        codecInfo: toJsonValue(probe.raw),
+        isLiveRecording: false,
+      },
+    }));
 
   const renderStart = startTimeSeconds - segmentStart;
   const renderEnd = endTimeSeconds - segmentStart;

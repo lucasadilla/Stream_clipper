@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { YouTubePlayerHandle } from "@/components/YouTubePlayer";
+import type { StreamPlayerHandle } from "@/types/streamPlayer";
 import {
   buildCaptionTrack,
   lookupCueAtTime,
   type TranscriptChunkInput,
 } from "@/lib/captionTrack";
+import { applyCaptionEdits, type CaptionEditsMap } from "@/lib/captionEdits";
 import {
   captionPreviewStyle,
   type CaptionAppearance,
@@ -15,8 +16,9 @@ import type { RefObject } from "react";
 
 interface CaptionTrackLayerProps {
   enabled: boolean;
-  playerRef: RefObject<YouTubePlayerHandle | null>;
+  playerRef: RefObject<StreamPlayerHandle | null>;
   chunks: TranscriptChunkInput[];
+  captionEdits?: CaptionEditsMap;
   appearance: CaptionAppearance;
   showVerticalSafeArea?: boolean;
 }
@@ -25,14 +27,18 @@ export function CaptionTrackLayer({
   enabled,
   playerRef,
   chunks,
+  captionEdits = {},
   appearance,
   showVerticalSafeArea = false,
 }: CaptionTrackLayerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const track = useMemo(
-    () => buildCaptionTrack(chunks, showVerticalSafeArea ? "vertical" : "native"),
-    [chunks, showVerticalSafeArea]
-  );
+  const track = useMemo(() => {
+    const built = buildCaptionTrack(
+      chunks,
+      showVerticalSafeArea ? "vertical" : "native"
+    );
+    return applyCaptionEdits(built, captionEdits);
+  }, [chunks, captionEdits, showVerticalSafeArea]);
 
   const [activeText, setActiveText] = useState<string | null>(null);
   const [containerHeight, setContainerHeight] = useState(400);
@@ -66,7 +72,11 @@ export function CaptionTrackLayer({
     const tick = (now: number) => {
       if (now - lastPoll >= 50) {
         lastPoll = now;
-        const t = playerRef.current?.getCurrentTime() ?? 0;
+        const handle = playerRef.current;
+        const t =
+          handle && typeof handle.getCurrentTime === "function"
+            ? handle.getCurrentTime()
+            : 0;
         const cue = lookupCueAtTime(track, t);
         const nextId = cue?.id ?? null;
         if (nextId !== activeIdRef.current) {

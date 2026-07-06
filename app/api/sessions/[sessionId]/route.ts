@@ -7,6 +7,14 @@ import {
 } from "@/services/sessionCleanupService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import { resolveVideoDurationFromMetadata } from "@/lib/youtube";
+import { readStreamEmbed } from "@/lib/streamPlatform";
+import type { StreamPlatform } from "@/lib/streamPlatform";
+import { isBrowserPlayableVideoUrl } from "@/lib/streamPlatform";
+import {
+  buildPreviewVideoUrl,
+  getPreviewVideoRelativePath,
+  previewMp4Ready,
+} from "@/services/previewVideoService";
 import { fileExists } from "@/lib/storage";
 
 export async function GET(
@@ -46,6 +54,7 @@ export async function GET(
     return jsonResponse({
       session: {
         id: session.id,
+        platform: session.platform ?? "youtube",
         youtubeVideoId: session.youtubeVideoId,
         youtubeUrl: session.youtubeUrl,
         title: session.title,
@@ -60,21 +69,32 @@ export async function GET(
               recordedSeconds: session.liveRecording.recordedSeconds,
             }
           : null,
-        sourceMedia: session.sourceMedia.map((m) => {
+        sourceMedia: await Promise.all(
+          session.sourceMedia.map(async (m) => {
           const hasFile = m.filePath ? fileExists(m.filePath) : false;
           const sourceVideoUrl = hasFile
             ? `/api/storage/${m.filePath.replace(/\\/g, "/")}?inline=1`
             : null;
+          const previewRelative = getPreviewVideoRelativePath(sessionId);
+          const previewReady = await previewMp4Ready(sessionId);
+          const previewVideoUrl = previewReady
+            ? buildPreviewVideoUrl(previewRelative)
+            : null;
+          const sourceIsPlayableMp4 = isBrowserPlayableVideoUrl(sourceVideoUrl);
           return {
             id: m.id,
             durationSeconds: m.durationSeconds,
             isLiveRecording: m.isLiveRecording,
             sizeBytes: m.sizeBytes.toString(),
             sourceVideoUrl,
+            previewVideoUrl,
+            sourceIsPlayableMp4,
           };
-        }),
+        })
+        ),
         storageBytes: storage?.storageBytes ?? 0,
         storageLabel: storage?.storageLabel ?? "0 B",
+        streamEmbed: readStreamEmbed(session.metadataJson),
       },
     });
   } catch (error) {

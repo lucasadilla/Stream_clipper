@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { toJsonValue } from "@/lib/utils";
 import { enrichEventWindowClip } from "@/services/findClipService";
+import { MAX_CLIP_SECONDS } from "@/lib/clipConstants";
 
 const MIN_SCORE = 10;
 
@@ -133,8 +134,8 @@ export async function createManualClip(
   if (endTimeSeconds <= startTimeSeconds) {
     throw new Error("End time must be after start time");
   }
-  if (endTimeSeconds - startTimeSeconds > 120) {
-    throw new Error("Clips must be 2 minutes or shorter");
+  if (endTimeSeconds - startTimeSeconds > MAX_CLIP_SECONDS) {
+    throw new Error(`Clips must be ${MAX_CLIP_SECONDS / 60} minutes or shorter`);
   }
 
   return prisma.clipSuggestion.create({

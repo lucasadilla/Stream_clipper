@@ -3,18 +3,42 @@
 import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo } from "react";
 import { formatSeconds, formatDuration } from "@/lib/time";
 import { LIVE_SEGMENT_SECONDS } from "@/lib/timelineConstants";
-import { buildCaptionTrack, type TranscriptChunkInput } from "@/lib/captionTrack";
+import { sanitizeDurationSeconds } from "@/lib/timelineBounds";
+import { buildCaptionTrack, type TranscriptChunkInput, type CaptionCue } from "@/lib/captionTrack";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
+import { applyCaptionEdits, clampCueRange, type CaptionEditsMap } from "@/lib/captionEdits";
+import { CaptionTimelineTrack, type CaptionDragMode } from "@/components/CaptionTimelineTrack";
+import { CaptionCueEditor } from "@/components/CaptionCueEditor";
+import { RenderClipModal } from "@/components/RenderClipModal";
 import { cn } from "@/lib/utils";
 import type { LiveTimelineSegment } from "@/lib/timelineSegments";
 import type { TimelineThumbnail } from "@/services/timelineThumbnailService";
+import {
+  formatHypeTooltip,
+  type ChatHypeMoment,
+  type HypeIntensity,
+} from "@/lib/chatHypeTimeline";
+import {
+  formatAudioSpikeTooltip,
+  waveformHasSignal,
+  type AudioSpikeMarker,
+  type AudioSpikeIntensity,
+  type WaveformBucket,
+} from "@/lib/audioSpikeTimeline";
 
 export interface ClipSelection {
   start: number;
   end: number;
 }
 
-type DragMode = "range" | "start" | "end" | "move" | "scrub" | null;
+type DragMode =
+  | "range"
+  | "start"
+  | "end"
+  | "move"
+  | "scrub"
+  | CaptionDragMode
+  | null;
 
 interface LiveTimelineProps {
   sessionId: string;
@@ -33,12 +57,28 @@ interface LiveTimelineProps {
   includeCaptions?: boolean;
   captionChunks?: TranscriptChunkInput[];
   captionAppearance?: CaptionAppearance;
+  captionEdits?: CaptionEditsMap;
+  onCaptionEdit?: (
+    cueId: string,
+    patch: Partial<{
+      text: string;
+      startTimeSeconds: number;
+      endTimeSeconds: number;
+    }>
+  ) => void;
+  chatHypeMoments?: ChatHypeMoment[];
+  showChatHypeTrack?: boolean;
+  audioWaveform?: WaveformBucket[];
+  audioSpikes?: AudioSpikeMarker[];
+  showAudioLane?: boolean;
 }
 
 const VIDEO_TRACK_H = "min(22vh,100px)";
+const AUDIO_TRACK_H = "min(14vh,72px)";
+const HYPE_TRACK_H = "min(12vh,64px)";
 const CAPTION_TRACK_H = "min(10vh,56px)";
 
-const MIN_CLIP_SECONDS = 3;
+import { MIN_CLIP_SECONDS, MAX_CLIP_SECONDS } from "@/lib/clipConstants";
 const TRACK_LABEL_W = 52;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 32;
@@ -73,7 +113,12 @@ function snapTime(seconds: number, step = 1) {
   return Math.round(seconds / step) * step;
 }
 
-function clampSelection(start: number, end: number, maxTime: number): ClipSelection {
+function clampSelection(
+  start: number,
+  end: number,
+  maxTime: number,
+  opts?: { fixedEnd?: boolean }
+): ClipSelection {
   let s = Math.max(0, Math.min(start, maxTime));
   let e = Math.max(0, Math.min(end, maxTime));
   if (e < s) [s, e] = [e, s];
@@ -81,7 +126,55 @@ function clampSelection(start: number, end: number, maxTime: number): ClipSelect
     e = Math.min(s + MIN_CLIP_SECONDS, maxTime);
     if (e - s < MIN_CLIP_SECONDS) s = Math.max(0, e - MIN_CLIP_SECONDS);
   }
+  if (e - s > MAX_CLIP_SECONDS) {
+    if (opts?.fixedEnd) {
+      s = Math.max(0, e - MAX_CLIP_SECONDS);
+    } else {
+      e = Math.min(maxTime, s + MAX_CLIP_SECONDS);
+    }
+  }
   return { start: s, end: e };
+}
+
+function hypeBarClass(intensity: HypeIntensity, isActive: boolean): string {
+  if (isActive) {
+    if (intensity === "high") {
+      return "border-[#95FF00] bg-[#95FF00]/40 text-[#f0ffe0] z-[4]";
+    }
+    if (intensity === "medium") {
+      return "border-orange-400 bg-orange-500/35 text-orange-50 z-[4]";
+    }
+    return "border-orange-500/70 bg-orange-600/25 text-orange-100 z-[4]";
+  }
+  if (intensity === "high") {
+    return "border-[#95FF00]/60 bg-[#95FF00]/20 text-[#d4ffb8] hover:bg-[#95FF00]/30";
+  }
+  if (intensity === "medium") {
+    return "border-orange-500/50 bg-orange-600/20 text-orange-200/90 hover:bg-orange-600/30";
+  }
+  return "border-orange-700/40 bg-orange-800/15 text-orange-300/70 hover:bg-orange-800/25";
+}
+
+function audioSpikeBarClass(
+  intensity: AudioSpikeIntensity,
+  isActive: boolean
+): string {
+  if (isActive) {
+    if (intensity === "high") {
+      return "border-[#00d4aa] bg-[#00d4aa]/45 text-[#e0fff8] z-[6] shadow-[0_0_8px_#00d4aa55]";
+    }
+    if (intensity === "medium") {
+      return "border-cyan-400 bg-cyan-500/35 text-cyan-50 z-[5]";
+    }
+    return "border-cyan-600/60 bg-cyan-700/25 text-cyan-100 z-[4]";
+  }
+  if (intensity === "high") {
+    return "border-[#00d4aa]/70 bg-[#00d4aa]/25 hover:bg-[#00d4aa]/35";
+  }
+  if (intensity === "medium") {
+    return "border-cyan-500/50 bg-cyan-600/20 hover:bg-cyan-600/30";
+  }
+  return "border-cyan-700/40 bg-cyan-800/15 hover:bg-cyan-800/25";
 }
 
 export function LiveTimeline({
@@ -101,33 +194,90 @@ export function LiveTimeline({
   includeCaptions = true,
   captionChunks = [],
   captionAppearance,
+  captionEdits = {},
+  onCaptionEdit,
+  chatHypeMoments = [],
+  showChatHypeTrack = false,
+  audioWaveform = [],
+  audioSpikes = [],
+  showAudioLane = false,
 }: LiveTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const rulerRef = useRef<HTMLDivElement>(null);
   const videoTrackRef = useRef<HTMLDivElement>(null);
+  const captionTrackRef = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState<DragMode>(null);
-  const [rendering, setRendering] = useState<"native" | "vertical" | null>(null);
-  const [clipTitle, setClipTitle] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [selectedCaptionCueId, setSelectedCaptionCueId] = useState<string | null>(
+    null
+  );
+  const [renderModalOpen, setRenderModalOpen] = useState(false);
+
+  useEffect(() => {
+    if (!renderModalOpen) return;
+    setDragging(null);
+    document.body.dataset.renderModalOpen = "true";
+    return () => {
+      delete document.body.dataset.renderModalOpen;
+    };
+  }, [renderModalOpen]);
   const [zoom, setZoom] = useState(1);
   const [viewportWidth, setViewportWidth] = useState(0);
-  const dragOrigin = useRef({ x: 0, anchorTime: 0, start: 0, end: 0 });
+  const dragOrigin = useRef({
+    x: 0,
+    anchorTime: 0,
+    start: 0,
+    end: 0,
+    cueId: null as string | null,
+    cueStart: 0,
+    cueEnd: 0,
+  });
 
-  const maxTime = Math.max(
-    durationSeconds,
-    LIVE_SEGMENT_SECONDS,
-    recordedSeconds + (isLive ? LIVE_SEGMENT_SECONDS : 0)
+  const maxTime = sanitizeDurationSeconds(
+    Math.max(
+      durationSeconds,
+      LIVE_SEGMENT_SECONDS,
+      recordedSeconds + (isLive ? LIVE_SEGMENT_SECONDS : 0)
+    )
   );
 
   const trackContentWidth =
     viewportWidth > 0 ? viewportWidth * normalizeZoom(zoom) : 0;
 
-  const captionCues = useMemo(
+  const baseCaptionCues = useMemo(
     () => (includeCaptions ? buildCaptionTrack(captionChunks, "native") : []),
     [captionChunks, includeCaptions]
   );
 
+  const captionCues = useMemo(
+    () => applyCaptionEdits(baseCaptionCues, captionEdits),
+    [baseCaptionCues, captionEdits]
+  );
+
+  const selectedCaptionCue = useMemo(
+    () => captionCues.find((c) => c.id === selectedCaptionCueId) ?? null,
+    [captionCues, selectedCaptionCueId]
+  );
+
   const showCaptionTrack = captionCues.length > 0;
+  const showHypeTrack = showChatHypeTrack || chatHypeMoments.length > 0;
+  const showAudioTrack =
+    showAudioLane ||
+    waveformHasSignal(audioWaveform) ||
+    audioSpikes.length > 0;
+
+  function handleHypeClick(moment: ChatHypeMoment) {
+    const start = moment.startTimeSeconds;
+    const end = Math.max(moment.endTimeSeconds, start + MIN_CLIP_SECONDS);
+    onSeek(start);
+    onSelectionChange(clampSelection(start, end, maxTime));
+  }
+
+  function handleAudioSpikeClick(marker: AudioSpikeMarker) {
+    const start = marker.startTimeSeconds;
+    const end = Math.max(marker.endTimeSeconds, start + MIN_CLIP_SECONDS);
+    onSeek(start);
+    onSelectionChange(clampSelection(start, end, maxTime));
+  }
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -259,11 +409,23 @@ export function LiveTimeline({
     [timeFromRef]
   );
 
+  const timeFromCaptionTrack = useCallback(
+    (clientX: number) => timeFromRef(clientX, captionTrackRef),
+    [timeFromRef]
+  );
+
   useEffect(() => {
     if (!dragging) return;
 
     function onMove(e: PointerEvent) {
-      const t = snapTime(timeFromVideoTrack(e.clientX), 1);
+      const isCueDrag =
+        dragging === "cue-start" ||
+        dragging === "cue-end" ||
+        dragging === "cue-move";
+      const t = snapTime(
+        isCueDrag ? timeFromCaptionTrack(e.clientX) : timeFromVideoTrack(e.clientX),
+        isCueDrag ? 0.05 : 1
+      );
       const origin = dragOrigin.current;
 
       if (dragging === "range") {
@@ -271,7 +433,7 @@ export function LiveTimeline({
         const end = Math.max(origin.anchorTime, t);
         onSelectionChange(clampSelection(start, end, maxTime));
       } else if (dragging === "start") {
-        onSelectionChange(clampSelection(t, origin.end, maxTime));
+        onSelectionChange(clampSelection(t, origin.end, maxTime, { fixedEnd: true }));
       } else if (dragging === "end") {
         onSelectionChange(clampSelection(origin.start, t, maxTime));
       } else if (dragging === "move") {
@@ -291,6 +453,24 @@ export function LiveTimeline({
           0.1
         );
         onScrub(scrubT);
+      } else if (dragging === "cue-start" && origin.cueId && onCaptionEdit) {
+        const range = clampCueRange(t, origin.cueEnd, maxTime);
+        onCaptionEdit(origin.cueId, range);
+      } else if (dragging === "cue-end" && origin.cueId && onCaptionEdit) {
+        const range = clampCueRange(origin.cueStart, t, maxTime);
+        onCaptionEdit(origin.cueId, range);
+      } else if (dragging === "cue-move" && origin.cueId && onCaptionEdit) {
+        const el = captionTrackRef.current ?? videoTrackRef.current;
+        if (!el) return;
+        const width = origin.cueEnd - origin.cueStart;
+        const dt = (e.clientX - origin.x) / el.getBoundingClientRect().width;
+        const delta = dt * maxTime;
+        let start = origin.cueStart + delta;
+        start = Math.max(0, Math.min(start, maxTime - width));
+        onCaptionEdit(origin.cueId, {
+          startTimeSeconds: start,
+          endTimeSeconds: start + width,
+        });
       }
     }
 
@@ -304,7 +484,16 @@ export function LiveTimeline({
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
-  }, [dragging, maxTime, onSelectionChange, onScrub, timeFromRef, timeFromVideoTrack]);
+  }, [
+    dragging,
+    maxTime,
+    onSelectionChange,
+    onScrub,
+    onCaptionEdit,
+    timeFromRef,
+    timeFromVideoTrack,
+    timeFromCaptionTrack,
+  ]);
 
   function beginDrag(mode: DragMode, e: React.PointerEvent, anchorTime?: number) {
     e.preventDefault();
@@ -314,6 +503,29 @@ export function LiveTimeline({
       anchorTime: anchorTime ?? selection.start,
       start: selection.start,
       end: selection.end,
+      cueId: null,
+      cueStart: 0,
+      cueEnd: 0,
+    };
+    setDragging(mode);
+  }
+
+  function beginCueDrag(
+    mode: CaptionDragMode,
+    e: React.PointerEvent,
+    cue: CaptionCue
+  ) {
+    e.preventDefault();
+    e.stopPropagation();
+    setSelectedCaptionCueId(cue.id);
+    dragOrigin.current = {
+      x: e.clientX,
+      anchorTime: cue.startTimeSeconds,
+      start: selection.start,
+      end: selection.end,
+      cueId: cue.id,
+      cueStart: cue.startTimeSeconds,
+      cueEnd: cue.endTimeSeconds,
     };
     setDragging(mode);
   }
@@ -323,28 +535,6 @@ export function LiveTimeline({
     const t = timeFromVideoTrack(e.clientX);
     beginDrag("range", e, t);
     onSelectionChange(clampSelection(t, t + MIN_CLIP_SECONDS, maxTime));
-  }
-
-  async function handleRenderClip(format: "native" | "vertical") {
-    if (selection.end <= selection.start) return;
-    setError(null);
-    setRendering(format);
-    try {
-      const { saveAndRenderClip } = await import("@/lib/clipActions");
-      await saveAndRenderClip(
-        sessionId,
-        selection,
-        clipTitle || `Clip ${formatSeconds(selection.start)}`,
-        format,
-        includeCaptions,
-        captionAppearance
-      );
-      onClipCreated?.();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Render failed");
-    } finally {
-      setRendering(null);
-    }
   }
 
   function setInPoint() {
@@ -385,13 +575,27 @@ export function LiveTimeline({
 
   const tickStep = getTickStep(maxTime, zoom);
   const rulerTicks: number[] = [];
-  for (let t = 0; t <= maxTime; t += tickStep) rulerTicks.push(t);
+  const maxTicks = 400;
+  for (
+    let t = 0;
+    t <= maxTime && rulerTicks.length < maxTicks;
+    t += tickStep
+  ) {
+    rulerTicks.push(t);
+  }
 
   const zoomLabel = zoom <= 1.02 ? "Fit" : `${Math.round(zoom * 100)}%`;
   const atMinZoom = zoom <= 1.02;
 
   return (
-    <div className="h-full flex flex-col rounded-lg border border-[#2a2a2a] bg-[#141414] overflow-hidden">
+    <>
+    <div
+      className={cn(
+        "h-full flex flex-col rounded-lg border border-[#2a2a2a] bg-[#141414] overflow-hidden transition-opacity",
+        renderModalOpen && "opacity-40 pointer-events-none select-none"
+      )}
+      aria-hidden={renderModalOpen}
+    >
       {/* Premiere-style toolbar */}
       <div className="shrink-0 flex flex-wrap items-center gap-2 px-3 py-2 border-b border-[#2a2a2a] bg-[#1a1a1a]">
         <div className="flex items-center gap-1">
@@ -409,19 +613,30 @@ export function LiveTimeline({
           </ToolBtn>
         </div>
 
-        <input
-          value={clipTitle}
-          onChange={(e) => setClipTitle(e.target.value)}
-          placeholder="Clip name"
-          className="flex-1 min-w-[120px] max-w-[200px] text-xs bg-[#0d0d0d] border border-[#333] rounded px-2 py-1.5 focus:outline-none focus:border-[var(--color-accent)]"
-        />
-
         <div className="font-mono text-xs text-[#ccc] tabular-nums">
           <span className="text-[var(--color-accent)]">{formatSeconds(selection.start)}</span>
           <span className="text-[#666] mx-1.5">—</span>
           <span className="text-[var(--color-accent)]">{formatSeconds(selection.end)}</span>
           <span className="text-[#666] ml-2">({formatDuration(selection.end - selection.start)})</span>
         </div>
+
+        {chatHypeMoments.length > 0 && (
+          <span
+            className="text-[10px] font-medium text-orange-400 tabular-nums"
+            title="Chat hype moments on timeline"
+          >
+            🔥 {chatHypeMoments.length}
+          </span>
+        )}
+
+        {audioSpikes.length > 0 && (
+          <span
+            className="text-[10px] font-medium text-[#00d4aa] tabular-nums"
+            title="Audio spikes on timeline"
+          >
+            🔊 {audioSpikes.length}
+          </span>
+        )}
 
         <div className="flex items-center gap-1 border-l border-[#333] pl-2 ml-1">
           <ToolBtn onClick={zoomOut} title="Zoom out" disabled={atMinZoom}>
@@ -447,41 +662,33 @@ export function LiveTimeline({
         <div className="flex items-center gap-1.5">
           <button
             type="button"
-            onClick={() => handleRenderClip("native")}
+            onClick={() => setRenderModalOpen(true)}
             disabled={
-              rendering !== null || selection.end - selection.start < MIN_CLIP_SECONDS
+              selection.end - selection.start < MIN_CLIP_SECONDS ||
+              selection.end - selection.start > MAX_CLIP_SECONDS
             }
-            title="Export original stream aspect ratio (16:9)"
-            className={cn(
-              "text-xs px-3 py-1.5 rounded font-semibold border",
-              "border-[#444] bg-[#252525] hover:bg-[#333] text-white",
-              "disabled:opacity-40"
-            )}
-          >
-            {rendering === "native" ? "Exporting…" : "Native"}
-          </button>
-          <button
-            type="button"
-            onClick={() => handleRenderClip("vertical")}
-            disabled={
-              rendering !== null || selection.end - selection.start < MIN_CLIP_SECONDS
+            title={
+              selection.end - selection.start > MAX_CLIP_SECONDS
+                ? `Clip must be ${MAX_CLIP_SECONDS / 60} minutes or shorter`
+                : "Render clip — pick aspect ratio, title, and export options"
             }
-            title="Export 9:16 vertical short"
             className={cn(
-              "text-xs px-3 py-1.5 rounded font-semibold",
+              "text-xs px-4 py-1.5 rounded font-semibold",
               "bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white",
               "disabled:opacity-40"
             )}
           >
-            {rendering === "vertical" ? "Exporting…" : "Vertical"}
+            Render
           </button>
         </div>
       </div>
 
-      {error && (
-        <p className="shrink-0 px-3 py-1.5 text-xs text-[var(--color-danger)] bg-[#1a1a1a] border-b border-[#2a2a2a]">
-          {error}
-        </p>
+      {selectedCaptionCue && onCaptionEdit && (
+        <CaptionCueEditor
+          cue={selectedCaptionCue}
+          onSave={(text) => onCaptionEdit(selectedCaptionCue.id, { text })}
+          onClose={() => setSelectedCaptionCueId(null)}
+        />
       )}
 
       {/* Timeline body */}
@@ -506,6 +713,22 @@ export function LiveTimeline({
             >
               <span className="text-[10px] font-semibold text-[#888]">V1</span>
             </div>
+            {showAudioTrack && (
+              <div
+                className="flex items-center justify-center border-b border-[#2a2a2a]"
+                style={{ height: AUDIO_TRACK_H }}
+              >
+                <span className="text-[10px] font-semibold text-[#00d4aa]">A1</span>
+              </div>
+            )}
+            {showHypeTrack && (
+              <div
+                className="flex items-center justify-center border-b border-[#2a2a2a]"
+                style={{ height: HYPE_TRACK_H }}
+              >
+                <span className="text-[10px] font-semibold text-orange-400">🔥</span>
+              </div>
+            )}
             {showCaptionTrack && (
               <div
                 className="flex items-center justify-center border-b border-[#2a2a2a]"
@@ -543,7 +766,13 @@ export function LiveTimeline({
                   </span>
                 </div>
               ))}
-              <Playhead percent={playheadPct} tall onScrub={(e) => beginDrag("scrub", e)} />
+              {!renderModalOpen && (
+                <Playhead
+                  percent={playheadPct}
+                  tall
+                  onScrub={(e) => beginDrag("scrub", e)}
+                />
+              )}
             </div>
 
             {/* Tracks stack — shared playhead spans video + captions */}
@@ -637,50 +866,154 @@ export function LiveTimeline({
 
             </div>
 
-            {/* CC Caption track — independent timeline layer */}
-            {showCaptionTrack && (
+            {/* Audio loudness + spike lane */}
+            {showAudioTrack && (
               <div
-                className="relative bg-[#0a0f14] border-b border-[#2a2a2a] shrink-0 overflow-hidden"
-                style={{ height: CAPTION_TRACK_H }}
+                className="relative bg-[#061210] border-b border-[#2a2a2a] shrink-0 overflow-hidden"
+                style={{ height: AUDIO_TRACK_H }}
               >
-                {captionCues.map((cue) => {
+                {audioWaveform.map((bucket, i) => (
+                  <div
+                    key={`wf-${i}`}
+                    className="absolute bottom-0 bg-[#00d4aa]/35 pointer-events-none rounded-t-[1px]"
+                    style={{
+                      left: `${pct(bucket.startTimeSeconds, maxTime)}%`,
+                      width: `${Math.max(
+                        pct(
+                          bucket.endTimeSeconds - bucket.startTimeSeconds,
+                          maxTime
+                        ),
+                        0.12
+                      )}%`,
+                      height: `${Math.max(8, bucket.level * 92)}%`,
+                    }}
+                  />
+                ))}
+
+                {!waveformHasSignal(audioWaveform) && audioSpikes.length === 0 && (
+                  <div className="absolute inset-0 flex items-center justify-center text-[9px] text-[#00d4aa]/35 pointer-events-none">
+                    {isLive ? "Analyzing audio levels…" : "No audio spikes yet"}
+                  </div>
+                )}
+
+                {audioSpikes.map((marker) => {
                   const isActive =
-                    currentTime >= cue.startTimeSeconds &&
-                    currentTime < cue.endTimeSeconds;
+                    currentTime >= marker.startTimeSeconds &&
+                    currentTime < marker.endTimeSeconds;
                   return (
                     <button
-                      key={cue.id}
+                      key={marker.id}
                       type="button"
-                      title={cue.text}
-                      onClick={() => onSeek(cue.startTimeSeconds)}
+                      title={formatAudioSpikeTooltip(marker)}
+                      onClick={() => handleAudioSpikeClick(marker)}
                       className={cn(
-                        "absolute top-1 bottom-1 rounded-sm border text-left overflow-hidden",
-                        "px-1 py-0.5 text-[9px] leading-tight truncate",
-                        isActive
-                          ? "border-[#7eb8ff] bg-[#7eb8ff]/25 text-[#dceeff] z-[4]"
-                          : "border-[#2a4a66] bg-[#152535]/80 text-[#8ab4d4] hover:bg-[#1a3045]"
+                        "absolute top-0.5 bottom-0.5 rounded-sm border cursor-pointer",
+                        "min-w-[3px] px-0",
+                        audioSpikeBarClass(marker.intensity, isActive)
                       )}
                       style={{
-                        left: `${pct(cue.startTimeSeconds, maxTime)}%`,
+                        left: `${pct(marker.startTimeSeconds, maxTime)}%`,
                         width: `${Math.max(
-                          pct(cue.endTimeSeconds - cue.startTimeSeconds, maxTime),
-                          0.35
+                          pct(
+                            marker.endTimeSeconds - marker.startTimeSeconds,
+                            maxTime
+                          ),
+                          marker.type === "volume_spike" ? 0.35 : 0.6
                         )}%`,
                       }}
-                    >
-                      {cue.text.replace(/\n/g, " ")}
-                    </button>
+                    />
                   );
                 })}
               </div>
             )}
 
-            <Playhead percent={playheadPct} tall onScrub={(e) => beginDrag("scrub", e)} />
+            {/* Chat hype track */}
+            {showHypeTrack && (
+              <div
+                className="relative bg-[#120a08] border-b border-[#2a2a2a] shrink-0 overflow-hidden"
+                style={{ height: HYPE_TRACK_H }}
+              >
+                {chatHypeMoments.length === 0 ? (
+                  <div className="absolute inset-0 flex items-center justify-center text-[9px] text-orange-400/40 pointer-events-none">
+                    {isLive ? "Watching chat for hype…" : "No hype moments yet"}
+                  </div>
+                ) : (
+                  chatHypeMoments.map((moment) => {
+                    const isActive =
+                      currentTime >= moment.startTimeSeconds &&
+                      currentTime < moment.endTimeSeconds;
+                    return (
+                      <button
+                        key={moment.id}
+                        type="button"
+                        title={formatHypeTooltip(moment)}
+                        onClick={() => handleHypeClick(moment)}
+                        className={cn(
+                          "absolute top-1 bottom-1 rounded-sm border text-left overflow-hidden",
+                          "px-1 py-0.5 text-[9px] leading-tight truncate cursor-pointer",
+                          hypeBarClass(moment.intensity, isActive)
+                        )}
+                        style={{
+                          left: `${pct(moment.startTimeSeconds, maxTime)}%`,
+                          width: `${Math.max(
+                            pct(
+                              moment.endTimeSeconds - moment.startTimeSeconds,
+                              maxTime
+                            ),
+                            0.5
+                          )}%`,
+                        }}
+                      >
+                        {moment.intensity === "high"
+                          ? "🔥"
+                          : moment.clipItCount > 0
+                            ? "clip"
+                            : "hype"}
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            )}
+
+            {/* CC Caption track — editable */}
+            {showCaptionTrack && (
+              <CaptionTimelineTrack
+                cues={captionCues}
+                maxTime={maxTime}
+                currentTime={currentTime}
+                height={CAPTION_TRACK_H}
+                selectedCueId={selectedCaptionCueId}
+                onSelectCue={setSelectedCaptionCueId}
+                onSeek={onSeek}
+                onBeginCueDrag={beginCueDrag}
+                trackRef={captionTrackRef}
+              />
+            )}
+
+            {!renderModalOpen && (
+              <Playhead
+                percent={playheadPct}
+                tall
+                onScrub={(e) => beginDrag("scrub", e)}
+              />
+            )}
             </div>
           </div>
         </div>
       </div>
     </div>
+
+    <RenderClipModal
+      open={renderModalOpen}
+      onClose={() => setRenderModalOpen(false)}
+      sessionId={sessionId}
+      selection={selection}
+      includeCaptions={includeCaptions}
+      captionAppearance={captionAppearance}
+      onClipCreated={onClipCreated}
+    />
+    </>
   );
 }
 
@@ -694,7 +1027,11 @@ function Playhead({
   onScrub?: (e: React.PointerEvent) => void;
 }) {
   return (
-    <div className="absolute top-0 bottom-0 z-[30] pointer-events-none" style={{ left: `${percent}%` }}>
+    <div
+      data-timeline-playhead
+      className="absolute top-0 bottom-0 z-[30] pointer-events-none"
+      style={{ left: `${percent}%` }}
+    >
       <div
         className={cn(
           "absolute top-0 bottom-0 w-px bg-[#e8b84a] -translate-x-1/2 shadow-[0_0_4px_#e8b84a]",

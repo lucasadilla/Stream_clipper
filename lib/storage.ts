@@ -20,11 +20,29 @@ export function getRendersDir(sessionId: string): string {
   return path.join(getStorageRoot(), "renders", sessionId);
 }
 
+export function getAudioCacheDir(sessionId: string): string {
+  return path.join(getStorageRoot(), "audio", sessionId);
+}
+
+export function getWaveformCachePath(sessionId: string): string {
+  return path.join(getAudioCacheDir(sessionId), "waveform.json");
+}
+
+export function getCaptionEditsDir(sessionId: string): string {
+  return path.join(getStorageRoot(), "captions", sessionId);
+}
+
+export function getCaptionEditsPath(sessionId: string): string {
+  return path.join(getCaptionEditsDir(sessionId), "edits.json");
+}
+
 export function getSessionStorageDirs(sessionId: string): string[] {
   return [
     getUploadDir(sessionId),
     getFramesDir(sessionId),
     getRendersDir(sessionId),
+    getAudioCacheDir(sessionId),
+    getCaptionEditsDir(sessionId),
   ];
 }
 

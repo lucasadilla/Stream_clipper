@@ -99,13 +99,13 @@ export function SourceVideoPanel({
       <p className="text-xs text-[var(--color-muted)] mb-4">
         {isLive
           ? "Recording the stream in the background so you can clip and render while it's live."
-          : "Video captured from your YouTube URL — ready to process and render."}
+          : "Video captured from the stream — ready to process and render."}
       </p>
 
       {starting && !recordedSeconds && (
         <div className="border border-[var(--color-card-border)] rounded-lg p-6 text-center mb-3">
           <p className="text-sm text-[var(--color-muted)] animate-pulse">
-            {isLive ? "Starting live capture…" : "Downloading from YouTube…"}
+            {isLive ? "Starting live capture…" : "Downloading stream…"}
           </p>
         </div>
       )}

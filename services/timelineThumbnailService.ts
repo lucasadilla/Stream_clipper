@@ -10,6 +10,7 @@ import {
   THUMB_SYNC_PASSES,
   THUMB_WIDTH_PX,
 } from "@/lib/thumbnailConstants";
+import { sanitizeDurationSeconds } from "@/lib/timelineBounds";
 import {
   getFramesDir,
   ensureDir,
@@ -85,7 +86,7 @@ export async function capturePriorityThumbs(
   });
   if (!sourceMedia?.filePath || !fileExists(sourceMedia.filePath)) return;
 
-  const recorded = sourceMedia.durationSeconds ?? 0;
+  const recorded = sanitizeDurationSeconds(sourceMedia.durationSeconds ?? 0);
   if (recorded < 1) return;
 
   const framesDir = getFramesDir(streamSessionId);
@@ -165,13 +166,14 @@ async function extractMissingRange(
 }
 
 function findNextExtractionWindow(
-  recorded: number,
+  recordedInput: number,
   starts: Set<number>,
   prioritizeTail: boolean
 ): { from: number; to: number } | null {
-  const blockCount = Math.max(
-    1,
-    Math.ceil(recorded / THUMB_INTERVAL_SECONDS)
+  const recorded = sanitizeDurationSeconds(recordedInput);
+  const blockCount = Math.min(
+    10_000,
+    Math.max(1, Math.ceil(recorded / THUMB_INTERVAL_SECONDS))
   );
   const missing: number[] = [];
   for (let i = 0; i < blockCount; i++) {
@@ -210,7 +212,7 @@ export async function syncTimelineThumbnails(
     return [];
   }
 
-  const recorded = sourceMedia.durationSeconds ?? 0;
+  const recorded = sanitizeDurationSeconds(sourceMedia.durationSeconds ?? 0);
   if (recorded < 2) return [];
 
   const framesDir = getFramesDir(streamSessionId);

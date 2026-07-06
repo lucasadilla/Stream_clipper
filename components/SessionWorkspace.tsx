@@ -4,7 +4,9 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { EditorHeader } from "@/components/layout/EditorHeader";
 import { VideoPreview } from "@/components/VideoPreview";
-import type { YouTubePlayerHandle } from "@/components/YouTubePlayer";
+import type { StreamPlayerHandle } from "@/types/streamPlayer";
+import type { StreamPlatform, StreamEmbedInfo } from "@/lib/streamPlatform";
+import { shouldPreferLocalVideoPreview } from "@/lib/streamPlatform";
 import { LiveTimeline, type ClipSelection } from "@/components/LiveTimeline";
 import { LIVE_TICK_MS, LIVE_SEGMENT_SECONDS } from "@/lib/timelineConstants";
 import { THUMB_POLL_MS } from "@/lib/thumbnailConstants";
@@ -25,17 +27,46 @@ import {
   writeCaptionAppearancePreference,
   type CaptionAppearance,
 } from "@/lib/captionAppearance";
+import {
+  buildChatHypeMoments,
+  selectHypeMomentsForTimeline,
+  type ChatHypeMoment,
+} from "@/lib/chatHypeTimeline";
+import {
+  buildAudioSpikeMarkers,
+  selectAudioSpikesForTimeline,
+  type AudioSpikeMarker,
+  type WaveformBucket,
+} from "@/lib/audioSpikeTimeline";
+import {
+  mergeCaptionEdit,
+  type CaptionEditsMap,
+} from "@/lib/captionEdits";
+import {
+  coalesceTimelineSeconds,
+  sanitizeDurationSeconds,
+  sanitizeStreamStartDate,
+} from "@/lib/timelineBounds";
 
 interface SessionData {
   id: string;
+  platform?: StreamPlatform;
   youtubeVideoId: string;
+  youtubeUrl?: string | null;
   title?: string | null;
   liveStatus?: string | null;
   activeLiveChatId?: string | null;
   actualStartTime?: string | null;
   videoDurationSeconds?: number;
+  streamEmbed?: StreamEmbedInfo;
   liveRecording?: { status: string; recordedSeconds: number } | null;
-  sourceMedia?: Array<{ durationSeconds?: number | null }>;
+  sourceMedia?: Array<{
+    durationSeconds?: number | null;
+    isLiveRecording?: boolean;
+    sourceVideoUrl?: string | null;
+    previewVideoUrl?: string | null;
+    sourceIsPlayableMp4?: boolean;
+  }>;
   storageLabel?: string;
 }
 
@@ -66,6 +97,13 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const prevTranscriptIds = useRef<Set<string>>(new Set());
   const [currentTime, setCurrentTime] = useState(0);
   const [playerDuration, setPlayerDuration] = useState(0);
+  const handlePlayerDurationChange = useCallback((duration: number) => {
+    setPlayerDuration(sanitizeDurationSeconds(duration));
+  }, []);
+
+  const handlePlayerTimeUpdate = useCallback((time: number) => {
+    setCurrentTime(time);
+  }, []);
   const [liveClock, setLiveClock] = useState(() => Date.now());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -76,7 +114,12 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const [captionAppearance, setCaptionAppearance] = useState<CaptionAppearance>(
     readCaptionAppearancePreference
   );
-  const playerRef = useRef<YouTubePlayerHandle>(null);
+  const [chatHypeMoments, setChatHypeMoments] = useState<ChatHypeMoment[]>([]);
+  const [audioSpikes, setAudioSpikes] = useState<AudioSpikeMarker[]>([]);
+  const [audioWaveform, setAudioWaveform] = useState<WaveformBucket[]>([]);
+  const [captionEdits, setCaptionEdits] = useState<CaptionEditsMap>({});
+  const captionSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const playerRef = useRef<StreamPlayerHandle>(null);
   const sourceStarted = useRef(false);
   const transcribeInFlight = useRef(false);
   const captionRebuildAttempted = useRef(false);
@@ -146,14 +189,124 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
     }
   }
 
+  async function loadCaptionEdits() {
+    try {
+      const { ok, data } = await fetchJson<{ edits?: CaptionEditsMap }>(
+        `/api/sessions/${sessionId}/captions`
+      );
+      if (ok) setCaptionEdits(data.edits ?? {});
+    } catch {
+      // non-fatal
+    }
+  }
+
+  async function persistCaptionEdit(
+    cueId: string,
+    patch: Partial<{
+      text: string;
+      startTimeSeconds: number;
+      endTimeSeconds: number;
+    }>,
+    immediate = false
+  ) {
+    const run = async () => {
+      try {
+        const { ok, data } = await fetchJson<{ edits?: CaptionEditsMap }>(
+          `/api/sessions/${sessionId}/captions`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ cueId, ...patch }),
+          }
+        );
+        if (ok && data.edits) setCaptionEdits(data.edits);
+      } catch {
+        // non-fatal
+      }
+    };
+
+    if (immediate) {
+      if (captionSaveTimer.current) clearTimeout(captionSaveTimer.current);
+      await run();
+      return;
+    }
+
+    if (captionSaveTimer.current) clearTimeout(captionSaveTimer.current);
+    captionSaveTimer.current = setTimeout(() => {
+      void run();
+    }, 450);
+  }
+
+  const handleCaptionEdit = useCallback(
+    (
+      cueId: string,
+      patch: Partial<{
+        text: string;
+        startTimeSeconds: number;
+        endTimeSeconds: number;
+      }>
+    ) => {
+      setCaptionEdits((prev) => mergeCaptionEdit(prev, cueId, patch));
+      void persistCaptionEdit(cueId, patch, patch.text !== undefined);
+    },
+    [sessionId]
+  );
+
   async function loadEvents() {
     try {
+      await Promise.all([
+        fetch(`/api/sessions/${sessionId}/chat/sync-windows`, { method: "POST" }),
+        fetch(`/api/sessions/${sessionId}/audio/sync`, { method: "POST" }),
+      ]).catch(() => {});
+
       const { ok, data } = await fetchJson<{
         transcriptChunks?: typeof transcripts;
+        eventWindows?: Array<{
+          id: string;
+          startTimeSeconds: number;
+          endTimeSeconds: number;
+          type: string;
+          summary?: string | null;
+          score: number;
+          rawData?: unknown;
+        }>;
+        audioEvents?: Array<{
+          id: string;
+          startTimeSeconds: number;
+          endTimeSeconds: number;
+          type: string;
+          score: number;
+          summary?: string | null;
+          rawData?: unknown;
+        }>;
       }>(`/api/sessions/${sessionId}/events`);
       if (!ok) return;
 
       const chunks = data.transcriptChunks ?? [];
+      setChatHypeMoments(
+        selectHypeMomentsForTimeline(
+          buildChatHypeMoments(data.eventWindows ?? [])
+        )
+      );
+      setAudioSpikes(
+        selectAudioSpikesForTimeline(
+          buildAudioSpikeMarkers(data.audioEvents ?? [])
+        )
+      );
+
+      const timelineMax = coalesceTimelineSeconds([
+        LIVE_SEGMENT_SECONDS,
+        session?.liveRecording?.recordedSeconds,
+        session?.sourceMedia?.[0]?.durationSeconds,
+        ...chunks.map((t) => t.endTimeSeconds),
+        ...(data.audioEvents ?? []).map((e) => e.endTimeSeconds),
+      ]);
+      const waveformRes = await fetchJson<{ buckets?: WaveformBucket[] }>(
+        `/api/sessions/${sessionId}/audio/waveform?maxTime=${timelineMax}`
+      );
+      if (waveformRes.ok) {
+        setAudioWaveform(waveformRes.data.buckets ?? []);
+      }
     const arrived = new Set<string>();
     for (const t of chunks) {
       if (!prevTranscriptIds.current.has(t.id)) arrived.add(t.id);
@@ -179,6 +332,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   useEffect(() => {
     loadSession();
     loadEvents();
+    void loadCaptionEdits();
     void loadThumbnails();
   }, [sessionId]);
 
@@ -257,6 +411,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       try {
         await fetch(`/api/sessions/${sessionId}/live-tick`, { method: "POST" });
         await loadSession();
+        await loadEvents();
         void loadThumbnails();
       } catch {
         // non-fatal
@@ -380,26 +535,46 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   }
 
   const sourceMedia = session.sourceMedia?.[0];
-  const recordedSeconds = Math.max(
-    session.liveRecording?.recordedSeconds ?? 0,
-    sourceMedia?.durationSeconds ?? 0,
+  const platform: StreamPlatform = session.platform ?? "youtube";
+  const streamEmbed = session.streamEmbed ?? {};
+  const sourceVideoUrl = sourceMedia?.sourceVideoUrl ?? null;
+  const previewVideoUrl = sourceMedia?.previewVideoUrl ?? null;
+  const playbackVideoUrl =
+    previewVideoUrl ??
+    (sourceMedia?.sourceIsPlayableMp4 ? sourceVideoUrl : null);
+  const preferLocalVideo = shouldPreferLocalVideoPreview({
+    platform,
+    previewVideoUrl,
+    sourceVideoUrl,
+    sourceIsPlayableMp4: sourceMedia?.sourceIsPlayableMp4,
+    isLiveRecording: sourceMedia?.isLiveRecording,
+    isLive,
+    durationSeconds: sourceMedia?.durationSeconds,
+  });
+  const recordedSeconds = coalesceTimelineSeconds([
+    session.liveRecording?.recordedSeconds,
+    sourceMedia?.durationSeconds,
     ...transcripts.map((t) => t.endTimeSeconds),
-    0
-  );
+  ]);
 
+  const streamStart = sanitizeStreamStartDate(
+    session.actualStartTime ? new Date(session.actualStartTime) : null
+  );
   const liveElapsedSeconds =
-    session.actualStartTime && isLive
-      ? Math.max(0, (liveClock - new Date(session.actualStartTime).getTime()) / 1000)
+    streamStart && isLive
+      ? sanitizeDurationSeconds(
+          Math.max(0, (liveClock - streamStart.getTime()) / 1000)
+        )
       : 0;
 
-  const streamDuration = Math.max(
-    session.videoDurationSeconds ?? 0,
+  const streamDuration = coalesceTimelineSeconds([
+    session.videoDurationSeconds,
     playerDuration,
     liveElapsedSeconds,
     recordedSeconds,
     currentTime,
-    LIVE_SEGMENT_SECONDS
-  );
+    LIVE_SEGMENT_SECONDS,
+  ]);
 
   const liveSegments = buildLiveTimelineSegments(
     transcripts.filter((t) => {
@@ -410,11 +585,10 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
     newSegmentIds
   );
 
-  const progressRecordedSeconds = Math.max(
-    session.liveRecording?.recordedSeconds ?? 0,
-    sourceMedia?.durationSeconds ?? 0,
-    0
-  );
+  const progressRecordedSeconds = coalesceTimelineSeconds([
+    session.liveRecording?.recordedSeconds,
+    sourceMedia?.durationSeconds,
+  ]);
   const progressTranscribedSeconds = transcribedSeconds;
 
   return (
@@ -432,10 +606,21 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         {/* Video preview — larger */}
         <div className="shrink-0 px-4 pt-3 pb-2 flex justify-center">
           <VideoPreview
-            videoId={session.youtubeVideoId}
+            platform={platform}
+            sourceId={session.youtubeVideoId}
+            embed={streamEmbed}
+            playbackVideoUrl={
+              playbackVideoUrl
+                ? `${playbackVideoUrl}${playbackVideoUrl.includes("?") ? "&" : "?"}v=${Math.floor(recordedSeconds / 12)}`
+                : null
+            }
+            streamPageUrl={session.youtubeUrl}
+            recordedSeconds={recordedSeconds}
+            preferLocalVideo={preferLocalVideo}
             playerRef={playerRef}
             transcripts={transcripts}
             captionsEnabled={captionsEnabled}
+            captionEdits={captionEdits}
             captionAppearance={captionAppearance}
             onCaptionsEnabledChange={(enabled) => {
               setCaptionsEnabled(enabled);
@@ -445,8 +630,8 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
               setCaptionAppearance(appearance);
               writeCaptionAppearancePreference(appearance);
             }}
-            onTimeUpdate={setCurrentTime}
-            onDurationChange={setPlayerDuration}
+            onTimeUpdate={handlePlayerTimeUpdate}
+            onDurationChange={handlePlayerDurationChange}
           />
         </div>
 
@@ -473,6 +658,20 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
             includeCaptions={captionsEnabled}
             captionChunks={transcripts}
             captionAppearance={captionAppearance}
+            captionEdits={captionEdits}
+            onCaptionEdit={handleCaptionEdit}
+            chatHypeMoments={chatHypeMoments}
+            showChatHypeTrack={
+              isLive || !!session.activeLiveChatId || chatHypeMoments.length > 0
+            }
+            audioWaveform={audioWaveform}
+            audioSpikes={audioSpikes}
+            showAudioLane={
+              recordedSeconds > 0 ||
+              streamDuration > LIVE_SEGMENT_SECONDS ||
+              audioSpikes.length > 0 ||
+              audioWaveform.length > 0
+            }
           />
         </div>
 

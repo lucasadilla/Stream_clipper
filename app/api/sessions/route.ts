@@ -2,11 +2,12 @@ import { NextRequest } from "next/server";
 import { z } from "zod";
 import { createStreamSession } from "@/services/youtubeService";
 import { listSessionsWithStorage } from "@/services/sessionCleanupService";
-import { extractYouTubeVideoId, normalizeUserYoutubeUrl } from "@/lib/youtube";
+import { parseStreamUrl } from "@/lib/streamPlatform";
 import { errorResponse, jsonResponse, parseRequestJson } from "@/lib/utils";
 
 const createSessionSchema = z.object({
-  youtubeUrl: z.string().min(1, "Please enter a YouTube URL"),
+  streamUrl: z.string().min(1).optional(),
+  youtubeUrl: z.string().min(1).optional(),
 });
 
 export async function GET(request: NextRequest) {
@@ -27,19 +28,25 @@ export async function POST(request: NextRequest) {
   try {
     const body = await parseRequestJson(request);
     if (!body) return errorResponse("Request body required", 400);
-    const { youtubeUrl: rawUrl } = createSessionSchema.parse(body);
-    const youtubeUrl = normalizeUserYoutubeUrl(rawUrl);
-    if (!extractYouTubeVideoId(youtubeUrl)) {
+    const parsed = createSessionSchema.parse(body);
+    const rawUrl = parsed.streamUrl ?? parsed.youtubeUrl;
+    if (!rawUrl?.trim()) {
+      return errorResponse("Please enter a stream URL", 400);
+    }
+
+    if (!parseStreamUrl(rawUrl)) {
       return errorResponse(
-        "Invalid YouTube URL. Use youtube.com/watch?v=, youtu.be/, or youtube.com/live/",
+        "Unsupported URL. Use YouTube, Twitch (twitch.tv/channel or /videos/…), or Kick (kick.com/channel).",
         400
       );
     }
-    const session = await createStreamSession(youtubeUrl);
+
+    const session = await createStreamSession(rawUrl);
     return jsonResponse(
       {
         session: {
           id: session.id,
+          platform: session.platform,
           youtubeVideoId: session.youtubeVideoId,
           title: session.title,
           liveStatus: session.liveStatus,

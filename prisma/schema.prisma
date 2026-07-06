@@ -12,6 +12,7 @@ datasource db {
 
 model StreamSession {
   id                 String   @id @default(cuid())
+  platform           String   @default("youtube") // youtube | twitch | kick
   youtubeVideoId     String
   youtubeUrl         String
   title              String?

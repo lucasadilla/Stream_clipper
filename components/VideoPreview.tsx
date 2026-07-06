@@ -1,18 +1,28 @@
 "use client";
 
-import { YouTubePlayer, type YouTubePlayerHandle } from "@/components/YouTubePlayer";
+import { StreamPlayer, type StreamPlayerHandle } from "@/components/StreamPlayer";
 import { CaptionTrackLayer } from "@/components/CaptionTrackLayer";
 import { CaptionAppearancePanel } from "@/components/CaptionAppearancePanel";
 import type { TranscriptChunkInput } from "@/lib/captionTrack";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
+import type { CaptionEditsMap } from "@/lib/captionEdits";
+import type { StreamPlatform, StreamEmbedInfo } from "@/lib/streamPlatform";
+import { platformLabel } from "@/lib/streamPlatform";
 import { cn } from "@/lib/utils";
 import type { RefObject } from "react";
 
 interface VideoPreviewProps {
-  videoId: string;
-  playerRef: RefObject<YouTubePlayerHandle | null>;
+  platform: StreamPlatform;
+  sourceId: string;
+  embed: StreamEmbedInfo;
+  playbackVideoUrl?: string | null;
+  streamPageUrl?: string | null;
+  recordedSeconds?: number;
+  preferLocalVideo?: boolean;
+  playerRef: RefObject<StreamPlayerHandle | null>;
   transcripts: TranscriptChunkInput[];
   captionsEnabled: boolean;
+  captionEdits?: CaptionEditsMap;
   captionAppearance: CaptionAppearance;
   onCaptionsEnabledChange: (enabled: boolean) => void;
   onCaptionAppearanceChange: (appearance: CaptionAppearance) => void;
@@ -21,10 +31,17 @@ interface VideoPreviewProps {
 }
 
 export function VideoPreview({
-  videoId,
+  platform,
+  sourceId,
+  embed,
+  playbackVideoUrl,
+  streamPageUrl,
+  recordedSeconds = 0,
+  preferLocalVideo,
   playerRef,
   transcripts,
   captionsEnabled,
+  captionEdits = {},
   captionAppearance,
   onCaptionsEnabledChange,
   onCaptionAppearanceChange,
@@ -34,7 +51,10 @@ export function VideoPreview({
   return (
     <div className="w-full max-w-6xl mx-auto flex flex-col gap-2">
       <div className="flex items-center justify-between gap-3 px-1">
-        <p className="text-xs text-[#888]">Stream preview</p>
+        <p className="text-xs text-[#888]">
+          {platformLabel(platform)} preview
+          {preferLocalVideo && playbackVideoUrl ? " · local capture" : ""}
+        </p>
         <div className="flex items-center gap-2">
           <CaptionAppearancePanel
             appearance={captionAppearance}
@@ -71,9 +91,15 @@ export function VideoPreview({
 
       <div className="relative isolate w-full h-[min(42vh,520px)] min-h-[220px] overflow-hidden rounded-xl border border-[#2a2a2a] bg-black">
         <div className="absolute inset-0 z-0">
-          <YouTubePlayer
+          <StreamPlayer
             ref={playerRef}
-            videoId={videoId}
+            platform={platform}
+            sourceId={sourceId}
+            embed={embed}
+            playbackVideoUrl={playbackVideoUrl}
+            streamPageUrl={streamPageUrl}
+            recordedSeconds={recordedSeconds}
+            preferLocalVideo={preferLocalVideo}
             onTimeUpdate={onTimeUpdate}
             onDurationChange={onDurationChange}
             fillContainer
@@ -83,6 +109,7 @@ export function VideoPreview({
           enabled={captionsEnabled}
           playerRef={playerRef}
           chunks={transcripts}
+          captionEdits={captionEdits}
           appearance={captionAppearance}
           showVerticalSafeArea={captionsEnabled}
         />

@@ -4,6 +4,7 @@ import type { RagSearchResult } from "@/lib/rag";
 import { formatSeconds } from "@/lib/time";
 import { isPlaceholderTranscript } from "@/services/transcriptionSyncService";
 import { estimateTimestampInChunk } from "@/services/transcriptSearchService";
+import { clipMetadataSchema, normalizeHashtag, type ClipMetadata } from "@/lib/clipMetadata";
 import { getAiClient, getChatModel } from "@/lib/aiProvider";
 
 export const clipSuggestionSchema = z.object({
@@ -386,4 +387,66 @@ export async function generateChatWindowSummary(
 ): Promise<string> {
   // For MVP, the scoring module builds summaries; this can enhance with LLM later
   return summaryTemplate;
+}
+
+export async function generateClipMetadataAI(params: {
+  streamTitle?: string;
+  channelTitle?: string;
+  transcript: string;
+  startTimeSeconds: number;
+  endTimeSeconds: number;
+}): Promise<ClipMetadata> {
+  const client = getAiClient();
+  const duration = Math.max(0, params.endTimeSeconds - params.startTimeSeconds);
+
+  const systemPrompt = `You write YouTube Shorts upload copy from a stream clip transcript.
+
+Return valid JSON only (no markdown). Do NOT use double-quote characters inside string values — use apostrophes instead.
+
+{
+  "title": "Catchy Short title (max 70 chars, hooks curiosity, no ALL CAPS spam)",
+  "description": "One compelling sentence for the description (max 200 chars)",
+  "hashtags": ["shorts", "gaming", "streamername"]
+}
+
+RULES:
+- Base copy ONLY on the transcript — do not invent events
+- Title should feel native to YouTube Shorts (punchy, specific moment)
+- Description is ONE line — what happens + light CTA optional
+- hashtags: 5-8 items, lowercase, no # prefix, no spaces, mix broad (#shorts) + topic-specific
+- Prefer words/phrases that actually appear in the transcript when possible
+- If transcript is thin, keep title generic but honest`;
+
+  const response = await client.chat.completions.create({
+    model: getChatModel(),
+    messages: [
+      { role: "system", content: systemPrompt },
+      {
+        role: "user",
+        content: [
+          `Stream: ${params.streamTitle ?? "Live stream"}`,
+          params.channelTitle ? `Channel: ${params.channelTitle}` : null,
+          `Clip: ${formatSeconds(params.startTimeSeconds)} – ${formatSeconds(params.endTimeSeconds)} (${Math.round(duration)}s)`,
+          "",
+          "Transcript:",
+          params.transcript.slice(0, 6000),
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      },
+    ],
+    response_format: { type: "json_object" },
+    temperature: 0.6,
+  });
+
+  const content = response.choices[0]?.message?.content;
+  if (!content) throw new Error("No AI response");
+
+  const parsed = clipMetadataSchema.parse(parseModelJson(content));
+  return {
+    ...parsed,
+    title: parsed.title.trim().slice(0, 100),
+    description: parsed.description.trim().slice(0, 300),
+    hashtags: parsed.hashtags.map(normalizeHashtag).filter(Boolean).slice(0, 10),
+  };
 }

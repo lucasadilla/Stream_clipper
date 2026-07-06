@@ -43,6 +43,7 @@ async function prepareSessionForDeletion(streamSessionId: string) {
 export interface SessionStorageInfo {
   sessionId: string;
   title: string | null;
+  platform: string;
   youtubeVideoId: string;
   liveStatus: string | null;
   createdAt: Date;
@@ -58,6 +59,7 @@ export async function getSessionStorageInfo(
     select: {
       id: true,
       title: true,
+      platform: true,
       youtubeVideoId: true,
       liveStatus: true,
       createdAt: true,
@@ -69,6 +71,7 @@ export async function getSessionStorageInfo(
   return {
     sessionId: session.id,
     title: session.title,
+    platform: session.platform ?? "youtube",
     youtubeVideoId: session.youtubeVideoId,
     liveStatus: session.liveStatus,
     createdAt: session.createdAt,
@@ -84,6 +87,7 @@ export async function listSessionsWithStorage(limit = 20): Promise<SessionStorag
     select: {
       id: true,
       title: true,
+      platform: true,
       youtubeVideoId: true,
       liveStatus: true,
       createdAt: true,
@@ -96,6 +100,7 @@ export async function listSessionsWithStorage(limit = 20): Promise<SessionStorag
     results.push({
       sessionId: session.id,
       title: session.title,
+      platform: session.platform ?? "youtube",
       youtubeVideoId: session.youtubeVideoId,
       liveStatus: session.liveStatus,
       createdAt: session.createdAt,

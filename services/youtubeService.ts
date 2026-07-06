@@ -5,15 +5,50 @@ import {
   parseYouTubeUrl,
   normalizeYouTubeUrl,
 } from "@/lib/youtube";
+import {
+  parseStreamUrl,
+  type StreamPlatform,
+  type StreamEmbedInfo,
+} from "@/lib/streamPlatform";
+import {
+  fetchStreamPlatformMetadata,
+  withStreamEmbed,
+} from "@/services/ytDlpMetadataService";
 
-export async function createStreamSession(youtubeUrl: string) {
-  const { videoId, originalUrl } = parseYouTubeUrl(youtubeUrl);
-  const metadata = await fetchYouTubeMetadata(videoId);
+interface SessionMetadataInput {
+  platform: StreamPlatform;
+  sourceId: string;
+  streamUrl: string;
+  title: string;
+  description: string;
+  channelTitle: string;
+  channelId: string;
+  thumbnailUrl: string;
+  liveStatus: string | null;
+  actualStartTime: Date | null;
+  scheduledStartTime: Date | null;
+  concurrentViewers: number | null;
+  activeLiveChatId: string | null;
+  metadataJson: Record<string, unknown>;
+}
 
-  const session = await prisma.streamSession.create({
-    data: {
-      youtubeVideoId: videoId,
-      youtubeUrl: normalizeYouTubeUrl(videoId),
+async function resolveSessionMetadata(
+  streamUrl: string
+): Promise<SessionMetadataInput> {
+  const parsed = parseStreamUrl(streamUrl);
+  if (!parsed) {
+    throw new Error(
+      "Invalid stream URL. Use YouTube, Twitch (twitch.tv/channel or /videos/…), or Kick (kick.com/channel)."
+    );
+  }
+
+  if (parsed.platform === "youtube") {
+    const { videoId } = parseYouTubeUrl(streamUrl);
+    const metadata = await fetchYouTubeMetadata(videoId);
+    return {
+      platform: "youtube",
+      sourceId: videoId,
+      streamUrl: normalizeYouTubeUrl(videoId),
       title: metadata.title,
       description: metadata.description,
       channelTitle: metadata.channelTitle,
@@ -24,21 +59,87 @@ export async function createStreamSession(youtubeUrl: string) {
       scheduledStartTime: metadata.scheduledStartTime,
       concurrentViewers: metadata.concurrentViewers,
       activeLiveChatId: metadata.activeLiveChatId,
-      metadataJson: toJsonValue(metadata.raw),
+      metadataJson: withStreamEmbed(metadata.raw, parsed.embed),
+    };
+  }
+
+  const metadata = await fetchStreamPlatformMetadata(parsed);
+  return {
+    platform: parsed.platform,
+    sourceId: metadata.sourceId || parsed.sourceId,
+    streamUrl: parsed.canonicalUrl,
+    title: metadata.title,
+    description: metadata.description,
+    channelTitle: metadata.channelTitle,
+    channelId: metadata.channelId,
+    thumbnailUrl: metadata.thumbnailUrl,
+    liveStatus: metadata.liveStatus,
+    actualStartTime: metadata.actualStartTime,
+    scheduledStartTime: metadata.scheduledStartTime,
+    concurrentViewers: metadata.concurrentViewers,
+    activeLiveChatId: null,
+    metadataJson: withStreamEmbed(metadata.raw, parsed.embed),
+  };
+}
+
+export async function createStreamSession(streamUrl: string) {
+  const meta = await resolveSessionMetadata(streamUrl);
+
+  const session = await prisma.streamSession.create({
+    data: {
+      platform: meta.platform,
+      youtubeVideoId: meta.sourceId,
+      youtubeUrl: meta.streamUrl,
+      title: meta.title,
+      description: meta.description,
+      channelTitle: meta.channelTitle,
+      channelId: meta.channelId,
+      thumbnailUrl: meta.thumbnailUrl,
+      liveStatus: meta.liveStatus,
+      actualStartTime: meta.actualStartTime,
+      scheduledStartTime: meta.scheduledStartTime,
+      concurrentViewers: meta.concurrentViewers,
+      activeLiveChatId: meta.activeLiveChatId,
+      metadataJson: toJsonValue(meta.metadataJson),
     },
   });
 
   return session;
 }
 
-/** Refresh live status and chat id from YouTube (streams can go live after session creation). */
+/** Refresh live status from the source platform. */
 export async function refreshSessionLiveMetadata(streamSessionId: string) {
   const session = await prisma.streamSession.findUnique({
     where: { id: streamSessionId },
   });
   if (!session) return null;
 
-  const metadata = await fetchYouTubeMetadata(session.youtubeVideoId);
+  const platform = (session.platform ?? "youtube") as StreamPlatform;
+  const embed = (session.metadataJson as { streamEmbed?: StreamEmbedInfo } | null)
+    ?.streamEmbed;
+
+  if (platform === "youtube") {
+    const metadata = await fetchYouTubeMetadata(session.youtubeVideoId);
+    return prisma.streamSession.update({
+      where: { id: streamSessionId },
+      data: {
+        title: metadata.title,
+        liveStatus: metadata.liveStatus,
+        actualStartTime: metadata.actualStartTime,
+        scheduledStartTime: metadata.scheduledStartTime,
+        concurrentViewers: metadata.concurrentViewers,
+        activeLiveChatId: metadata.activeLiveChatId,
+        metadataJson: toJsonValue(withStreamEmbed(metadata.raw, embed ?? {})),
+      },
+    });
+  }
+
+  const metadata = await fetchStreamPlatformMetadata({
+    platform: session.platform as StreamPlatform,
+    sourceId: session.youtubeVideoId,
+    canonicalUrl: session.youtubeUrl,
+    embed: embed ?? {},
+  });
 
   return prisma.streamSession.update({
     where: { id: streamSessionId },
@@ -48,8 +149,7 @@ export async function refreshSessionLiveMetadata(streamSessionId: string) {
       actualStartTime: metadata.actualStartTime,
       scheduledStartTime: metadata.scheduledStartTime,
       concurrentViewers: metadata.concurrentViewers,
-      activeLiveChatId: metadata.activeLiveChatId,
-      metadataJson: toJsonValue(metadata.raw),
+      metadataJson: toJsonValue(withStreamEmbed(metadata.raw, embed ?? {})),
     },
   });
 }
@@ -74,4 +174,9 @@ export async function getStreamSession(sessionId: string) {
       },
     },
   });
+}
+
+/** @deprecated Use createStreamSession */
+export async function createYouTubeStreamSession(youtubeUrl: string) {
+  return createStreamSession(youtubeUrl);
 }

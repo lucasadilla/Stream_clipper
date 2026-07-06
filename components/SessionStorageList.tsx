@@ -5,10 +5,13 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { fetchJson } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
+import type { StreamPlatform } from "@/lib/streamPlatform";
+import { platformLabel } from "@/lib/streamPlatform";
 
 interface SessionRow {
   sessionId: string;
   title: string | null;
+  platform?: StreamPlatform;
   youtubeVideoId: string;
   liveStatus: string | null;
   createdAt: string;
@@ -118,7 +121,7 @@ export function SessionStorageList() {
                 {s.title ?? s.youtubeVideoId}
               </Link>
               <p className="text-xs text-[var(--color-muted)] mt-0.5">
-                {s.storageLabel}
+                {platformLabel(s.platform ?? "youtube")} · {s.storageLabel}
                 {s.liveStatus === "live" && (
                   <span className="text-red-400 ml-2">· LIVE</span>
                 )}

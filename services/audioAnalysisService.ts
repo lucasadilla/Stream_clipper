@@ -1,12 +1,182 @@
 import { toJsonValue } from "@/lib/utils";
 import { prisma } from "@/lib/db";
 import { analyzeAudioVolume } from "@/lib/ffmpeg";
-import { resolveStoragePath } from "@/lib/storage";
+import {
+  getWaveformCachePath,
+  resolveStoragePath,
+} from "@/lib/storage";
 import { formatSeconds } from "@/lib/time";
+import {
+  dbToLevel,
+  downsampleVolumeSamples,
+  buildWaveformFromAudioEvents,
+  type WaveformBucket,
+} from "@/lib/audioSpikeTimeline";
+import { existsSync } from "fs";
+import { mkdir, readFile, writeFile } from "fs/promises";
+import path from "path";
 
 export interface AudioVolumeSample {
   timeSeconds: number;
   volumeDb: number;
+}
+
+interface WaveformCacheFile {
+  maxTimeSeconds: number;
+  buckets: WaveformBucket[];
+}
+
+export async function readWaveformCache(
+  streamSessionId: string
+): Promise<WaveformCacheFile | null> {
+  const cachePath = getWaveformCachePath(streamSessionId);
+  if (!existsSync(cachePath)) return null;
+  try {
+    const raw = await readFile(cachePath, "utf8");
+    const parsed = JSON.parse(raw) as WaveformCacheFile;
+    if (!Array.isArray(parsed.buckets)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function writeWaveformCache(
+  streamSessionId: string,
+  data: WaveformCacheFile
+): Promise<void> {
+  const cachePath = getWaveformCachePath(streamSessionId);
+  await mkdir(path.dirname(cachePath), { recursive: true });
+  await writeFile(cachePath, JSON.stringify(data));
+}
+
+async function mergeWaveformSegment(
+  streamSessionId: string,
+  startTimeSeconds: number,
+  endTimeSeconds: number,
+  level: number,
+  maxTimeSeconds: number
+): Promise<void> {
+  const bucketCount = 320;
+  const existing =
+    (await readWaveformCache(streamSessionId)) ??
+    ({
+      maxTimeSeconds,
+      buckets: downsampleVolumeSamples([], maxTimeSeconds, bucketCount),
+    } satisfies WaveformCacheFile);
+
+  const span = Math.max(maxTimeSeconds, existing.maxTimeSeconds, endTimeSeconds);
+  let buckets = existing.buckets;
+  if (span > existing.maxTimeSeconds && existing.maxTimeSeconds > 0) {
+    buckets = downsampleVolumeSamples([], span, bucketCount);
+    for (const bucket of existing.buckets) {
+      const idx = Math.min(
+        bucketCount - 1,
+        Math.floor((bucket.startTimeSeconds / span) * bucketCount)
+      );
+      buckets[idx].level = Math.max(buckets[idx].level, bucket.level);
+    }
+  } else if (buckets.length !== bucketCount) {
+    buckets = downsampleVolumeSamples([], span, bucketCount);
+  }
+
+  const startIdx = Math.min(
+    bucketCount - 1,
+    Math.floor((startTimeSeconds / span) * bucketCount)
+  );
+  const endIdx = Math.min(
+    bucketCount,
+    Math.ceil((endTimeSeconds / span) * bucketCount)
+  );
+  for (let i = startIdx; i < endIdx; i++) {
+    buckets[i].level = Math.max(buckets[i].level, level);
+  }
+
+  await writeWaveformCache(streamSessionId, {
+    maxTimeSeconds: span,
+    buckets,
+  });
+}
+
+export async function syncSessionAudioAnalysis(streamSessionId: string) {
+  const sourceMedia = await prisma.sourceMedia.findFirst({
+    where: { streamSessionId },
+    orderBy: { createdAt: "desc" },
+  });
+  if (!sourceMedia?.filePath) {
+    return { eventsAdded: 0, analyzed: false, reason: "no_source" as const };
+  }
+
+  const session = await prisma.streamSession.findUnique({
+    where: { id: streamSessionId },
+    include: { liveRecording: true },
+  });
+  const isLive =
+    session?.liveStatus === "live" || session?.liveStatus === "upcoming";
+  const recorded =
+    session?.liveRecording?.recordedSeconds ??
+    sourceMedia.durationSeconds ??
+    0;
+
+  if (isLive && recorded > 0) {
+    const fromSeconds = Math.max(0, recorded - 30);
+    try {
+      const result = await analyzeAudioSegment(
+        streamSessionId,
+        sourceMedia.filePath,
+        fromSeconds,
+        recorded
+      );
+      return { eventsAdded: result.events, analyzed: true, reason: "live" as const };
+    } catch {
+      return { eventsAdded: 0, analyzed: false, reason: "live_failed" as const };
+    }
+  }
+
+  const [eventCount, cache] = await Promise.all([
+    prisma.audioEvent.count({ where: { streamSessionId } }),
+    readWaveformCache(streamSessionId),
+  ]);
+
+  if (eventCount > 0 && cache) {
+    return { eventsAdded: 0, analyzed: false, reason: "cached" as const };
+  }
+
+  if (eventCount > 0 && !cache) {
+    return { eventsAdded: 0, analyzed: false, reason: "events_only" as const };
+  }
+
+  try {
+    const result = await analyzeAudio(streamSessionId, sourceMedia.filePath);
+    return { eventsAdded: result.events, analyzed: true, reason: "full" as const };
+  } catch (err) {
+    console.warn("[audio] full analysis failed:", err);
+    return { eventsAdded: 0, analyzed: false, reason: "failed" as const };
+  }
+}
+
+export async function getTimelineWaveform(
+  streamSessionId: string,
+  maxTimeSeconds: number
+): Promise<WaveformBucket[]> {
+  const cache = await readWaveformCache(streamSessionId);
+  if (cache && cache.maxTimeSeconds >= maxTimeSeconds * 0.85) {
+    return cache.buckets;
+  }
+
+  const events = await prisma.audioEvent.findMany({
+    where: { streamSessionId },
+    orderBy: { startTimeSeconds: "asc" },
+    select: {
+      startTimeSeconds: true,
+      endTimeSeconds: true,
+      type: true,
+      score: true,
+      rawData: true,
+    },
+  });
+
+  return buildWaveformFromAudioEvents(events, maxTimeSeconds);
 }
 
 export async function analyzeAudio(
@@ -15,6 +185,10 @@ export async function analyzeAudio(
 ) {
   const fullPath = resolveStoragePath(sourceFilePath);
   const samples = await analyzeAudioVolume(fullPath);
+  const maxTimeSeconds =
+    samples.length > 0
+      ? Math.max(...samples.map((s) => s.timeSeconds))
+      : 0;
 
   await prisma.audioEvent.deleteMany({ where: { streamSessionId } });
 
@@ -34,6 +208,13 @@ export async function analyzeAudio(
       },
     });
     created.push(record);
+  }
+
+  if (maxTimeSeconds > 0) {
+    await writeWaveformCache(streamSessionId, {
+      maxTimeSeconds,
+      buckets: downsampleVolumeSamples(samples, maxTimeSeconds, 320),
+    });
   }
 
   return { events: created.length };
@@ -188,6 +369,13 @@ export async function analyzeAudioSegment(
         rawData: toJsonValue({ mean, max, live: true }),
       },
     });
+    await mergeWaveformSegment(
+      streamSessionId,
+      startTimeSeconds,
+      endTimeSeconds,
+      dbToLevel(max),
+      endTimeSeconds
+    );
     return { events: 1 };
   }
 

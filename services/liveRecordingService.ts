@@ -12,6 +12,7 @@ import {
   resolveStoragePath,
   findBestSourceFileInDir,
 } from "@/lib/storage";
+import { syncPreviewMp4 } from "@/services/previewVideoService";
 import {
   getYtDlpPath,
   isYtDlpAvailable,
@@ -222,6 +223,8 @@ export async function syncLiveRecording(streamSessionId: string) {
   }
 
   const recordedSeconds = sourceMedia.durationSeconds ?? 0;
+
+  void syncPreviewMp4(streamSessionId, filePath).catch(() => {});
 
   await prisma.liveRecordingState.upsert({
     where: { streamSessionId },

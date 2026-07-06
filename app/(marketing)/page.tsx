@@ -1,4 +1,4 @@
-import { YouTubeUrlInput } from "@/components/YouTubeUrlInput";
+import { StreamUrlInput } from "@/components/YouTubeUrlInput";
 import { SessionStorageList } from "@/components/SessionStorageList";
 
 const FEATURES = [
@@ -14,7 +14,7 @@ const FEATURES = [
   },
   {
     title: "Live & VOD support",
-    desc: "Record live streams in the background or analyze finished broadcasts from YouTube.",
+    desc: "Record live streams in the background or analyze finished broadcasts from YouTube, Twitch, or Kick.",
     icon: "●",
   },
   {
@@ -37,8 +37,8 @@ const FEATURES = [
 const STEPS = [
   {
     step: "01",
-    title: "Paste a YouTube link",
-    desc: "Drop a live stream URL or VOD — we pull metadata and open the editor.",
+    title: "Paste a stream link",
+    desc: "Drop a YouTube, Twitch, or Kick live URL or VOD — we pull metadata and open the editor.",
   },
   {
     step: "02",
@@ -66,7 +66,7 @@ export default function HomePage() {
         <div className="relative max-w-6xl mx-auto px-4 sm:px-6 py-16 sm:py-24 lg:py-28">
           <div className="max-w-3xl">
             <p className="text-sm font-medium text-[var(--color-accent)] mb-4 tracking-wide uppercase">
-              YouTube → Clips
+              Streams → Clips
             </p>
             <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight leading-[1.1] mb-6">
               Turn livestreams into clips{" "}
@@ -75,14 +75,14 @@ export default function HomePage() {
               </span>
             </h1>
             <p className="text-lg sm:text-xl text-[var(--color-muted)] leading-relaxed mb-10 max-w-2xl">
-              Paste a YouTube stream, edit on a full timeline, ask AI when things
+              Paste a YouTube, Twitch, or Kick stream, edit on a full timeline, ask AI when things
               happened, and export native or vertical clips — while the stream is
               still live.
             </p>
           </div>
 
           <div id="analyze" className="scroll-mt-20">
-            <YouTubeUrlInput />
+            <StreamUrlInput />
           </div>
         </div>
       </section>

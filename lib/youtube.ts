@@ -1,4 +1,10 @@
 import { parseIso8601Duration } from "@/lib/time";
+import {
+  MAX_LIVE_TIMELINE_SECONDS,
+  MAX_VOD_TIMELINE_SECONDS,
+  sanitizeDurationSeconds,
+  sanitizeStreamStartDate,
+} from "@/lib/timelineBounds";
 
 const YOUTUBE_PATTERNS = [
   /(?:[?&]v=)([a-zA-Z0-9_-]{11})/,
@@ -111,32 +117,55 @@ export function resolveVideoDurationFromMetadata(
         actualStartTime?: string;
         actualEndTime?: string;
       };
+      duration?: number;
+      is_live?: boolean;
     };
     if (raw.contentDetails?.duration) {
       fromContentDetails = parseIso8601Duration(raw.contentDetails.duration);
+    }
+    if (!fromContentDetails && typeof raw.duration === "number" && raw.duration > 0) {
+      fromContentDetails = raw.duration;
     }
     actualStart = raw.liveStreamingDetails?.actualStartTime ?? null;
     actualEnd = raw.liveStreamingDetails?.actualEndTime ?? null;
   }
 
-  const startDate =
-    opts?.actualStartTime ?? (actualStart ? new Date(actualStart) : null);
+  const startDate = sanitizeStreamStartDate(
+    opts?.actualStartTime ?? (actualStart ? new Date(actualStart) : null)
+  );
   const now = opts?.nowMs ?? Date.now();
 
   let fromLiveSpan = 0;
   if (startDate) {
     const endMs = actualEnd ? new Date(actualEnd).getTime() : now;
-    fromLiveSpan = Math.max(0, (endMs - startDate.getTime()) / 1000);
+    if (Number.isFinite(endMs)) {
+      fromLiveSpan = sanitizeDurationSeconds(
+        Math.max(0, (endMs - startDate.getTime()) / 1000),
+        { max: MAX_LIVE_TIMELINE_SECONDS }
+      );
+    }
   }
 
   const isActiveLive =
-    opts?.liveStatus === "live" || opts?.liveStatus === "upcoming";
+    opts?.liveStatus === "live" ||
+    opts?.liveStatus === "upcoming" ||
+    (metadataJson &&
+      typeof metadataJson === "object" &&
+      (metadataJson as { is_live?: boolean }).is_live === true);
+
+  const maxSpan = isActiveLive ? MAX_LIVE_TIMELINE_SECONDS : MAX_VOD_TIMELINE_SECONDS;
 
   if (isActiveLive) {
-    return Math.max(fromContentDetails, fromLiveSpan);
+    return sanitizeDurationSeconds(
+      Math.max(fromContentDetails, fromLiveSpan),
+      { max: maxSpan }
+    );
   }
 
-  return Math.max(fromContentDetails, fromLiveSpan);
+  return sanitizeDurationSeconds(
+    Math.max(fromContentDetails, fromLiveSpan),
+    { max: maxSpan }
+  );
 }
 
 export async function fetchYouTubeMetadata(

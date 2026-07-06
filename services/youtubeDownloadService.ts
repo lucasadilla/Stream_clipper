@@ -16,24 +16,75 @@ export function getYtDlpPath(): string {
 }
 
 function getFfmpegLocationDir(): string {
-  return path.dirname(getFfmpegPath());
+  const ffmpegPath = getFfmpegPath();
+  const dir = path.dirname(ffmpegPath);
+  if (!dir || dir === "." || dir === path.parse(ffmpegPath).root) {
+    return process.cwd();
+  }
+  return dir;
 }
 
-function getYtDlpJsRuntimeArg(): string {
-  const configured = process.env.YT_DLP_JS_RUNTIME;
-  if (configured) return configured;
-  // yt-dlp needs an explicit path on Windows; use the Node running this app
-  return `node:${process.execPath}`;
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function isTransientYtDlpError(message: string): boolean {
+  return /getaddrinfo failed|Failed to resolve|Temporary failure|timed out|Connection reset|TransportError|Network is unreachable|Name or service not known/i.test(
+    message
+  );
+}
+
+export function networkYtDlpArgs(): string[] {
+  const args: string[] = [];
+  if (process.env.YT_DLP_FORCE_IPV4 !== "0") {
+    args.push("--force-ipv4");
+  }
+  const timeout = process.env.YT_DLP_SOCKET_TIMEOUT?.trim();
+  if (timeout) {
+    args.push("--socket-timeout", timeout);
+  }
+  return args;
 }
 
 export function baseYtDlpArgs(): string[] {
   return [
+    ...networkYtDlpArgs(),
     "--js-runtimes",
     getYtDlpJsRuntimeArg(),
     "--no-playlist",
     "--ffmpeg-location",
     getFfmpegLocationDir(),
   ];
+}
+
+export async function runYtDlp(
+  extraArgs: string[],
+  url: string,
+  options?: { retries?: number }
+): Promise<{ stdout: string; stderr: string }> {
+  const retries = Math.max(1, options?.retries ?? 3);
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      return await runCommand(getYtDlpPath(), [...extraArgs, url]);
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      const transient = isTransientYtDlpError(lastError.message);
+      if (!transient || attempt === retries - 1) {
+        throw lastError;
+      }
+      await delay(600 * (attempt + 1));
+    }
+  }
+
+  throw lastError ?? new Error("yt-dlp failed");
+}
+
+function getYtDlpJsRuntimeArg(): string {
+  const configured = process.env.YT_DLP_JS_RUNTIME;
+  if (configured) return configured;
+  return `node:${process.execPath}`;
 }
 
 const FORMAT_CHAINS = [
@@ -67,7 +118,7 @@ async function runYtDlpWithFormatFallback(
     }
 
     try {
-      await runCommand(getYtDlpPath(), [...args, url]);
+      await runYtDlp(args, url);
       return;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));

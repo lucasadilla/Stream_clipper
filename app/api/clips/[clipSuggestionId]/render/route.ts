@@ -1,6 +1,10 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
-import { renderShort } from "@/services/renderService";
+import {
+  createRenderJobRecord,
+  executeRenderJob,
+  failRenderJob,
+} from "@/services/renderService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import { parseRenderFormat } from "@/lib/renderFormat";
 import { normalizeCaptionAppearance, type CaptionAppearance } from "@/lib/captionAppearance";
@@ -32,12 +36,20 @@ export async function POST(
     });
     if (!sourceMedia) {
       return errorResponse(
-        "Source video not ready. Wait for YouTube download to finish.",
+        "Source video not ready. Wait for download/recording to finish.",
         400
       );
     }
 
-    const result = await renderShort({
+    const jobId = await createRenderJobRecord({
+      streamSessionId: clip.streamSessionId,
+      clipSuggestionId: clip.id,
+      sourceMediaId: sourceMedia.id,
+      layout: clip.suggestedLayout,
+      includeCaptions,
+    });
+
+    const renderParams = {
       streamSessionId: clip.streamSessionId,
       sourceMediaId: sourceMedia.id,
       clipSuggestionId: clip.id,
@@ -47,14 +59,20 @@ export async function POST(
       layout: clip.suggestedLayout as "center_crop",
       includeCaptions,
       captionAppearance,
+    };
+
+    void executeRenderJob(jobId, renderParams).catch(async (error) => {
+      const message = error instanceof Error ? error.message : "Render failed";
+      await failRenderJob(jobId, message);
     });
 
     return jsonResponse(
       {
-        ...result,
-        downloadUrl: `/api/render-jobs/${result.jobId}/download`,
+        jobId,
+        status: "processing",
+        downloadUrl: `/api/render-jobs/${jobId}/download`,
       },
-      200
+      202
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Render failed";

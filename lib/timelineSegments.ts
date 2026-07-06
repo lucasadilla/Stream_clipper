@@ -1,4 +1,5 @@
 import { LIVE_SEGMENT_SECONDS } from "@/lib/timelineConstants";
+import { sanitizeDurationSeconds } from "@/lib/timelineBounds";
 
 export interface LiveTimelineSegment {
   id: string;
@@ -56,7 +57,12 @@ export function buildLiveTimelineSegments(
     }));
   }
 
-  const blockCount = Math.max(0, Math.floor(recordedSeconds / LIVE_SEGMENT_SECONDS));
+  const blockCount = Math.max(
+    0,
+    Math.floor(
+      sanitizeDurationSeconds(recordedSeconds) / LIVE_SEGMENT_SECONDS
+    )
+  );
   const segments: LiveTimelineSegment[] = [];
 
   for (let i = 0; i < blockCount; i++) {

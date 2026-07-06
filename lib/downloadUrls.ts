@@ -2,6 +2,8 @@ export function clipDownloadUrl(clipSuggestionId: string): string {
   return `/api/clips/${clipSuggestionId}/download`;
 }
 
+export { clipSharePath, clipShareUrl, clipStreamUrl } from "@/lib/clipShare";
+
 export function renderJobDownloadUrl(renderJobId: string): string {
   return `/api/render-jobs/${renderJobId}/download`;
 }
