@@ -7,6 +7,10 @@ import {
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import { canProcessMoreSeconds } from "@/services/usageService";
 import { getBillingAccountIdFromRequest } from "@/services/billingService";
+import {
+  ensureSessionBillingAccess,
+  SessionAccessError,
+} from "@/services/sessionAccessService";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -17,16 +21,22 @@ export async function POST(
 ) {
   try {
     const { sessionId } = await params;
+    const billingAccountId = getBillingAccountIdFromRequest(request);
+
+    try {
+      await ensureSessionBillingAccess(sessionId, billingAccountId);
+    } catch (err) {
+      if (err instanceof SessionAccessError) {
+        return errorResponse(err.message, err.status);
+      }
+      throw err;
+    }
+
     const session = await prisma.streamSession.findUnique({
       where: { id: sessionId },
-      select: { liveStatus: true, billingAccountId: true },
+      select: { liveStatus: true },
     });
     if (!session) return errorResponse("Session not found", 404);
-
-    const billingAccountId = getBillingAccountIdFromRequest(request);
-    if (!billingAccountId || billingAccountId !== session.billingAccountId) {
-      return errorResponse("Choose the paid plan that owns this session to transcribe it.", 402);
-    }
 
     const usageGate = await canProcessMoreSeconds(billingAccountId);
     if (!usageGate.allowed) {

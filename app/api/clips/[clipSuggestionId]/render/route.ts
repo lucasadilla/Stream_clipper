@@ -10,6 +10,10 @@ import { parseRenderFormat } from "@/lib/renderFormat";
 import { normalizeCaptionAppearance, type CaptionAppearance } from "@/lib/captionAppearance";
 import { canRenderExport } from "@/services/usageService";
 import { getBillingAccountIdFromRequest } from "@/services/billingService";
+import {
+  ensureSessionBillingAccess,
+  SessionAccessError,
+} from "@/services/sessionAccessService";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -29,13 +33,18 @@ export async function POST(
 
     const clip = await prisma.clipSuggestion.findUnique({
       where: { id: clipSuggestionId },
-      include: { streamSession: { select: { billingAccountId: true } } },
+      include: { streamSession: { select: { id: true, billingAccountId: true } } },
     });
     if (!clip) return errorResponse("Clip not found", 404);
 
     const billingAccountId = getBillingAccountIdFromRequest(request);
-    if (!billingAccountId || billingAccountId !== clip.streamSession.billingAccountId) {
-      return errorResponse("Choose the paid plan that owns this session to render clips.", 402);
+    try {
+      await ensureSessionBillingAccess(clip.streamSessionId, billingAccountId);
+    } catch (err) {
+      if (err instanceof SessionAccessError) {
+        return errorResponse(err.message, err.status);
+      }
+      throw err;
     }
 
     const usageGate = await canRenderExport(billingAccountId);

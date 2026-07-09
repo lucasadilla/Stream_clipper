@@ -7,7 +7,10 @@ export async function fetchJson<T = unknown>(
   let lastPreview = "";
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const res = await fetch(input, init);
+    const res = await fetch(input, {
+      ...init,
+      credentials: init?.credentials ?? "include",
+    });
     const text = await res.text();
     lastPreview = text.slice(0, 80).replace(/\s+/g, " ");
 
