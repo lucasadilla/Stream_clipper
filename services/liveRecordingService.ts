@@ -14,9 +14,8 @@ import {
 } from "@/lib/storage";
 import { syncPreviewMp4 } from "@/services/previewVideoService";
 import {
-  getYtDlpPath,
-  isYtDlpAvailable,
   baseYtDlpArgs,
+  resolveYtDlpInvocation,
 } from "@/services/youtubeDownloadService";
 
 const LIVE_FORMAT =
@@ -109,8 +108,8 @@ export async function startLiveRecording(streamSessionId: string) {
   });
   if (!session) throw new Error("Session not found");
 
-  const available = await isYtDlpAvailable();
-  if (!available) {
+  const invocation = await resolveYtDlpInvocation();
+  if (!invocation) {
     throw new Error(
       "yt-dlp is not installed. Set YT_DLP_PATH in .env (see README)."
     );
@@ -124,8 +123,8 @@ export async function startLiveRecording(streamSessionId: string) {
   await ensureDir(uploadDir);
   const outputPath = path.join(uploadDir, "source.mkv");
 
-  const ytDlp = getYtDlpPath();
   const args = [
+    ...invocation.prefixArgs,
     ...baseYtDlpArgs(),
     "--live-from-start",
     "-f",
@@ -138,7 +137,7 @@ export async function startLiveRecording(streamSessionId: string) {
     session.youtubeUrl,
   ];
 
-  const proc = spawn(ytDlp, args, {
+  const proc = spawn(invocation.command, args, {
     detached: true,
     stdio: "ignore",
     shell: false,

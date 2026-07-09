@@ -1,7 +1,8 @@
-import { isFfmpegAvailable } from "@/lib/ffmpeg";
+import { isFfmpegAvailable, getFfmpegPath, getFfprobePath } from "@/lib/ffmpeg";
 import { hasAnyAiKey } from "@/lib/aiProvider";
 import { getStorageRoot, ensureDir } from "@/lib/storage";
-import { isYtDlpAvailable } from "@/services/youtubeDownloadService";
+import { isYtDlpAvailable, getLastYtDlpProbeError } from "@/services/youtubeDownloadService";
+import { getYtDlpPathCandidates } from "@/lib/ytDlp";
 import { isWhisperAvailable } from "@/services/whisperTranscription";
 import path from "path";
 import fs from "fs/promises";
@@ -15,6 +16,11 @@ export interface RuntimeHealthReport {
   storageRoot: string;
   storageWritable: boolean;
   nodeEnv: string;
+  ffmpegPath: string;
+  ffprobePath: string;
+  ytDlpPath: string;
+  ytDlpPathCandidates: string[];
+  ytDlpProbeError: string | null;
   issues: string[];
 }
 
@@ -46,8 +52,11 @@ export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
     );
   }
   if (!ytDlp) {
+    const probe = getLastYtDlpProbeError();
     issues.push(
-      "yt-dlp not found. Install yt-dlp on the server or set YT_DLP_PATH."
+      probe
+        ? `yt-dlp not working (tried: ${getYtDlpPathCandidates().join(", ")}): ${probe}`
+        : `yt-dlp not found (tried: ${getYtDlpPathCandidates().join(", ")}). Redeploy with the latest Dockerfile.`
     );
   }
   if (!hasAnyAiKey()) {
@@ -69,6 +78,11 @@ export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
     storageRoot,
     storageWritable,
     nodeEnv: process.env.NODE_ENV ?? "development",
+    ffmpegPath: getFfmpegPath(),
+    ffprobePath: getFfprobePath(),
+    ytDlpPath: getYtDlpPathCandidates()[0] ?? "yt-dlp",
+    ytDlpPathCandidates: getYtDlpPathCandidates(),
+    ytDlpProbeError: ytDlp ? null : getLastYtDlpProbeError(),
     issues,
   };
 }

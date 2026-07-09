@@ -10,9 +10,42 @@ import {
   toRelativeStoragePath,
   findBestSourceFileInDir,
 } from "@/lib/storage";
+import { getYtDlpInvocationCandidates, type YtDlpInvocation } from "@/lib/ytDlp";
 
-export function getYtDlpPath(): string {
-  return process.env.YT_DLP_PATH ?? "yt-dlp";
+export { getYtDlpPath } from "@/lib/ytDlp";
+
+let resolvedYtDlpInvocation: YtDlpInvocation | null = null;
+let lastYtDlpProbeError: string | null = null;
+
+export function getLastYtDlpProbeError(): string | null {
+  return lastYtDlpProbeError;
+}
+
+async function probeYtDlpInvocation(
+  invocation: YtDlpInvocation
+): Promise<boolean> {
+  try {
+    await runCommand(invocation.command, [...invocation.prefixArgs, "--version"]);
+    return true;
+  } catch (err) {
+    lastYtDlpProbeError =
+      err instanceof Error ? err.message : "yt-dlp probe failed";
+    return false;
+  }
+}
+
+export async function resolveYtDlpInvocation(): Promise<YtDlpInvocation | null> {
+  if (resolvedYtDlpInvocation) return resolvedYtDlpInvocation;
+
+  for (const invocation of getYtDlpInvocationCandidates()) {
+    if (await probeYtDlpInvocation(invocation)) {
+      resolvedYtDlpInvocation = invocation;
+      lastYtDlpProbeError = null;
+      return invocation;
+    }
+  }
+
+  return null;
 }
 
 function getFfmpegLocationDir(): string {
@@ -62,12 +95,24 @@ export async function runYtDlp(
   url: string,
   options?: { retries?: number }
 ): Promise<{ stdout: string; stderr: string }> {
+  const invocation = await resolveYtDlpInvocation();
+  if (!invocation) {
+    throw new Error(
+      lastYtDlpProbeError ??
+        "yt-dlp is not installed. Redeploy with the latest Dockerfile or set YT_DLP_PATH."
+    );
+  }
+
   const retries = Math.max(1, options?.retries ?? 3);
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
-      return await runCommand(getYtDlpPath(), [...extraArgs, url]);
+      return await runCommand(invocation.command, [
+        ...invocation.prefixArgs,
+        ...extraArgs,
+        url,
+      ]);
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
       const transient = isTransientYtDlpError(lastError.message);
@@ -129,12 +174,7 @@ async function runYtDlpWithFormatFallback(
 }
 
 export async function isYtDlpAvailable(): Promise<boolean> {
-  try {
-    await runCommand(getYtDlpPath(), ["--version"]);
-    return true;
-  } catch {
-    return false;
-  }
+  return (await resolveYtDlpInvocation()) !== null;
 }
 
 /**

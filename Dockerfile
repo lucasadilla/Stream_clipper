@@ -5,9 +5,10 @@ RUN apt-get update \
     ffmpeg \
     ca-certificates \
     curl \
-  && curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
-    -o /usr/local/bin/yt-dlp \
-  && chmod a+rx /usr/local/bin/yt-dlp \
+    python3 \
+    python3-pip \
+  && pip3 install --break-system-packages --no-cache-dir yt-dlp \
+  && yt-dlp --version \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
