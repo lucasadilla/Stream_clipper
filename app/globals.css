@@ -33,6 +33,18 @@ body {
   --color-accent-hover: #b7ff3c;
 }
 
+.editor-shell {
+  --color-background: #020302;
+  --color-foreground: #f4fff1;
+  --color-card: #050805;
+  --color-card-border: #21301f;
+  --color-muted: #9aa49a;
+  --color-accent: #95ff00;
+  --color-accent-hover: #b7ff3c;
+  --color-success: #95ff00;
+  --color-warning: #ffb84d;
+}
+
 .marketing-home {
   background: #020302;
 }

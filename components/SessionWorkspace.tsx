@@ -460,21 +460,21 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         if (!ok) {
           setTranscriptionError(data.error ?? "Transcription failed");
         } else if (data.reason === "no_file") {
-          setTranscriptionError("Waiting for local recording to download…");
+          setTranscriptionError("Waiting for local recording to download...");
         } else if (data.reason === "no_openai_key") {
           setTranscriptionError(
             "Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env"
           );
         } else if (data.reason === "too_short") {
-          setTranscriptionError("Recording too short — wait for more audio");
+          setTranscriptionError("Recording too short - wait for more audio");
         } else if (data.reason === "provider_unavailable") {
           const detail = data.error?.trim();
           setTranscriptionError(
             /quota/i.test(detail ?? "")
-              ? "AI provider quota exceeded — add credits and transcription will resume automatically"
+              ? "AI provider quota exceeded - add credits and transcription will resume automatically"
               : detail
-                ? `Transcription unavailable (${detail}) — retrying automatically`
-                : "AI provider unreachable — retrying automatically"
+                ? `Transcription unavailable (${detail}) - retrying automatically`
+                : "AI provider unreachable - retrying automatically"
           );
         } else {
           setTranscriptionError(null);
@@ -533,10 +533,10 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex flex-col bg-[var(--color-background)]">
+      <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
         <EditorHeader title="Editor" />
         <div className="flex-1 flex items-center justify-center">
-          <p className="text-[var(--color-muted)] animate-pulse">Loading…</p>
+          <p className="text-[var(--color-muted)] animate-pulse">Loading...</p>
         </div>
       </div>
     );
@@ -544,12 +544,12 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
 
   if (error || !session) {
     return (
-      <div className="min-h-screen flex flex-col bg-[var(--color-background)]">
+      <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
         <EditorHeader title="Editor" />
         <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6">
           <p className="text-[var(--color-danger)]">{error ?? "Session not found"}</p>
           <Link href="/" className="text-[var(--color-accent)] text-sm hover:underline">
-            ← Back to home
+            Back to home
           </Link>
         </div>
       </div>
@@ -614,7 +614,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const progressTranscribedSeconds = transcribedSeconds;
 
   return (
-    <div className="h-screen flex flex-col bg-[var(--color-background)] overflow-hidden">
+    <div className="editor-shell h-screen flex flex-col bg-[var(--color-background)] overflow-hidden">
       <EditorHeader
         title={session.title}
         storageLabel={session.storageLabel}
@@ -625,7 +625,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       />
 
       <div className="flex-1 flex flex-col min-h-0">
-        {/* Video preview — larger */}
+        {/* Video preview - larger */}
         <div className="shrink-0 px-4 pt-3 pb-2 flex justify-center">
           <VideoPreview
             platform={platform}
@@ -658,7 +658,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         </div>
 
         {/* Timeline */}
-        <div className="flex-1 min-h-[120px] px-4 py-1">
+        <div className="flex-1 min-h-[120px] px-4 py-1.5">
           <LiveTimeline
             sessionId={sessionId}
             segments={liveSegments}

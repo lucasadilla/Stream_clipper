@@ -12,6 +12,7 @@ datasource db {
 
 model StreamSession {
   id                 String   @id @default(cuid())
+  billingAccountId   String?
   platform           String   @default("youtube") // youtube | twitch | kick
   youtubeVideoId     String
   youtubeUrl         String
@@ -40,8 +41,28 @@ model StreamSession {
   renderJobs      RenderJob[]
   chatTracking    ChatTrackingState?
   liveRecording   LiveRecordingState?
+  billingAccount  BillingAccount? @relation(fields: [billingAccountId], references: [id], onDelete: SetNull)
 
+  @@index([billingAccountId])
   @@index([youtubeVideoId])
+}
+
+model BillingAccount {
+  id                     String   @id @default(cuid())
+  email                  String?
+  stripeCustomerId       String   @unique
+  stripeSubscriptionId   String?  @unique
+  plan                   String
+  status                 String   @default("incomplete")
+  currentPeriodEnd       DateTime?
+  cancelAtPeriodEnd      Boolean  @default(false)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  streamSessions StreamSession[]
+
+  @@index([status])
+  @@index([plan])
 }
 
 model LiveRecordingState {

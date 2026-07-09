@@ -1,12 +1,12 @@
 "use client";
 
-import { StreamPlayer, type StreamPlayerHandle } from "@/components/StreamPlayer";
-import { CaptionTrackLayer } from "@/components/CaptionTrackLayer";
 import { CaptionAppearancePanel } from "@/components/CaptionAppearancePanel";
-import type { TranscriptChunkInput } from "@/lib/captionTrack";
+import { CaptionTrackLayer } from "@/components/CaptionTrackLayer";
+import { StreamPlayer, type StreamPlayerHandle } from "@/components/StreamPlayer";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
 import type { CaptionEditsMap } from "@/lib/captionEdits";
-import type { StreamPlatform, StreamEmbedInfo } from "@/lib/streamPlatform";
+import type { TranscriptChunkInput } from "@/lib/captionTrack";
+import type { StreamEmbedInfo, StreamPlatform } from "@/lib/streamPlatform";
 import { platformLabel } from "@/lib/streamPlatform";
 import { cn } from "@/lib/utils";
 import type { RefObject } from "react";
@@ -49,11 +49,11 @@ export function VideoPreview({
   onDurationChange,
 }: VideoPreviewProps) {
   return (
-    <div className="w-full max-w-6xl mx-auto flex flex-col gap-2">
+    <div className="mx-auto flex w-full max-w-6xl flex-col gap-2.5">
       <div className="flex items-center justify-between gap-3 px-1">
-        <p className="text-xs text-[#888]">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
           {platformLabel(platform)} preview
-          {preferLocalVideo && playbackVideoUrl ? " · local capture" : ""}
+          {preferLocalVideo && playbackVideoUrl ? " / local capture" : ""}
         </p>
         <div className="flex items-center gap-2">
           <CaptionAppearancePanel
@@ -67,19 +67,19 @@ export function VideoPreview({
             aria-checked={captionsEnabled}
             onClick={() => onCaptionsEnabledChange(!captionsEnabled)}
             className={cn(
-              "inline-flex items-center gap-2 text-xs font-medium rounded-full px-3 py-1.5 border transition-colors",
+              "inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors",
               captionsEnabled
-                ? "border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
-                : "border-[#444] bg-[#1a1a1a] text-[#aaa] hover:border-[#666]"
+                ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-black shadow-[0_0_18px_rgba(149,255,0,0.18)]"
+                : "border-[#21301f] bg-[#070a07] text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-white"
             )}
             title="Toggle captions overlay and exports"
           >
             <span
               className={cn(
-                "inline-flex items-center justify-center w-5 h-5 rounded text-[10px] font-bold",
+                "inline-flex h-5 w-5 items-center justify-center rounded text-[10px] font-bold",
                 captionsEnabled
-                  ? "bg-[var(--color-accent)] text-white"
-                  : "bg-[#333] text-[#ccc]"
+                  ? "bg-black text-[var(--color-accent)]"
+                  : "bg-[#142114] text-[#dfead8]"
               )}
             >
               CC
@@ -89,7 +89,7 @@ export function VideoPreview({
         </div>
       </div>
 
-      <div className="relative isolate w-full h-[min(42vh,520px)] min-h-[220px] overflow-hidden rounded-xl border border-[#2a2a2a] bg-black">
+      <div className="relative isolate h-[min(42vh,520px)] min-h-[220px] w-full overflow-hidden rounded-lg border border-[var(--color-card-border)] bg-black shadow-[0_20px_80px_rgba(0,0,0,0.42)]">
         <div className="absolute inset-0 z-0">
           <StreamPlayer
             ref={playerRef}

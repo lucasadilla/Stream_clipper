@@ -51,7 +51,7 @@ export function CaptionTimelineTrack({
   return (
     <div
       ref={trackRef}
-      className="relative bg-[#0a0f14] border-b border-[#2a2a2a] shrink-0 overflow-hidden"
+      className="relative bg-[#040804] border-b border-[var(--color-card-border)] shrink-0 overflow-hidden"
       style={{ height }}
       onPointerDown={() => onSelectCue(null)}
     >
@@ -69,10 +69,10 @@ export function CaptionTimelineTrack({
               "absolute top-1 bottom-1 rounded-sm border text-left overflow-visible",
               "px-1 py-0.5 text-[9px] leading-tight",
               isSelected
-                ? "border-[#e8b84a] bg-[#e8b84a]/20 text-[#fff8e8] z-[8] ring-1 ring-[#e8b84a]/50"
+                ? "border-[var(--color-accent)] bg-[var(--color-accent)]/20 text-[#f4fff1] z-[8] ring-1 ring-[var(--color-accent)]/45"
                 : isActive
-                  ? "border-[#7eb8ff] bg-[#7eb8ff]/25 text-[#dceeff] z-[4]"
-                  : "border-[#2a4a66] bg-[#152535]/80 text-[#8ab4d4] hover:bg-[#1a3045] z-[2]"
+                  ? "border-[#d7ff64]/70 bg-[#95ff00]/18 text-[#f4fff1] z-[4]"
+                  : "border-[#335221] bg-[#0c1609]/88 text-[#b9d7aa] hover:bg-[#12220d] z-[2]"
             )}
             style={{
               left: `${pct(cue.startTimeSeconds, maxTime)}%`,
@@ -86,11 +86,11 @@ export function CaptionTimelineTrack({
             {isSelected && (
               <>
                 <div
-                  className="absolute left-0 top-0 bottom-0 w-2 -ml-1 bg-[#e8b84a] cursor-ew-resize z-10 rounded-l-sm"
+                  className="absolute left-0 top-0 bottom-0 w-2 -ml-1 bg-[var(--color-accent)] cursor-ew-resize z-10 rounded-l-sm"
                   onPointerDown={(e) => onBeginCueDrag("cue-start", e, cue)}
                 />
                 <div
-                  className="absolute right-0 top-0 bottom-0 w-2 -mr-1 bg-[#e8b84a] cursor-ew-resize z-10 rounded-r-sm"
+                  className="absolute right-0 top-0 bottom-0 w-2 -mr-1 bg-[var(--color-accent)] cursor-ew-resize z-10 rounded-r-sm"
                   onPointerDown={(e) => onBeginCueDrag("cue-end", e, cue)}
                 />
                 <div

@@ -103,6 +103,52 @@ storage/          # Local uploads, frames, renders
 | `STORAGE_ROOT` | Local storage path (default: `./storage`) |
 | `FFMPEG_PATH` | FFmpeg binary (default: `ffmpeg`) |
 | `FFPROBE_PATH` | FFprobe binary (default: `ffprobe`) |
+| `STRIPE_SECRET_KEY` | Stripe secret key — get from [Dashboard → API keys](https://dashboard.stripe.com/apikeys) |
+| `STRIPE_PUBLISHABLE_KEY` | Stripe publishable key (optional client-side use) |
+| `STRIPE_WEBHOOK_SECRET` | Webhook signing secret for `/api/stripe/webhook` |
+| `STRIPE_MANAGED_PAYMENTS_ENABLED` | Set `false` only before Managed Payments is activated (default: `true`) |
+| `STRIPE_PRICE_CREATOR_MONTHLY` | Stripe monthly recurring price ID for Creator |
+| `STRIPE_PRICE_CREATOR_YEARLY` | Stripe yearly recurring price ID for Creator |
+| `STRIPE_PRICE_PRO_MONTHLY` | Stripe monthly recurring price ID for Pro |
+| `STRIPE_PRICE_PRO_YEARLY` | Stripe yearly recurring price ID for Pro |
+| `STRIPE_PRICE_STUDIO_MONTHLY` | Stripe monthly recurring price ID for Studio |
+| `STRIPE_PRICE_STUDIO_YEARLY` | Stripe yearly recurring price ID for Studio |
+| `STREAM_CLIPPER_OVERAGE_PROCESSING_HOURS` | Extra monthly processing hours to add to the active plan |
+| `STREAM_CLIPPER_OVERAGE_EXPORTS` | Extra monthly rendered exports to add to the active plan |
+
+## SaaS Pricing Defaults
+
+Pricing is defined in `lib/pricing.ts` and used by the landing page, Stripe Checkout, and API usage gates. There is no free tier.
+
+| Plan | Price | Main limits |
+|------|-------|-------------|
+| Creator | $19/mo | 10 processing hours, 50 exports, 1080p, 14-day storage |
+| Pro | $49/mo | 40 processing hours, 250 exports, priority queue, 60-day storage |
+| Studio | $99/mo | 100 processing hours, 750 exports, 3 seats |
+| Business | Custom | Custom hours, seats, retention, support, and capacity |
+
+Users must subscribe through Stripe before creating sessions, transcribing, or rendering. Checkout completion sets an HTTP-only billing account cookie that scopes usage to the Stripe customer.
+
+### Stripe Managed Payments setup
+
+1. Activate [Managed Payments](https://dashboard.stripe.com/settings/managed-payments) and accept the Terms of Service.
+2. Add `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` to `.env`.
+3. Provision catalog (creates products with tax code `txcd_10103100` + monthly/yearly prices):
+
+```bash
+npm run stripe:provision-catalog
+```
+
+4. Copy the printed `STRIPE_PRICE_*` lines into `.env`.
+5. Point a Stripe webhook at `https://your-domain/api/stripe/webhook` for:
+   - `checkout.session.completed`
+   - `checkout.session.async_payment_succeeded`
+   - `checkout.session.async_payment_failed`
+   - `customer.subscription.updated`
+   - `customer.subscription.deleted`
+6. Test checkout with card `4242 4242 4242 4242`.
+
+Checkout sessions are created with `managed_payments.enabled=true` using Stripe API version `2026-02-25.preview`.
 
 ## Architecture Notes
 
@@ -130,6 +176,12 @@ storage/          # Local uploads, frames, renders
 | POST | `/api/clips/[id]/reject` | Reject clip suggestion |
 | POST | `/api/clips/[id]/render` | Render vertical Short |
 | GET | `/api/render-jobs/[id]` | Get render job status |
+| GET | `/api/usage` | Get active plan, entitlements, and monthly usage |
+| POST | `/api/billing/checkout` | Create a Stripe Checkout session |
+| GET | `/api/billing/complete` | Complete checkout, sync billing, and set billing cookie |
+| POST | `/api/billing/portal` | Create a Stripe Billing Portal session |
+| GET | `/api/billing/status` | Get current billing account from cookie |
+| POST | `/api/stripe/webhook` | Stripe webhook for checkout/subscription updates |
 
 ## License
 

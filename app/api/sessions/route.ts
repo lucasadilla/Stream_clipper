@@ -4,6 +4,8 @@ import { createStreamSession } from "@/services/youtubeService";
 import { listSessionsWithStorage } from "@/services/sessionCleanupService";
 import { parseStreamUrl } from "@/lib/streamPlatform";
 import { errorResponse, jsonResponse, parseRequestJson } from "@/lib/utils";
+import { canCreateStreamSession } from "@/services/usageService";
+import { getBillingAccountIdFromRequest } from "@/services/billingService";
 
 const createSessionSchema = z.object({
   streamUrl: z.string().min(1).optional(),
@@ -36,12 +38,21 @@ export async function POST(request: NextRequest) {
 
     if (!parseStreamUrl(rawUrl)) {
       return errorResponse(
-        "Unsupported URL. Use YouTube, Twitch (twitch.tv/channel or /videos/…), or Kick (kick.com/channel).",
+        "Unsupported URL. Use YouTube, Twitch (twitch.tv/channel or /videos/...), or Kick (kick.com/channel).",
         400
       );
     }
 
-    const session = await createStreamSession(rawUrl);
+    const billingAccountId = getBillingAccountIdFromRequest(request);
+    const usageGate = await canCreateStreamSession(billingAccountId);
+    if (!usageGate.allowed) {
+      return errorResponse(
+        usageGate.message ?? "Plan limit reached",
+        usageGate.status ?? 402
+      );
+    }
+
+    const session = await createStreamSession(rawUrl, billingAccountId);
     return jsonResponse(
       {
         session: {

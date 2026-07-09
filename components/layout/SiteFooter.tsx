@@ -5,6 +5,7 @@ const FOOTER_LINKS = {
   Product: [
     { href: "/#features", label: "System" },
     { href: "/#how-it-works", label: "Workflow" },
+    { href: "/#pricing", label: "Pricing" },
     { href: "/#analyze", label: "Open timeline" },
   ],
   Editor: [

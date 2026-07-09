@@ -27,13 +27,13 @@ export function CaptionCueEditor({ cue, onSave, onClose }: CaptionCueEditorProps
   }
 
   return (
-    <div className="shrink-0 flex flex-wrap items-start gap-2 px-3 py-2 border-b border-[#2a4a66] bg-[#0d1520]">
+    <div className="shrink-0 flex flex-wrap items-start gap-2 px-3 py-2 border-b border-[var(--color-card-border)] bg-[#030503]">
       <div className="shrink-0 pt-1">
-        <span className="text-[10px] font-semibold uppercase tracking-wide text-[#7eb8ff]">
+        <span className="text-[10px] font-semibold uppercase text-[var(--color-accent)]">
           Edit caption
         </span>
-        <p className="text-[10px] text-[#6a8aaa] font-mono tabular-nums mt-0.5">
-          {formatSeconds(cue.startTimeSeconds)} — {formatSeconds(cue.endTimeSeconds)}
+        <p className="text-[10px] text-[#9aa49a] font-mono tabular-nums mt-0.5">
+          {formatSeconds(cue.startTimeSeconds)} to {formatSeconds(cue.endTimeSeconds)}
         </p>
       </div>
 
@@ -51,8 +51,8 @@ export function CaptionCueEditor({ cue, onSave, onClose }: CaptionCueEditorProps
           }
         }}
         rows={2}
-        className="flex-1 min-w-[200px] text-xs bg-[#0a0f14] border border-[#2a4a66] rounded px-2 py-1.5 text-[#dceeff] focus:outline-none focus:border-[#7eb8ff] resize-y"
-        placeholder="Caption text…"
+        className="flex-1 min-w-[200px] text-xs bg-[#050805] border border-[var(--color-card-border)] rounded px-2 py-1.5 text-[#f4fff1] focus:outline-none focus:border-[var(--color-accent)] resize-y"
+        placeholder="Caption text..."
         autoFocus
       />
 
@@ -60,21 +60,21 @@ export function CaptionCueEditor({ cue, onSave, onClose }: CaptionCueEditorProps
         <button
           type="button"
           onClick={save}
-          className="text-xs px-2.5 py-1.5 rounded font-medium bg-[#7eb8ff]/20 border border-[#7eb8ff]/50 text-[#dceeff] hover:bg-[#7eb8ff]/30"
+          className="text-xs px-2.5 py-1.5 rounded font-medium bg-[var(--color-accent)] text-black hover:bg-[var(--color-accent-hover)]"
         >
           Save
         </button>
         <button
           type="button"
           onClick={onClose}
-          className="text-xs px-2.5 py-1.5 rounded text-[#8ab4d4] hover:bg-[#152535]"
+          className="text-xs px-2.5 py-1.5 rounded text-[#9aa49a] hover:bg-[#101810] hover:text-white"
         >
           Done
         </button>
       </div>
 
-      <p className="w-full text-[9px] text-[#5a7a99]">
-        Drag the yellow handles on the timeline to trim timing. Ctrl+Enter to save.
+      <p className="w-full text-[9px] text-[#9aa49a]">
+        Drag the lime handles on the timeline to trim timing. Ctrl+Enter to save.
       </p>
     </div>
   );

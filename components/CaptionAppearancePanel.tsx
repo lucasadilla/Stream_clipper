@@ -10,11 +10,11 @@ import {
 import {
   appearanceMatchesPreset,
   deleteCustomCaptionPreset,
+  findCaptionPreset,
   getAllCaptionPresets,
   readActiveCaptionPresetId,
   saveCustomCaptionPreset,
   writeActiveCaptionPresetId,
-  findCaptionPreset,
   type CaptionPreset,
 } from "@/lib/captionPresets";
 import { cn } from "@/lib/utils";
@@ -39,10 +39,10 @@ function PosBtn({
       type="button"
       onClick={onClick}
       className={cn(
-        "h-7 min-w-[2rem] px-2 text-[10px] rounded border transition-colors",
+        "h-7 min-w-[2rem] rounded-lg border px-2 text-[10px] font-semibold transition-colors",
         active
-          ? "border-[var(--color-accent)] bg-[var(--color-accent)]/20 text-[var(--color-accent)]"
-          : "border-[#444] text-[#aaa] hover:border-[#666] hover:text-white"
+          ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-black"
+          : "border-[#21301f] bg-[#070a07] text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-white"
       )}
     >
       {label}
@@ -151,26 +151,30 @@ export function CaptionAppearancePanel({
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
         className={cn(
-          "text-xs px-3 py-1.5 rounded-full border transition-colors",
+          "rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors",
           open
-            ? "border-[#666] bg-[#252525] text-white"
-            : "border-[#444] bg-[#1a1a1a] text-[#aaa] hover:border-[#666]",
-          disabled && "opacity-40 pointer-events-none"
+            ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-black"
+            : "border-[#21301f] bg-[#070a07] text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-white",
+          disabled && "pointer-events-none opacity-40"
         )}
       >
         Caption style
         {activePreset && (
-          <span className="ml-1.5 text-[10px] text-[var(--color-accent)]">
-            · {activePreset.name}
+          <span
+            className={cn(
+              "ml-1.5 text-[10px]",
+              open ? "text-black" : "text-[var(--color-accent)]"
+            )}
+          >
+            / {activePreset.name}
           </span>
         )}
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full mt-2 z-50 w-[min(92vw,320px)] rounded-xl border border-[#333] bg-[#141414] shadow-xl p-3 space-y-3 max-h-[min(80vh,560px)] overflow-y-auto">
-          {/* Presets */}
+        <div className="absolute right-0 top-full z-50 mt-2 max-h-[min(80vh,560px)] w-[min(92vw,320px)] space-y-3 overflow-y-auto rounded-lg border border-[var(--color-card-border)] bg-[#050705] p-3 shadow-[0_24px_80px_rgba(0,0,0,0.55)]">
           <div className="space-y-2">
-            <span className="text-[10px] uppercase tracking-wide text-[#888]">
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-accent)]">
               Presets
             </span>
             <div className="flex flex-wrap gap-1.5">
@@ -207,13 +211,13 @@ export function CaptionAppearancePanel({
                 onKeyDown={(e) => {
                   if (e.key === "Enter") handleSavePreset();
                 }}
-                placeholder="Save current as…"
-                className="flex-1 h-8 rounded-lg bg-[#0d0d0d] border border-[#333] text-xs text-white px-2"
+                placeholder="Save current as..."
+                className="h-8 min-w-0 flex-1 rounded-lg border border-[#21301f] bg-[#020302] px-2 text-xs text-white focus:border-[var(--color-accent)] focus:outline-none"
               />
               <button
                 type="button"
                 onClick={handleSavePreset}
-                className="shrink-0 h-8 px-2.5 rounded-lg text-xs font-medium border border-[var(--color-accent)]/50 bg-[var(--color-accent)]/15 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25"
+                className="h-8 shrink-0 rounded-lg bg-[var(--color-accent)] px-2.5 text-xs font-semibold text-black hover:bg-[var(--color-accent-hover)]"
               >
                 Save
               </button>
@@ -223,10 +227,11 @@ export function CaptionAppearancePanel({
             )}
           </div>
 
-          <div className="border-t border-[#2a2a2a] pt-3 space-y-3">
-            {/* Font */}
+          <div className="space-y-3 border-t border-[var(--color-card-border)] pt-3">
             <label className="block space-y-1">
-              <span className="text-[10px] uppercase tracking-wide text-[#888]">Font</span>
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+                Font
+              </span>
               <select
                 value={
                   CAPTION_FONT_PRESETS.includes(
@@ -236,30 +241,31 @@ export function CaptionAppearancePanel({
                     : "__custom__"
                 }
                 onChange={(e) => {
-                  if (e.target.value !== "__custom__") patch({ fontFamily: e.target.value });
+                  if (e.target.value !== "__custom__") {
+                    patch({ fontFamily: e.target.value });
+                  }
                 }}
-                className="w-full h-8 rounded-lg bg-[#0d0d0d] border border-[#333] text-xs text-white px-2"
+                className="h-8 w-full rounded-lg border border-[#21301f] bg-[#020302] px-2 text-xs text-white focus:border-[var(--color-accent)] focus:outline-none"
               >
-                {CAPTION_FONT_PRESETS.map((f) => (
-                  <option key={f} value={f}>
-                    {f}
+                {CAPTION_FONT_PRESETS.map((font) => (
+                  <option key={font} value={font}>
+                    {font}
                   </option>
                 ))}
-                <option value="__custom__">Custom…</option>
+                <option value="__custom__">Custom...</option>
               </select>
               <input
                 type="text"
                 value={appearance.fontFamily}
                 onChange={(e) => patch({ fontFamily: e.target.value })}
                 placeholder="Font family name"
-                className="w-full h-8 rounded-lg bg-[#0d0d0d] border border-[#333] text-xs text-white px-2"
+                className="h-8 w-full rounded-lg border border-[#21301f] bg-[#020302] px-2 text-xs text-white focus:border-[var(--color-accent)] focus:outline-none"
               />
             </label>
 
-            {/* Size */}
             <label className="block space-y-1">
-              <span className="text-[10px] uppercase tracking-wide text-[#888]">
-                Size — {appearance.fontSize}px
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+                Size / {appearance.fontSize}px
               </span>
               <input
                 type="range"
@@ -271,29 +277,31 @@ export function CaptionAppearancePanel({
               />
             </label>
 
-            {/* Color */}
             <label className="block space-y-1">
-              <span className="text-[10px] uppercase tracking-wide text-[#888]">Color</span>
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+                Color
+              </span>
               <div className="flex items-center gap-2">
                 <input
                   type="color"
                   value={appearance.color}
                   onChange={(e) => patch({ color: e.target.value.toUpperCase() })}
-                  className="h-8 w-10 rounded border border-[#333] bg-transparent cursor-pointer"
+                  className="h-8 w-10 cursor-pointer rounded border border-[#21301f] bg-transparent"
                 />
                 <input
                   type="text"
                   value={appearance.color}
                   onChange={(e) => patch({ color: e.target.value })}
                   placeholder="#FFFFFF"
-                  className="flex-1 h-8 rounded-lg bg-[#0d0d0d] border border-[#333] text-xs text-white px-2 font-mono"
+                  className="h-8 min-w-0 flex-1 rounded-lg border border-[#21301f] bg-[#020302] px-2 font-mono text-xs text-white focus:border-[var(--color-accent)] focus:outline-none"
                 />
               </div>
             </label>
 
-            {/* Position */}
             <div className="space-y-1">
-              <span className="text-[10px] uppercase tracking-wide text-[#888]">Position</span>
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+                Position
+              </span>
               <div className="flex flex-wrap gap-1">
                 {(["top", "center", "bottom"] as CaptionVerticalPosition[]).map((v) => (
                   <PosBtn
@@ -316,10 +324,9 @@ export function CaptionAppearancePanel({
               </div>
             </div>
 
-            {/* Offset */}
             <label className="block space-y-1">
-              <span className="text-[10px] uppercase tracking-wide text-[#888]">
-                Edge offset — {appearance.verticalOffsetPercent}%
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+                Edge offset / {appearance.verticalOffsetPercent}%
               </span>
               <input
                 type="range"
@@ -351,23 +358,23 @@ function PresetChip({
   onDelete?: () => void;
 }) {
   return (
-    <div className="relative group">
+    <div className="group relative">
       <button
         type="button"
         onClick={onClick}
         title={preset.name}
         className={cn(
-          "h-7 px-2.5 text-[10px] rounded-full border transition-colors max-w-[9rem] truncate",
+          "h-7 max-w-[9rem] truncate rounded-lg border px-2.5 text-[10px] font-semibold transition-colors",
           active
-            ? "border-[var(--color-accent)] bg-[var(--color-accent)]/20 text-[var(--color-accent)]"
-            : "border-[#444] text-[#ccc] hover:border-[#666] hover:text-white"
+            ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-black"
+            : "border-[#21301f] bg-[#070a07] text-[#dfead8] hover:border-[var(--color-accent)] hover:text-white"
         )}
         style={{
           boxShadow: active ? `0 0 0 1px ${preset.appearance.color}33` : undefined,
         }}
       >
         <span
-          className="inline-block w-2 h-2 rounded-full mr-1.5 align-middle"
+          className="mr-1.5 inline-block h-2 w-2 rounded-full align-middle"
           style={{ backgroundColor: preset.appearance.color }}
           aria-hidden
         />
@@ -380,10 +387,10 @@ function PresetChip({
             e.stopPropagation();
             onDelete();
           }}
-          className="absolute -top-1 -right-1 hidden group-hover:flex h-4 w-4 items-center justify-center rounded-full bg-[#333] border border-[#555] text-[9px] text-[#ccc] hover:bg-[var(--color-danger)] hover:text-white"
+          className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full border border-[#2d3f2a] bg-[#111811] text-[9px] text-[#dfead8] hover:bg-[var(--color-danger)] hover:text-white group-hover:flex"
           title="Delete preset"
         >
-          ×
+          x
         </button>
       )}
     </div>

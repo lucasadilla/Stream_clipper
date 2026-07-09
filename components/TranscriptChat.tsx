@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { formatSeconds } from "@/lib/time";
 
@@ -102,31 +102,33 @@ export function TranscriptChat({
   }
 
   return (
-    <div className="flex flex-col h-full min-h-0 border-t border-[#2a2a2a] bg-[#141414]">
+    <div className="flex h-full min-h-0 flex-col border-t border-[var(--color-card-border)] bg-[#050705]">
       {(transcribing || transcribingActive || transcribedSeconds > 0 || transcriptionError) && (
-        <div className="shrink-0 px-4 py-2 border-b border-[#2a2a2a] bg-[#1a1a1a] flex items-center justify-between gap-3">
-          <div className="flex-1 min-w-0">
-            <p className="text-[10px] uppercase tracking-wide text-[#666] mb-1">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--color-card-border)] bg-[#020302] px-4 py-2.5">
+          <div className="min-w-0 flex-1">
+            <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--color-accent)]">
               Transcript
             </p>
             {transcriptionError ? (
-              <p className="text-xs text-[var(--color-warning)]">{transcriptionError}</p>
+              <p className="text-xs text-[#ffb84d]">{transcriptionError}</p>
             ) : transcribing || transcribingActive ? (
-              <p className="text-xs text-[#aaa]">
-                Transcribing… {formatSeconds(transcribedSeconds)} /{" "}
+              <p className="text-xs text-[#b8c7b3]">
+                Transcribing... {formatSeconds(transcribedSeconds)} /{" "}
                 {formatSeconds(recordedSeconds)}
-                <span className="text-[#666] ml-2">({progressPct}%)</span>
+                <span className="ml-2 text-[var(--color-muted)]">
+                  ({progressPct}%)
+                </span>
               </p>
             ) : (
-              <p className="text-xs text-[var(--color-success)]">
-                Ready · {formatSeconds(transcribedSeconds)} transcribed
+              <p className="text-xs text-[var(--color-accent)]">
+                Ready / {formatSeconds(transcribedSeconds)} transcribed
               </p>
             )}
           </div>
           {(transcribing || transcribingActive) && !transcriptionError && (
-            <div className="w-24 h-1.5 rounded-full bg-[#333] overflow-hidden shrink-0">
+            <div className="h-1.5 w-24 shrink-0 overflow-hidden rounded-full bg-[#152015]">
               <div
-                className="h-full bg-[var(--color-accent)] transition-all duration-500"
+                className="h-full rounded-full bg-[var(--color-accent)] transition-all duration-500"
                 style={{ width: `${progressPct}%` }}
               />
             </div>
@@ -134,14 +136,17 @@ export function TranscriptChat({
         </div>
       )}
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-0">
+      <div
+        ref={scrollRef}
+        className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3"
+      >
         {messages.length === 0 && (
-          <p className="text-sm text-[#666] py-2">
+          <p className="py-2 text-sm leading-relaxed text-[var(--color-muted)]">
             {transcribing
-              ? "Transcription in progress — you can ask questions about the transcribed portion now."
+              ? "Transcription is in progress. You can ask questions about the transcribed portion now."
               : transcribedSeconds > 0
-                ? "Ask about the stream — e.g. “when do they mention the score?”"
-                : "Waiting for audio to transcribe… This usually starts within a minute."}
+                ? 'Ask about the stream, like "when do they mention the score?"'
+                : "Waiting for audio to transcribe. This usually starts within a minute."}
           </p>
         )}
         {messages.map((msg, i) => (
@@ -154,12 +159,12 @@ export function TranscriptChat({
           >
             <div
               className={cn(
-                "text-sm rounded-2xl px-4 py-2.5 max-w-[85%]",
+                "max-w-[85%] rounded-xl px-4 py-2.5 text-sm",
                 msg.role === "user"
-                  ? "bg-[var(--color-accent)] text-white rounded-br-md"
+                  ? "rounded-br-sm bg-[var(--color-accent)] text-black shadow-[0_0_22px_rgba(149,255,0,0.18)]"
                   : msg.found === false
-                    ? "bg-[#1a1a1a] text-[#999] border border-[#2a2a2a] rounded-bl-md"
-                    : "bg-[#1a1a1a] text-[#ddd] border border-[#2a2a2a] rounded-bl-md"
+                    ? "rounded-bl-sm border border-[var(--color-card-border)] bg-[#070a07] text-[var(--color-muted)]"
+                    : "rounded-bl-sm border border-[var(--color-card-border)] bg-[#070a07] text-[#dfead8]"
               )}
             >
               <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
@@ -170,13 +175,15 @@ export function TranscriptChat({
                       key={j}
                       type="button"
                       onClick={() => onSeek?.(ts.timeSeconds)}
-                      className="text-left rounded-lg border border-[#333] bg-[#0d0d0d] px-3 py-1.5 hover:border-[#e8b84a] transition-colors"
+                      className="rounded-lg border border-[#21301f] bg-[#020302] px-3 py-1.5 text-left transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-accent)]/10"
                       title={ts.quote}
                     >
-                      <span className="font-mono text-sm text-[#e8b84a]">
+                      <span className="font-mono text-sm text-[var(--color-accent)]">
                         {formatSeconds(ts.timeSeconds)}
                       </span>
-                      <span className="text-[#aaa] text-xs ml-2">{ts.label}</span>
+                      <span className="ml-2 text-xs text-[#a7b1a2]">
+                        {ts.label}
+                      </span>
                     </button>
                   ))}
                 </div>
@@ -186,8 +193,8 @@ export function TranscriptChat({
         ))}
         {loading && (
           <div className="flex justify-start">
-            <div className="text-sm text-[#666] px-4 py-2 rounded-2xl bg-[#1a1a1a] border border-[#2a2a2a] animate-pulse">
-              Searching transcript…
+            <div className="animate-pulse rounded-xl border border-[var(--color-card-border)] bg-[#070a07] px-4 py-2 text-sm text-[var(--color-muted)]">
+              Searching transcript...
             </div>
           </div>
         )}
@@ -198,19 +205,19 @@ export function TranscriptChat({
           e.preventDefault();
           sendMessage(input);
         }}
-        className="shrink-0 flex gap-2 px-4 py-3 border-t border-[#2a2a2a] bg-[#1a1a1a]"
+        className="flex shrink-0 gap-2 border-t border-[var(--color-card-border)] bg-[#020302] px-4 py-3"
       >
         <input
           ref={inputRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask about the stream…"
-          className="flex-1 text-sm rounded-full border border-[#333] bg-[#141414] px-4 py-2.5 focus:outline-none focus:border-[var(--color-accent)]"
+          placeholder="Ask about the stream..."
+          className="min-w-0 flex-1 rounded-lg border border-[#21301f] bg-[#070a07] px-4 py-2.5 text-sm text-[var(--color-foreground)] focus:border-[var(--color-accent)] focus:outline-none"
         />
         <button
           type="submit"
           disabled={loading || !input.trim()}
-          className="text-sm px-5 py-2.5 rounded-full bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white disabled:opacity-50 font-medium"
+          className="rounded-lg bg-[var(--color-accent)] px-5 py-2.5 text-sm font-semibold text-black transition-colors hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
         >
           Send
         </button>

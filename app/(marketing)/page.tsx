@@ -1,6 +1,8 @@
 import { ParticleEditingHero } from "@/components/ParticleEditingHero";
 import { SessionStorageList } from "@/components/SessionStorageList";
 import { StreamUrlInput } from "@/components/YouTubeUrlInput";
+import { BillingPlanButton } from "@/components/BillingPlanButton";
+import { PRICING_PLANS, USAGE_PACKS } from "@/lib/pricing";
 
 const HERO_SIGNALS = ["Live input", "AI transcript", "Fast export"];
 
@@ -208,6 +210,108 @@ export default function HomePage() {
                 </p>
               </div>
             ))}
+          </div>
+        </div>
+      </section>
+
+      <section
+        id="pricing"
+        className="scroll-mt-20 border-b border-[var(--color-card-border)] bg-[#020302]"
+      >
+        <div className="mx-auto max-w-[1440px] px-4 py-16 sm:px-6 lg:px-8 lg:py-24">
+          <div className="grid gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:items-end">
+            <div>
+              <p className="text-xs font-semibold uppercase text-[var(--color-accent)] sm:text-sm">
+                SaaS pricing
+              </p>
+              <h2 className="marketing-display-title mt-4 max-w-5xl font-semibold text-white">
+                No free tier. Pay for live hours, not vague credits.
+              </h2>
+            </div>
+            <p className="max-w-2xl text-xl leading-8 text-[var(--color-muted)] sm:text-2xl sm:leading-9">
+              Processing hours cover live or VOD analysis. Exports are capped
+              separately because rendering and storage are the expensive parts.
+              Choose a plan to unlock the timeline. Annual plans include
+              roughly two months free through yearly Stripe prices.
+            </p>
+          </div>
+
+          <div className="mt-14 grid gap-px overflow-hidden border border-[var(--color-card-border)] bg-[var(--color-card-border)] md:grid-cols-2 xl:grid-cols-4">
+            {PRICING_PLANS.map((plan) => (
+              <div
+                key={plan.id}
+                className="flex min-h-[28rem] flex-col bg-[#050805] p-5 sm:p-6"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase text-[var(--color-muted)]">
+                      {plan.audience}
+                    </p>
+                    <h3 className="mt-3 text-4xl font-semibold leading-none text-white">
+                      {plan.name}
+                    </h3>
+                  </div>
+                  {plan.highlight && (
+                    <span className="border border-[var(--color-accent)] px-2 py-1 text-[10px] font-semibold uppercase text-[var(--color-accent)]">
+                      {plan.highlight}
+                    </span>
+                  )}
+                </div>
+
+                <div className="mt-8">
+                  <p className="text-4xl font-semibold leading-none text-white">
+                    {plan.priceLabel}
+                  </p>
+                  <p className="mt-2 text-xs text-[var(--color-muted)]">
+                    {plan.yearlyLabel === "Custom"
+                      ? "Custom annual contract"
+                      : `${plan.yearlyLabel} with yearly billing`}
+                  </p>
+                </div>
+
+                <div className="mt-7 border-t border-[var(--color-card-border)] pt-5">
+                  <p className="text-xs font-semibold uppercase text-[var(--color-accent)]">
+                    Included
+                  </p>
+                  <ul className="mt-4 space-y-3 text-sm leading-6 text-[#dfead8]">
+                    {plan.features.map((feature) => (
+                      <li key={feature} className="flex gap-2">
+                        <span className="mt-2 h-1.5 w-1.5 shrink-0 bg-[var(--color-accent)]" />
+                        <span>{feature}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+
+                <BillingPlanButton planId={plan.id} />
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-8 grid gap-px overflow-hidden border border-[var(--color-card-border)] bg-[var(--color-card-border)] lg:grid-cols-[0.8fr_1.2fr]">
+            <div className="bg-[#071007] p-6 sm:p-8">
+              <p className="text-xs font-semibold uppercase text-[var(--color-accent)]">
+                Overage packs
+              </p>
+              <h3 className="mt-4 text-4xl font-semibold leading-none text-white sm:text-5xl">
+                Keep shipping when the month gets hot.
+              </h3>
+            </div>
+            <div className="grid gap-px bg-[var(--color-card-border)] sm:grid-cols-2">
+              {USAGE_PACKS.map((pack) => (
+                <div key={pack.id} className="bg-[#050805] p-6 sm:p-8">
+                  <p className="text-3xl font-semibold text-white">
+                    ${pack.price}
+                  </p>
+                  <h4 className="mt-4 text-xl font-semibold text-white">
+                    {pack.name}
+                  </h4>
+                  <p className="mt-3 text-sm leading-6 text-[var(--color-muted)]">
+                    {pack.description}
+                  </p>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       </section>

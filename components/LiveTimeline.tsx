@@ -161,20 +161,20 @@ function audioSpikeBarClass(
 ): string {
   if (isActive) {
     if (intensity === "high") {
-      return "border-[#00d4aa] bg-[#00d4aa]/45 text-[#e0fff8] z-[6] shadow-[0_0_8px_#00d4aa55]";
+      return "border-[var(--color-accent)] bg-[var(--color-accent)]/38 text-[#f4fff1] z-[6] shadow-[0_0_14px_rgba(149,255,0,0.32)]";
     }
     if (intensity === "medium") {
-      return "border-cyan-400 bg-cyan-500/35 text-cyan-50 z-[5]";
+      return "border-[#b7ff3c]/70 bg-[#95ff00]/24 text-[#f4fff1] z-[5]";
     }
-    return "border-cyan-600/60 bg-cyan-700/25 text-cyan-100 z-[4]";
+    return "border-[#5c8f1d]/60 bg-[#95ff00]/14 text-[#d8efc8] z-[4]";
   }
   if (intensity === "high") {
-    return "border-[#00d4aa]/70 bg-[#00d4aa]/25 hover:bg-[#00d4aa]/35";
+    return "border-[var(--color-accent)]/70 bg-[var(--color-accent)]/20 hover:bg-[var(--color-accent)]/30";
   }
   if (intensity === "medium") {
-    return "border-cyan-500/50 bg-cyan-600/20 hover:bg-cyan-600/30";
+    return "border-[#b7ff3c]/45 bg-[#95ff00]/14 hover:bg-[#95ff00]/22";
   }
-  return "border-cyan-700/40 bg-cyan-800/15 hover:bg-cyan-800/25";
+  return "border-[#5c8f1d]/35 bg-[#20350c]/40 hover:bg-[#20350c]/70";
 }
 
 function sampleTimelineItems<T>(
@@ -400,20 +400,20 @@ export function LiveTimeline({
       const scroll = scrollRef.current;
       if (!scroll) return;
 
-      // Trackpad horizontal swipe — scroll the timeline.
+      // Trackpad horizontal swipe - scroll the timeline.
       if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
         scroll.scrollLeft += e.deltaX;
         return;
       }
 
-      // Shift+wheel — horizontal scroll (when zoomed in).
+      // Shift+wheel - horizontal scroll (when zoomed in).
       if (e.shiftKey) {
         e.preventDefault();
         scroll.scrollLeft += e.deltaY;
         return;
       }
 
-      // Wheel — zoom in/out around cursor position.
+      // Wheel - zoom in/out around cursor position.
       e.preventDefault();
       const rect = videoTrackRef.current?.getBoundingClientRect();
       let anchorTime = currentTime;
@@ -724,62 +724,62 @@ export function LiveTimeline({
     <>
     <div
       className={cn(
-        "h-full flex flex-col rounded-lg border border-[#2a2a2a] bg-[#141414] overflow-hidden transition-opacity",
+        "h-full flex flex-col rounded-lg border border-[var(--color-card-border)] bg-[#050705] overflow-hidden shadow-[0_18px_70px_rgba(0,0,0,0.35)] transition-opacity",
         renderModalOpen && "opacity-40 pointer-events-none select-none"
       )}
       aria-hidden={renderModalOpen}
     >
-      {/* Premiere-style toolbar */}
-      <div className="shrink-0 flex flex-wrap items-center gap-2 px-3 py-2 border-b border-[#2a2a2a] bg-[#1a1a1a]">
+      {/* Editor toolbar */}
+      <div className="shrink-0 flex flex-wrap items-center gap-2 px-3 py-2 border-b border-[var(--color-card-border)] bg-[#020302]">
         <div className="flex items-center gap-1">
           <ToolBtn onClick={setInPoint} title="Mark In (I)">
-            [
+            In
           </ToolBtn>
           <ToolBtn onClick={setOutPoint} title="Mark Out (O)">
-            ]
+            Out
           </ToolBtn>
           <ToolBtn onClick={() => onSeek(selection.start)} title="Play from In point">
-            ▶
+            Play
           </ToolBtn>
           <ToolBtn onClick={onPause} title="Pause">
-            ⏸
+            Pause
           </ToolBtn>
         </div>
 
-        <div className="font-mono text-xs text-[#ccc] tabular-nums">
+        <div className="font-mono text-xs text-[#dfead8] tabular-nums">
           <span className="text-[var(--color-accent)]">{formatSeconds(selection.start)}</span>
-          <span className="text-[#666] mx-1.5">—</span>
+          <span className="text-[#666] mx-1.5">to</span>
           <span className="text-[var(--color-accent)]">{formatSeconds(selection.end)}</span>
-          <span className="text-[#666] ml-2">({formatDuration(selection.end - selection.start)})</span>
+          <span className="text-[#71806d] ml-2">({formatDuration(selection.end - selection.start)})</span>
         </div>
 
         {chatHypeMoments.length > 0 && (
           <span
-            className="text-[10px] font-medium text-orange-400 tabular-nums"
+            className="text-[10px] font-medium uppercase text-[#ffb84d] tabular-nums"
             title="Chat hype moments on timeline"
           >
-            🔥 {chatHypeMoments.length}
+            Hype {chatHypeMoments.length}
           </span>
         )}
 
         {audioSpikes.length > 0 && (
           <span
-            className="text-[10px] font-medium text-[#00d4aa] tabular-nums"
+            className="text-[10px] font-medium uppercase text-[var(--color-accent)] tabular-nums"
             title="Audio spikes on timeline"
           >
-            🔊 {audioSpikes.length}
+            Audio {audioSpikes.length}
           </span>
         )}
 
-        <div className="flex items-center gap-1 border-l border-[#333] pl-2 ml-1">
+        <div className="flex items-center gap-1 border-l border-[var(--color-card-border)] pl-2 ml-1">
           <ToolBtn onClick={zoomOut} title="Zoom out" disabled={atMinZoom}>
-            −
+            -
           </ToolBtn>
           <button
             type="button"
             onClick={zoomToFit}
             title="Zoom to fit"
-            className="min-w-[44px] h-7 px-1.5 text-[10px] font-mono text-[#888] rounded hover:bg-[#333] hover:text-white"
+            className="min-w-[44px] h-7 px-1.5 text-[10px] font-mono text-[#9aa49a] border border-[#21301f] bg-[#070a07] hover:border-[var(--color-accent)] hover:text-white transition-colors"
           >
             {zoomLabel}
           </button>
@@ -788,7 +788,7 @@ export function LiveTimeline({
           </ToolBtn>
         </div>
 
-        <div className="font-mono text-xs text-[#888] ml-auto">
+        <div className="font-mono text-xs text-[#9aa49a] ml-auto">
           {formatSeconds(currentTime)}
         </div>
 
@@ -803,11 +803,11 @@ export function LiveTimeline({
             title={
               selection.end - selection.start > MAX_CLIP_SECONDS
                 ? `Clip must be ${MAX_CLIP_SECONDS / 60} minutes or shorter`
-                : "Render clip — pick aspect ratio, title, and export options"
+                : "Render clip - pick aspect ratio, title, and export options"
             }
             className={cn(
-              "text-xs px-4 py-1.5 rounded font-semibold",
-              "bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white",
+              "text-xs px-4 py-1.5 rounded-lg font-semibold",
+              "bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-black",
               "disabled:opacity-40"
             )}
           >
@@ -834,40 +834,40 @@ export function LiveTimeline({
               : { minWidth: "100%" }
           }
         >
-          {/* Track labels gutter — stays visible while scrolling */}
+          {/* Track labels gutter - stays visible while scrolling */}
           <div
-            className="sticky left-0 z-20 shrink-0 border-r border-[#2a2a2a] bg-[#1a1a1a] flex flex-col"
+            className="sticky left-0 z-20 shrink-0 border-r border-[var(--color-card-border)] bg-[#020302] flex flex-col"
             style={{ width: TRACK_LABEL_W }}
           >
-            <div className="h-7 border-b border-[#2a2a2a]" />
+            <div className="h-7 border-b border-[var(--color-card-border)]" />
             <div
-              className="flex items-center justify-center border-b border-[#2a2a2a]"
+              className="flex items-center justify-center border-b border-[var(--color-card-border)]"
               style={{ height: VIDEO_TRACK_H }}
             >
-              <span className="text-[10px] font-semibold text-[#888]">V1</span>
+              <span className="text-[10px] font-semibold text-[#9aa49a]">V1</span>
             </div>
             {showAudioTrack && (
               <div
-                className="flex items-center justify-center border-b border-[#2a2a2a]"
+                className="flex items-center justify-center border-b border-[var(--color-card-border)]"
                 style={{ height: AUDIO_TRACK_H }}
               >
-                <span className="text-[10px] font-semibold text-[#00d4aa]">A1</span>
+                <span className="text-[10px] font-semibold text-[var(--color-accent)]">A1</span>
               </div>
             )}
             {showHypeTrack && (
               <div
-                className="flex items-center justify-center border-b border-[#2a2a2a]"
+                className="flex items-center justify-center border-b border-[var(--color-card-border)] text-[#ffb84d] [&>span]:hidden"
                 style={{ height: HYPE_TRACK_H }}
               >
-                <span className="text-[10px] font-semibold text-orange-400">🔥</span>
+                <strong className="text-[9px] font-semibold uppercase">Hot</strong>
               </div>
             )}
             {showCaptionTrack && (
               <div
-                className="flex items-center justify-center border-b border-[#2a2a2a]"
+                className="flex items-center justify-center border-b border-[var(--color-card-border)]"
                 style={{ height: CAPTION_TRACK_H }}
               >
-                <span className="text-[10px] font-semibold text-[#7eb8ff]">CC</span>
+                <span className="text-[10px] font-semibold text-[#d7ff64]">CC</span>
               </div>
             )}
           </div>
@@ -880,7 +880,7 @@ export function LiveTimeline({
             {/* Ruler */}
             <div
               ref={rulerRef}
-              className="relative h-7 bg-[#1e1e1e] border-b border-[#2a2a2a] cursor-ew-resize shrink-0"
+              className="relative h-7 bg-[#030403] border-b border-[var(--color-card-border)] cursor-ew-resize shrink-0"
               onPointerDown={(e) => {
                 const t = snapTime(timeFromRef(e.clientX, rulerRef), 0.1);
                 onScrub(t);
@@ -893,8 +893,8 @@ export function LiveTimeline({
                   className="absolute top-0 bottom-0"
                   style={{ left: `${pct(t, maxTime)}%` }}
                 >
-                  <div className="w-px h-2 bg-[#555] mt-auto" />
-                  <span className="absolute top-0.5 left-1 text-[9px] text-[#777] font-mono whitespace-nowrap">
+                  <div className="w-px h-2 bg-[#3f5634] mt-auto" />
+                  <span className="absolute top-0.5 left-1 text-[9px] text-[#71806d] font-mono whitespace-nowrap">
                     {formatSeconds(t)}
                   </span>
                 </div>
@@ -908,12 +908,12 @@ export function LiveTimeline({
               )}
             </div>
 
-            {/* Tracks stack — shared playhead spans video + captions */}
+            {/* Tracks stack - shared playhead spans video + captions */}
             <div className="relative shrink-0">
               {/* V1 Video track */}
               <div
                 ref={videoTrackRef}
-                className="relative bg-[#0d0d0d] border-b border-[#2a2a2a] cursor-crosshair"
+                className="relative bg-[#020302] border-b border-[var(--color-card-border)] cursor-crosshair"
                 style={{ height: VIDEO_TRACK_H }}
                 onPointerDown={handleVideoTrackPointerDown}
               >
@@ -948,7 +948,7 @@ export function LiveTimeline({
                       <div
                         key={seg.id}
                         className={cn(
-                          "absolute top-0 bottom-0 border-r border-[#333] bg-[#222]",
+                          "absolute top-0 bottom-0 border-r border-[#21301f] bg-[#081008]",
                           seg.isNew && "ring-1 ring-inset ring-[var(--color-success)]"
                         )}
                         style={{
@@ -964,7 +964,7 @@ export function LiveTimeline({
 
               {/* Unrecorded region */}
               <div
-                className="absolute inset-y-0 right-0 bg-[#0d0d0d]/80 pointer-events-none"
+                className="absolute inset-y-0 right-0 bg-[#020302]/82 pointer-events-none"
                 style={{ left: `${recordedPct}%` }}
               />
               {isLive && recordedSeconds > 0 && (
@@ -974,9 +974,9 @@ export function LiveTimeline({
                 />
               )}
 
-              {/* Selection (Premiere-style yellow-ish highlight) */}
+              {/* Active clip selection. */}
               <div
-                className="absolute top-0 bottom-0 z-[5] border-2 border-[#e8b84a] bg-[#e8b84a]/15"
+                className="absolute top-0 bottom-0 z-[5] border-2 border-[var(--color-accent)] bg-[var(--color-accent)]/14 shadow-[0_0_22px_rgba(149,255,0,0.12)]"
                 style={{
                   left: `${selStartPct}%`,
                   width: `${Math.max(selWidthPct, 0.2)}%`,
@@ -984,7 +984,7 @@ export function LiveTimeline({
                 onPointerDown={(e) => e.stopPropagation()}
               >
                 <div
-                  className="absolute left-0 top-0 bottom-0 w-2 -ml-1 bg-[#e8b84a] cursor-ew-resize z-10"
+                  className="absolute left-0 top-0 bottom-0 w-2 -ml-1 bg-[var(--color-accent)] cursor-ew-resize z-10"
                   onPointerDown={(e) => beginDrag("start", e)}
                 />
                 <div
@@ -992,7 +992,7 @@ export function LiveTimeline({
                   onPointerDown={(e) => beginDrag("move", e)}
                 />
                 <div
-                  className="absolute right-0 top-0 bottom-0 w-2 -mr-1 bg-[#e8b84a] cursor-ew-resize z-10"
+                  className="absolute right-0 top-0 bottom-0 w-2 -mr-1 bg-[var(--color-accent)] cursor-ew-resize z-10"
                   onPointerDown={(e) => beginDrag("end", e)}
                 />
               </div>
@@ -1002,13 +1002,13 @@ export function LiveTimeline({
             {/* Audio loudness + spike lane */}
             {showAudioTrack && (
               <div
-                className="relative bg-[#061210] border-b border-[#2a2a2a] shrink-0 overflow-hidden"
+                className="relative bg-[#031006] border-b border-[var(--color-card-border)] shrink-0 overflow-hidden"
                 style={{ height: AUDIO_TRACK_H }}
               >
                 {visibleWaveform.map((bucket, i) => (
                   <div
                     key={`wf-${i}`}
-                    className="absolute bottom-0 bg-[#00d4aa]/35 pointer-events-none rounded-t-[1px]"
+                    className="absolute bottom-0 bg-[var(--color-accent)]/28 pointer-events-none rounded-t-[1px]"
                     style={{
                       left: `${pct(bucket.startTimeSeconds, maxTime)}%`,
                       width: `${Math.max(
@@ -1024,8 +1024,8 @@ export function LiveTimeline({
                 ))}
 
                 {!waveformHasSignal(audioWaveform) && audioSpikes.length === 0 && (
-                  <div className="absolute inset-0 flex items-center justify-center text-[9px] text-[#00d4aa]/35 pointer-events-none">
-                    {isLive ? "Analyzing audio levels…" : "No audio spikes yet"}
+                  <div className="absolute inset-0 flex items-center justify-center text-[9px] text-[var(--color-accent)]/35 pointer-events-none">
+                    {isLive ? "Analyzing audio levels..." : "No audio spikes yet"}
                   </div>
                 )}
 
@@ -1063,12 +1063,12 @@ export function LiveTimeline({
             {/* Chat hype track */}
             {showHypeTrack && (
               <div
-                className="relative bg-[#120a08] border-b border-[#2a2a2a] shrink-0 overflow-hidden"
+                className="relative bg-[#120b04] border-b border-[var(--color-card-border)] shrink-0 overflow-hidden"
                 style={{ height: HYPE_TRACK_H }}
               >
                 {chatHypeMoments.length === 0 ? (
-                  <div className="absolute inset-0 flex items-center justify-center text-[9px] text-orange-400/40 pointer-events-none">
-                    {isLive ? "Watching chat for hype…" : "No hype moments yet"}
+                  <div className="absolute inset-0 flex items-center justify-center text-[9px] text-[#ffb84d]/50 pointer-events-none">
+                    {isLive ? "Watching chat for hype..." : "No hype moments yet"}
                   </div>
                 ) : (
                   visibleChatHypeMoments.map((moment) => {
@@ -1083,7 +1083,7 @@ export function LiveTimeline({
                         onClick={() => handleHypeClick(moment)}
                         className={cn(
                           "absolute top-1 bottom-1 rounded-sm border text-left overflow-hidden",
-                          "px-1 py-0.5 text-[9px] leading-tight truncate cursor-pointer",
+                          "px-1 py-0.5 text-[9px] leading-tight truncate cursor-pointer text-[#ffddb0]",
                           hypeBarClass(moment.intensity, isActive)
                         )}
                         style={{
@@ -1098,7 +1098,7 @@ export function LiveTimeline({
                         }}
                       >
                         {moment.intensity === "high"
-                          ? "🔥"
+                          ? "hot"
                           : moment.clipItCount > 0
                             ? "clip"
                             : "hype"}
@@ -1109,7 +1109,7 @@ export function LiveTimeline({
               </div>
             )}
 
-            {/* CC Caption track — editable */}
+            {/* CC Caption track - editable */}
             {showCaptionTrack && (
               <CaptionTimelineTrack
                 cues={visibleCaptionCues}
@@ -1167,7 +1167,7 @@ function Playhead({
     >
       <div
         className={cn(
-          "absolute top-0 bottom-0 w-px bg-[#e8b84a] -translate-x-1/2 shadow-[0_0_4px_#e8b84a]",
+          "absolute top-0 bottom-0 w-px bg-[var(--color-accent)] -translate-x-1/2 shadow-[0_0_12px_rgba(149,255,0,0.55)]",
           onScrub && "pointer-events-auto cursor-ew-resize"
         )}
         onPointerDown={onScrub}
@@ -1177,7 +1177,7 @@ function Playhead({
           "absolute -translate-x-1/2 w-0 h-0",
           tall ? "-top-0" : "top-0",
           "border-l-[6px] border-r-[6px] border-t-[8px]",
-          "border-l-transparent border-r-transparent border-t-[#e8b84a]",
+          "border-l-transparent border-r-transparent border-t-[var(--color-accent)]",
           onScrub && "pointer-events-auto cursor-grab"
         )}
         onPointerDown={onScrub}
@@ -1197,15 +1197,26 @@ function ToolBtn({
   title?: string;
   disabled?: boolean;
 }) {
+  const label =
+    title === "Play from In point"
+      ? "Play"
+      : title === "Pause"
+        ? "Pause"
+        : title === "Zoom out"
+          ? "-"
+          : title === "Zoom in (scroll wheel)"
+            ? "+"
+            : children;
+
   return (
     <button
       type="button"
       title={title}
       onClick={onClick}
       disabled={disabled}
-      className="w-7 h-7 flex items-center justify-center text-xs text-[#aaa] rounded hover:bg-[#333] hover:text-white border border-transparent hover:border-[#444] disabled:opacity-30 disabled:pointer-events-none"
+      className="h-7 min-w-7 px-2 flex items-center justify-center text-[10px] font-semibold uppercase text-[#9aa49a] border border-[#21301f] bg-[#070a07] hover:border-[var(--color-accent)] hover:text-white disabled:opacity-30 disabled:pointer-events-none transition-colors"
     >
-      {children}
+      {label}
     </button>
   );
 }

@@ -8,6 +8,8 @@ import {
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import { parseRenderFormat } from "@/lib/renderFormat";
 import { normalizeCaptionAppearance, type CaptionAppearance } from "@/lib/captionAppearance";
+import { canRenderExport } from "@/services/usageService";
+import { getBillingAccountIdFromRequest } from "@/services/billingService";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -27,8 +29,22 @@ export async function POST(
 
     const clip = await prisma.clipSuggestion.findUnique({
       where: { id: clipSuggestionId },
+      include: { streamSession: { select: { billingAccountId: true } } },
     });
     if (!clip) return errorResponse("Clip not found", 404);
+
+    const billingAccountId = getBillingAccountIdFromRequest(request);
+    if (!billingAccountId || billingAccountId !== clip.streamSession.billingAccountId) {
+      return errorResponse("Choose the paid plan that owns this session to render clips.", 402);
+    }
+
+    const usageGate = await canRenderExport(billingAccountId);
+    if (!usageGate.allowed) {
+      return errorResponse(
+        usageGate.message ?? "Plan limit reached",
+        usageGate.status ?? 402
+      );
+    }
 
     const sourceMedia = await prisma.sourceMedia.findFirst({
       where: { streamSessionId: clip.streamSessionId },

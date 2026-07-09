@@ -228,8 +228,8 @@ export function RenderClipModal({
       const label = destinationLabel(destination);
       setPublishStatus(
         result.copied
-          ? `Copied upload text — ${label} opened in a new tab`
-          : `${label} opened — paste your title manually`
+          ? `Copied upload text - ${label} opened in a new tab`
+          : `${label} opened - paste your title manually`
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Publish step failed");
@@ -241,8 +241,8 @@ export function RenderClipModal({
   const modal = (
     <div
       className={cn(
-        "fixed inset-0 flex items-center justify-center p-4 sm:p-6 isolate",
-        isExporting ? "z-[2147483647] bg-black" : "z-[99999] bg-black/80 backdrop-blur-sm"
+        "editor-shell fixed inset-0 isolate flex items-center justify-center p-4 sm:p-6",
+        isExporting ? "z-[2147483647] bg-black" : "z-[99999] bg-black/82 backdrop-blur-sm"
       )}
       role="presentation"
       onMouseDown={(e) => {
@@ -251,7 +251,7 @@ export function RenderClipModal({
     >
       <div
         className={cn(
-          "relative z-10 w-full max-w-lg rounded-xl border border-[#333] bg-[#141414] shadow-2xl overflow-hidden flex flex-col",
+          "relative z-10 flex w-full max-w-lg flex-col overflow-hidden rounded-lg border border-[var(--color-card-border)] bg-[#050705] shadow-[0_24px_100px_rgba(0,0,0,0.62)]",
           isExporting ? "min-h-[360px]" : "max-h-[min(92vh,720px)]"
         )}
         role="dialog"
@@ -260,7 +260,7 @@ export function RenderClipModal({
         aria-busy={isExporting}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="shrink-0 px-4 py-3 border-b border-[#2a2a2a] bg-[#1a1a1a] flex items-start justify-between gap-3">
+        <div className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--color-card-border)] bg-[#020302] px-4 py-3">
           <div>
             <h2 id="render-modal-title" className="text-sm font-semibold text-white">
               {phase === "done"
@@ -269,8 +269,8 @@ export function RenderClipModal({
                   ? "Exporting clip"
                   : "Render clip"}
             </h2>
-            <p className="text-xs text-[#888] mt-0.5 font-mono tabular-nums">
-              {formatSeconds(selection.start)} – {formatSeconds(selection.end)} (
+            <p className="mt-0.5 font-mono text-xs tabular-nums text-[var(--color-muted)]">
+              {formatSeconds(selection.start)} to {formatSeconds(selection.end)} (
               {formatDuration(duration)})
             </p>
           </div>
@@ -278,10 +278,10 @@ export function RenderClipModal({
             type="button"
             onClick={handleClose}
             disabled={isExporting}
-            className="text-[#666] hover:text-white disabled:opacity-30 disabled:hover:text-[#666] text-lg leading-none px-1"
+            className="px-1 text-lg leading-none text-[var(--color-muted)] hover:text-white disabled:opacity-30 disabled:hover:text-[var(--color-muted)]"
             aria-label="Close"
           >
-            ×
+            x
           </button>
         </div>
 
@@ -294,15 +294,15 @@ export function RenderClipModal({
           )}
         >
           {generatingMeta && phase === "configure" && (
-            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 rounded-lg bg-[#141414]/95">
+            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 rounded-lg bg-[#050705]/95">
               <LoadingCircle size="lg" />
-              <p className="text-sm text-[#ccc]">Generating title & tags…</p>
+              <p className="text-sm text-[#dfead8]">Generating title & tags...</p>
             </div>
           )}
           {phase === "configure" && (
             <>
               <div className="space-y-2">
-                <span className="text-[10px] uppercase tracking-wide text-[#888]">
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-accent)]">
                   Aspect ratio
                 </span>
                 <div className="grid grid-cols-2 gap-2">
@@ -310,14 +310,14 @@ export function RenderClipModal({
                     active={format === "native"}
                     onClick={() => setFormat("native")}
                     label="Native"
-                    sublabel="16:9 · fastest"
+                    sublabel="16:9 / fastest"
                     orientation="horizontal"
                   />
                   <AspectOption
                     active={format === "vertical"}
                     onClick={() => setFormat("vertical")}
                     label="Vertical"
-                    sublabel="9:16 · Shorts"
+                    sublabel="9:16 / Shorts"
                     orientation="vertical"
                   />
                 </div>
@@ -330,54 +330,54 @@ export function RenderClipModal({
                   onChange={(e) => setBurnCaptions(e.target.checked)}
                   className="rounded border-[#444] accent-[var(--color-accent)]"
                 />
-                <span className="text-xs text-[#ccc]">
+                <span className="text-xs text-[#dfead8]">
                   Captions visible in export
                 </span>
               </label>
 
-              <div className="rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] p-3 space-y-3">
+              <div className="space-y-3 rounded-lg border border-[var(--color-card-border)] bg-[#020302] p-3">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-[10px] uppercase tracking-wide text-[#888]">
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
                     Title & description
                   </span>
                   <button
                     type="button"
                     onClick={() => void generateMetadata()}
                     disabled={!canRender || generatingMeta}
-                    className="text-[10px] px-2 py-1 rounded border border-[#444] text-[#aaa] hover:text-white hover:border-[var(--color-accent)] disabled:opacity-40"
+                    className="rounded-lg border border-[#21301f] px-2 py-1 text-[10px] font-semibold text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-white disabled:opacity-40"
                   >
-                    {generatingMeta ? "Generating…" : "✨ Suggest with AI"}
+                    {generatingMeta ? "Generating..." : "Suggest with AI"}
                   </button>
                 </div>
 
                 <label className="block space-y-1">
-                  <span className="text-[10px] text-[#666]">Title</span>
+                  <span className="text-[10px] text-[var(--color-muted)]">Title</span>
                   <input
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
                     placeholder="Clip title"
-                    className="w-full text-sm bg-[#141414] border border-[#333] rounded-lg px-3 py-2 text-white focus:outline-none focus:border-[var(--color-accent)]"
+                    className="w-full rounded-lg border border-[#21301f] bg-[#070a07] px-3 py-2 text-sm text-white focus:border-[var(--color-accent)] focus:outline-none"
                   />
                 </label>
 
                 <label className="block space-y-1">
-                  <span className="text-[10px] text-[#666]">Description</span>
+                  <span className="text-[10px] text-[var(--color-muted)]">Description</span>
                   <textarea
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
-                    placeholder="One-line description for YouTube / TikTok…"
+                    placeholder="One-line description for YouTube / TikTok..."
                     rows={3}
-                    className="w-full text-sm bg-[#141414] border border-[#333] rounded-lg px-3 py-2 text-[#ccc] resize-y focus:outline-none focus:border-[var(--color-accent)]"
+                    className="w-full resize-y rounded-lg border border-[#21301f] bg-[#070a07] px-3 py-2 text-sm text-[#dfead8] focus:border-[var(--color-accent)] focus:outline-none"
                   />
                 </label>
 
                 <label className="block space-y-1">
-                  <span className="text-[10px] text-[#666]">Tags</span>
+                  <span className="text-[10px] text-[var(--color-muted)]">Tags</span>
                   <input
                     value={tagsText}
                     onChange={(e) => setTagsText(e.target.value)}
                     placeholder="shorts, gaming, streamername"
-                    className="w-full text-sm bg-[#141414] border border-[#333] rounded-lg px-3 py-2 text-[#ccc] focus:outline-none focus:border-[var(--color-accent)]"
+                    className="w-full rounded-lg border border-[#21301f] bg-[#070a07] px-3 py-2 text-sm text-[#dfead8] focus:border-[var(--color-accent)] focus:outline-none"
                   />
                 </label>
 
@@ -386,7 +386,7 @@ export function RenderClipModal({
                     {hashtags.map((tag) => (
                       <span
                         key={tag}
-                        className="text-[10px] px-1.5 py-0.5 rounded bg-[#1a1a1a] border border-[#333] text-[#888]"
+                        className="rounded border border-[#21301f] bg-[#070a07] px-1.5 py-0.5 text-[10px] text-[var(--color-muted)]"
                       >
                         #{tag}
                       </span>
@@ -394,7 +394,7 @@ export function RenderClipModal({
                   </div>
                 )}
 
-                <div className="flex flex-wrap gap-1.5 pt-1 border-t border-[#2a2a2a]">
+                <div className="flex flex-wrap gap-1.5 border-t border-[var(--color-card-border)] pt-1">
                   <SmallBtn
                     label="Copy all"
                     onClick={() =>
@@ -432,32 +432,32 @@ export function RenderClipModal({
 
           {phase === "done" && (
             <div className="space-y-4">
-              <p className="text-sm text-[#ccc]">
+              <p className="text-sm text-[#dfead8]">
                 <span className="text-[var(--color-accent)] font-medium">{title}</span>{" "}
                 {downloadDone
                   ? "saved on your computer."
-                  : "rendered — click Download MP4 to save it to your computer."}
+                  : "rendered - click Download MP4 to save it to your computer."}
               </p>
 
               {downloadUrl && (
                 <button
                   type="button"
                   onClick={() => downloadClipFile(downloadUrl, downloadFilename)}
-                  className="w-full text-sm px-4 py-2.5 rounded-lg font-semibold bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white"
+                  className="w-full rounded-lg bg-[var(--color-accent)] px-4 py-2.5 text-sm font-semibold text-black hover:bg-[var(--color-accent-hover)]"
                 >
                   {downloadDone ? "Download again" : "Download MP4"}
                 </button>
               )}
 
               {description.trim() && (
-                <div className="text-xs text-[#999] rounded-lg bg-[#0d0d0d] border border-[#333] px-3 py-2 line-clamp-3">
+                <div className="line-clamp-3 rounded-lg border border-[var(--color-card-border)] bg-[#020302] px-3 py-2 text-xs text-[var(--color-muted)]">
                   {description}
                 </div>
               )}
 
               {clipId && (
-                <div className="rounded-lg border border-[#333] bg-[#0d0d0d] p-3 space-y-2">
-                  <span className="text-[10px] uppercase tracking-wide text-[#888]">
+                <div className="space-y-2 rounded-lg border border-[var(--color-card-border)] bg-[#020302] p-3">
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
                     Share link
                   </span>
                   <div className="flex flex-wrap gap-2">
@@ -469,7 +469,7 @@ export function RenderClipModal({
                       href={`/clips/${clipId}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-[10px] px-2 py-1 rounded border border-[var(--color-accent)]/40 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10"
+                      className="rounded-lg border border-[var(--color-accent)]/50 px-2 py-1 text-[10px] font-semibold text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10"
                     >
                       Open preview
                     </Link>
@@ -478,7 +478,7 @@ export function RenderClipModal({
               )}
 
               <div className="space-y-2">
-                <span className="text-[10px] uppercase tracking-wide text-[#888]">
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
                   Publish
                 </span>
                 {suggestedDestinations(format).map((destination) => (
@@ -488,16 +488,16 @@ export function RenderClipModal({
                     disabled={publishBusy !== null}
                     onClick={() => void handlePublish(destination)}
                     className={cn(
-                      "w-full text-left px-3 py-2 rounded-lg border text-sm transition-colors disabled:opacity-50",
+                      "w-full rounded-lg border px-3 py-2 text-left text-sm transition-colors disabled:opacity-50",
                       destination === "youtube"
-                        ? "border-red-500/40 bg-red-500/10 hover:bg-red-500/20 text-white"
-                        : "border-[#444] bg-[#252525] hover:bg-[#333] text-white"
+                        ? "border-red-500/40 bg-red-500/10 text-white hover:bg-red-500/20"
+                        : "border-[#21301f] bg-[#070a07] text-white hover:border-[var(--color-accent)]"
                     )}
                   >
                     {publishBusy === destination
-                      ? "Opening…"
+                      ? "Opening..."
                       : `Upload to ${destinationLabel(destination)}`}
-                    <span className="block text-[10px] text-[#888] font-normal mt-0.5">
+                    <span className="mt-0.5 block text-[10px] font-normal text-[var(--color-muted)]">
                       {destinationHint(destination, format)}
                     </span>
                   </button>
@@ -512,7 +512,7 @@ export function RenderClipModal({
 
           {tooLong && phase === "configure" && (
             <p className="text-xs text-[var(--color-danger)]">
-              Clips must be {formatMaxClipLabel()} or shorter — shorten the
+              Clips must be {formatMaxClipLabel()} or shorter - shorten the
               timeline selection.
             </p>
           )}
@@ -524,13 +524,13 @@ export function RenderClipModal({
           )}
         </div>
 
-        <div className="shrink-0 px-4 py-3 border-t border-[#2a2a2a] flex justify-end gap-2">
+        <div className="flex shrink-0 justify-end gap-2 border-t border-[var(--color-card-border)] bg-[#020302] px-4 py-3">
           {phase === "configure" && (
             <>
               <button
                 type="button"
                 onClick={handleClose}
-                className="text-xs px-3 py-2 rounded text-[#aaa] hover:text-white hover:bg-[#333]"
+                className="rounded-lg px-3 py-2 text-xs font-semibold text-[var(--color-muted)] hover:bg-[#070a07] hover:text-white"
               >
                 Cancel
               </button>
@@ -538,15 +538,15 @@ export function RenderClipModal({
                 type="button"
                 onClick={() => void handleRender()}
                 disabled={!canRender}
-                className="text-xs px-4 py-2 rounded-lg font-semibold bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white disabled:opacity-40"
+                className="rounded-lg bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-black hover:bg-[var(--color-accent-hover)] disabled:opacity-40"
               >
                 Render clip
               </button>
             </>
           )}
           {isExporting && (
-            <p className="text-[11px] text-[#666] mr-auto self-center">
-              Please keep this tab open…
+            <p className="mr-auto self-center text-[11px] text-[var(--color-muted)]">
+              Please keep this tab open...
             </p>
           )}
           {phase === "done" && (
@@ -555,7 +555,7 @@ export function RenderClipModal({
                 <button
                   type="button"
                   onClick={() => downloadClipFile(downloadUrl, downloadFilename)}
-                  className="text-xs px-4 py-2 rounded-lg font-semibold bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white"
+                  className="rounded-lg bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-black hover:bg-[var(--color-accent-hover)]"
                 >
                   {downloadDone ? "Download again" : "Download MP4"}
                 </button>
@@ -563,7 +563,7 @@ export function RenderClipModal({
               <button
                 type="button"
                 onClick={handleClose}
-                className="text-xs px-4 py-2 rounded-lg font-semibold bg-[#333] hover:bg-[#444] text-white"
+                className="rounded-lg border border-[#21301f] bg-[#070a07] px-4 py-2 text-xs font-semibold text-white hover:border-[var(--color-accent)]"
               >
                 Done
               </button>
@@ -593,27 +593,27 @@ function ExportProgress({
     {
       id: "rendering",
       label: "Render video",
-      detail: `Cutting from local recording · ${format === "vertical" ? "9:16" : "16:9"} · ${formatDuration(durationSeconds)}`,
+      detail: `Cutting from local recording / ${format === "vertical" ? "9:16" : "16:9"} / ${formatDuration(durationSeconds)}`,
     },
   ];
 
   const active = steps.find((s) => s.id === step) ?? steps[0];
 
   return (
-    <div className="w-full max-w-sm py-4 flex flex-col items-center gap-6 text-center">
+    <div className="flex w-full max-w-sm flex-col items-center gap-6 py-4 text-center">
       <LoadingCircle size="lg" />
 
       <div className="space-y-1">
-        <p className="text-base font-semibold text-white">{active.label}…</p>
-        <p className="text-xs text-[#888]">{active.detail}</p>
-        <p className="text-[11px] text-[var(--color-accent)] tabular-nums pt-1">
+        <p className="text-base font-semibold text-white">{active.label}...</p>
+        <p className="text-xs text-[var(--color-muted)]">{active.detail}</p>
+        <p className="pt-1 text-[11px] tabular-nums text-[var(--color-accent)]">
           {Math.max(0, Math.min(100, Math.round(progress)))}%
         </p>
       </div>
 
-      <div className="w-full h-1.5 rounded-full bg-[#252525] overflow-hidden">
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#152015]">
         <div
-          className="h-full rounded-full bg-[var(--color-accent)] transition-all duration-500 ease-out"
+          className="h-full rounded-full bg-[var(--color-accent)] transition-all duration-500 ease-out shadow-[0_0_18px_rgba(149,255,0,0.45)]"
           style={{ width: `${Math.max(8, progress)}%` }}
         />
       </div>
@@ -628,8 +628,8 @@ function ExportProgress({
             <li
               key={item.id}
               className={cn(
-                "flex items-center gap-2 text-xs px-2 py-1.5 rounded-md",
-                current ? "text-white" : done ? "text-[#888]" : "text-[#555]"
+                "flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs",
+                current ? "text-white" : done ? "text-[var(--color-muted)]" : "text-[#4f5b4c]"
               )}
             >
               <span
@@ -649,7 +649,7 @@ function ExportProgress({
       </ol>
 
       {step === "rendering" && durationSeconds > 60 && (
-        <p className="text-[10px] text-[#666] leading-relaxed max-w-xs">
+        <p className="max-w-xs text-[10px] leading-relaxed text-[var(--color-muted)]">
           Longer vertical clips take longer to encode. Native (16:9) without
           captions is fastest.
         </p>
@@ -667,7 +667,7 @@ function LoadingCircle({
   return (
     <div
       className={cn(
-        "rounded-full border-[#2a2a2a] border-t-[var(--color-accent)] animate-spin",
+        "animate-spin rounded-full border-[#152015] border-t-[var(--color-accent)]",
         dim
       )}
       role="status"
@@ -696,10 +696,10 @@ function AspectOption({
       type="button"
       onClick={onClick}
       className={cn(
-        "flex flex-col items-center gap-2 p-3 rounded-lg border transition-colors",
+        "flex flex-col items-center gap-2 rounded-lg border p-3 transition-colors",
         active
-          ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10"
-          : "border-[#333] bg-[#0d0d0d] hover:border-[#555]"
+          ? "border-[var(--color-accent)] bg-[var(--color-accent)]/14"
+          : "border-[#21301f] bg-[#070a07] hover:border-[var(--color-accent)]"
       )}
     >
       <div
@@ -708,7 +708,7 @@ function AspectOption({
           "rounded-[3px] border-2 shrink-0 box-border",
           active
             ? "border-[var(--color-accent)] bg-[var(--color-accent)]/20"
-            : "border-[#555] bg-[#1a1a1a]"
+            : "border-[#2d3f2a] bg-[#020302]"
         )}
         style={{
           width: isVertical ? 32 : 56,
@@ -718,13 +718,13 @@ function AspectOption({
       <div className="text-center">
         <span
           className={cn(
-            "text-xs font-semibold block",
-            active ? "text-[var(--color-accent)]" : "text-[#ccc]"
+            "block text-xs font-semibold",
+            active ? "text-[var(--color-accent)]" : "text-[#dfead8]"
           )}
         >
           {label}
         </span>
-        <span className="text-[10px] text-[#666]">{sublabel}</span>
+        <span className="text-[10px] text-[var(--color-muted)]">{sublabel}</span>
       </div>
     </button>
   );
@@ -744,7 +744,7 @@ function SmallBtn({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="text-[10px] px-2 py-1 rounded border border-[#444] text-[#aaa] hover:text-white hover:border-[#666] disabled:opacity-40 disabled:hover:text-[#aaa] disabled:hover:border-[#444]"
+      className="rounded-lg border border-[#21301f] px-2 py-1 text-[10px] font-semibold text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-white disabled:opacity-40 disabled:hover:border-[#21301f] disabled:hover:text-[var(--color-muted)]"
     >
       {label}
     </button>

@@ -82,7 +82,10 @@ async function resolveSessionMetadata(
   };
 }
 
-export async function createStreamSession(streamUrl: string) {
+export async function createStreamSession(
+  streamUrl: string,
+  billingAccountId?: string | null
+) {
   const meta = await resolveSessionMetadata(streamUrl);
 
   const session = await prisma.streamSession.create({
@@ -101,6 +104,7 @@ export async function createStreamSession(streamUrl: string) {
       concurrentViewers: meta.concurrentViewers,
       activeLiveChatId: meta.activeLiveChatId,
       metadataJson: toJsonValue(meta.metadataJson),
+      billingAccountId: billingAccountId ?? undefined,
     },
   });
 

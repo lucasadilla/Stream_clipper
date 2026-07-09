@@ -11,7 +11,7 @@ export default function SessionError({
   reset: () => void;
 }) {
   return (
-    <div className="min-h-screen flex flex-col bg-[var(--color-background)]">
+    <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
       <EditorHeader title="Editor" />
       <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6 text-center">
         <h1 className="text-lg font-semibold">Something went wrong loading the editor</h1>
@@ -22,7 +22,7 @@ export default function SessionError({
           <button
             type="button"
             onClick={reset}
-            className="text-sm px-4 py-2 rounded-lg bg-[var(--color-accent)] text-white"
+            className="text-sm px-4 py-2 rounded-lg bg-[var(--color-accent)] text-black font-semibold"
           >
             Try again
           </button>
