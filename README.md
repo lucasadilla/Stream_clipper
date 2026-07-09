@@ -150,6 +150,20 @@ npm run stripe:provision-catalog
 
 Checkout sessions are created with `managed_payments.enabled=true` using Stripe API version `2026-02-25.preview`.
 
+### Railway deploy
+
+1. Connect the GitHub repo to Railway.
+2. Railway will use the repo `Dockerfile` (ffmpeg + yt-dlp are installed in the image).
+3. Add a **volume** mounted at `/app/storage`.
+4. Set env vars in Railway (at minimum):
+   - `DATABASE_URL`, `DIRECT_URL`
+   - `STORAGE_ROOT=/app/storage`
+   - `FFMPEG_PATH=ffmpeg`, `FFPROBE_PATH=ffprobe`, `YT_DLP_PATH=yt-dlp`
+   - `OPENROUTER_API_KEY` or `OPENAI_API_KEY`
+   - `YOUTUBE_API_KEY`
+   - Stripe + `UNLIMITED_ACCESS_EMAILS` as needed
+5. Redeploy, then verify **`/api/health`** shows `"ffmpeg":true,"ytDlp":true`.
+
 ## Architecture Notes
 
 - **YouTube player** is for preview and timestamp sync
