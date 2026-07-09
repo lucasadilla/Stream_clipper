@@ -177,6 +177,24 @@ function audioSpikeBarClass(
   return "border-cyan-700/40 bg-cyan-800/15 hover:bg-cyan-800/25";
 }
 
+function sampleTimelineItems<T>(
+  items: T[],
+  maxItems: number,
+  keep?: (item: T) => boolean
+): T[] {
+  if (items.length <= maxItems) return items;
+
+  const sampled: T[] = [];
+  const step = Math.ceil(items.length / maxItems);
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]!;
+    if (keep?.(item) || i % step === 0) sampled.push(item);
+  }
+
+  return sampled;
+}
+
 export function LiveTimeline({
   sessionId,
   segments,
@@ -222,6 +240,8 @@ export function LiveTimeline({
   }, [renderModalOpen]);
   const [zoom, setZoom] = useState(1);
   const [viewportWidth, setViewportWidth] = useState(0);
+  const [scrollLeft, setScrollLeft] = useState(0);
+  const scrollRaf = useRef<number | null>(null);
   const dragOrigin = useRef({
     x: 0,
     anchorTime: 0,
@@ -293,6 +313,25 @@ export function LiveTimeline({
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    function onScroll() {
+      if (scrollRaf.current !== null) return;
+      scrollRaf.current = requestAnimationFrame(() => {
+        scrollRaf.current = null;
+        setScrollLeft(scrollRef.current?.scrollLeft ?? 0);
+      });
+    }
+
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      if (scrollRaf.current !== null) cancelAnimationFrame(scrollRaf.current);
+    };
   }, []);
 
   const setZoomAroundTime = useCallback(
@@ -573,6 +612,100 @@ export function LiveTimeline({
   const selStartPct = pct(selection.start, maxTime);
   const selWidthPct = pct(selection.end - selection.start, maxTime);
 
+  const visibleTimeRange = useMemo(() => {
+    if (maxTime <= 0 || trackContentWidth <= 0 || viewportWidth <= 0) {
+      return { start: 0, end: maxTime };
+    }
+
+    const viewStartPx = Math.max(0, scrollLeft - TRACK_LABEL_W);
+    const viewEndPx = viewStartPx + viewportWidth;
+    const bufferPx = viewportWidth * 0.75;
+    const start = ((viewStartPx - bufferPx) / trackContentWidth) * maxTime;
+    const end = ((viewEndPx + bufferPx) / trackContentWidth) * maxTime;
+    return {
+      start: Math.max(0, start),
+      end: Math.min(maxTime, end),
+    };
+  }, [maxTime, scrollLeft, trackContentWidth, viewportWidth]);
+
+  const visibleThumbnails = useMemo(
+    () =>
+      sampleTimelineItems(
+        thumbnails.filter(
+          (thumb) =>
+            thumb.endTimeSeconds >= visibleTimeRange.start &&
+            thumb.startTimeSeconds <= visibleTimeRange.end
+        ),
+        360
+      ),
+    [thumbnails, visibleTimeRange.start, visibleTimeRange.end]
+  );
+
+  const visibleSegments = useMemo(
+    () =>
+      sampleTimelineItems(
+        segments.filter(
+          (seg) =>
+            seg.endTimeSeconds >= visibleTimeRange.start &&
+            seg.startTimeSeconds <= visibleTimeRange.end
+        ),
+        500
+      ),
+    [segments, visibleTimeRange.start, visibleTimeRange.end]
+  );
+
+  const visibleWaveform = useMemo(
+    () =>
+      sampleTimelineItems(
+        audioWaveform.filter(
+          (bucket) =>
+            bucket.endTimeSeconds >= visibleTimeRange.start &&
+            bucket.startTimeSeconds <= visibleTimeRange.end
+        ),
+        900
+      ),
+    [audioWaveform, visibleTimeRange.start, visibleTimeRange.end]
+  );
+
+  const visibleAudioSpikes = useMemo(
+    () =>
+      audioSpikes.filter(
+        (marker) =>
+          marker.endTimeSeconds >= visibleTimeRange.start &&
+          marker.startTimeSeconds <= visibleTimeRange.end
+      ),
+    [audioSpikes, visibleTimeRange.start, visibleTimeRange.end]
+  );
+
+  const visibleChatHypeMoments = useMemo(
+    () =>
+      chatHypeMoments.filter(
+        (moment) =>
+          moment.endTimeSeconds >= visibleTimeRange.start &&
+          moment.startTimeSeconds <= visibleTimeRange.end
+      ),
+    [chatHypeMoments, visibleTimeRange.start, visibleTimeRange.end]
+  );
+
+  const visibleCaptionCues = useMemo(
+    () =>
+      sampleTimelineItems(
+        captionCues.filter(
+          (cue) =>
+            cue.endTimeSeconds >= visibleTimeRange.start &&
+            cue.startTimeSeconds <= visibleTimeRange.end
+        ),
+        800,
+        (cue) => cue.id === selectedCaptionCueId
+      ),
+    [
+      captionCues,
+      visibleTimeRange.start,
+      visibleTimeRange.end,
+      selectedCaptionCueId,
+    ]
+  );
+
   const tickStep = getTickStep(maxTime, zoom);
   const rulerTicks: number[] = [];
   const maxTicks = 400;
@@ -787,7 +920,7 @@ export function LiveTimeline({
               {/* Filmstrip */}
               <div className="absolute inset-0 pointer-events-none">
                 {thumbnails.length > 0
-                  ? thumbnails.map((thumb, index) => (
+                  ? visibleThumbnails.map((thumb, index) => (
                       <div
                         key={thumb.startTimeSeconds}
                         className="absolute top-0 bottom-0 border-r border-[#000]/60 overflow-hidden"
@@ -807,11 +940,11 @@ export function LiveTimeline({
                           draggable={false}
                           loading={index < 80 ? "eager" : "lazy"}
                           decoding="async"
-                          fetchPriority={index < 20 ? "high" : "auto"}
+                          fetchPriority={index < 8 ? "high" : "auto"}
                         />
                       </div>
                     ))
-                  : segments.map((seg) => (
+                  : visibleSegments.map((seg) => (
                       <div
                         key={seg.id}
                         className={cn(
@@ -872,7 +1005,7 @@ export function LiveTimeline({
                 className="relative bg-[#061210] border-b border-[#2a2a2a] shrink-0 overflow-hidden"
                 style={{ height: AUDIO_TRACK_H }}
               >
-                {audioWaveform.map((bucket, i) => (
+                {visibleWaveform.map((bucket, i) => (
                   <div
                     key={`wf-${i}`}
                     className="absolute bottom-0 bg-[#00d4aa]/35 pointer-events-none rounded-t-[1px]"
@@ -896,7 +1029,7 @@ export function LiveTimeline({
                   </div>
                 )}
 
-                {audioSpikes.map((marker) => {
+                {visibleAudioSpikes.map((marker) => {
                   const isActive =
                     currentTime >= marker.startTimeSeconds &&
                     currentTime < marker.endTimeSeconds;
@@ -938,7 +1071,7 @@ export function LiveTimeline({
                     {isLive ? "Watching chat for hype…" : "No hype moments yet"}
                   </div>
                 ) : (
-                  chatHypeMoments.map((moment) => {
+                  visibleChatHypeMoments.map((moment) => {
                     const isActive =
                       currentTime >= moment.startTimeSeconds &&
                       currentTime < moment.endTimeSeconds;
@@ -979,7 +1112,7 @@ export function LiveTimeline({
             {/* CC Caption track — editable */}
             {showCaptionTrack && (
               <CaptionTimelineTrack
-                cues={captionCues}
+                cues={visibleCaptionCues}
                 maxTime={maxTime}
                 currentTime={currentTime}
                 height={CAPTION_TRACK_H}

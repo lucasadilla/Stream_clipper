@@ -1,9 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { cn } from "@/lib/utils";
 import { fetchJson } from "@/lib/apiClient";
 import { normalizeUserStreamUrl, parseStreamUrl } from "@/lib/streamPlatform";
+import { cn } from "@/lib/utils";
 
 export function StreamUrlInput() {
   const [url, setUrl] = useState("");
@@ -22,7 +22,7 @@ export function StreamUrlInput() {
 
     if (!parseStreamUrl(normalized)) {
       setError(
-        "Use a YouTube, Twitch (twitch.tv/channel or /videos/…), or Kick (kick.com/channel) link"
+        "Use a YouTube, Twitch (twitch.tv/channel or /videos/...), or Kick (kick.com/channel) link"
       );
       return;
     }
@@ -30,14 +30,15 @@ export function StreamUrlInput() {
     setLoading(true);
 
     try {
-      const { ok, data } = await fetchJson<{ session?: { id: string }; error?: string }>(
-        "/api/sessions",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ streamUrl: normalized }),
-        }
-      );
+      const { ok, data } = await fetchJson<{
+        session?: { id: string };
+        error?: string;
+      }>("/api/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ streamUrl: normalized }),
+      });
+
       if (!ok) throw new Error(data.error ?? "Failed to create session");
       if (!data.session?.id) throw new Error("Failed to create session");
       window.location.assign(`/sessions/${data.session.id}`);
@@ -51,7 +52,7 @@ export function StreamUrlInput() {
 
   return (
     <form onSubmit={handleSubmit} className="w-full max-w-2xl">
-      <div className="flex flex-col sm:flex-row gap-3">
+      <div className="grid gap-px overflow-hidden border border-[var(--color-card-border)] bg-[var(--color-card-border)] sm:grid-cols-[1fr_auto]">
         <input
           type="text"
           value={url}
@@ -59,8 +60,9 @@ export function StreamUrlInput() {
           placeholder="YouTube, Twitch, or Kick live / VOD link"
           required
           className={cn(
-            "flex-1 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)]",
-            "px-4 py-3 text-sm placeholder:text-[var(--color-muted)]",
+            "h-14 min-w-0 border-0 bg-[#020302]/92",
+            "px-4 text-sm text-[var(--color-foreground)] placeholder:text-[var(--color-muted)]",
+            "shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]",
             "focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
           )}
         />
@@ -68,12 +70,12 @@ export function StreamUrlInput() {
           type="submit"
           disabled={loading || !url.trim()}
           className={cn(
-            "rounded-xl px-6 py-3 text-sm font-semibold whitespace-nowrap",
+            "h-14 px-7 text-sm font-semibold whitespace-nowrap text-black",
             "bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)]",
             "disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           )}
         >
-          {loading ? "Analyzing…" : "Analyze stream"}
+          {loading ? "Analyzing..." : "Open timeline"}
         </button>
       </div>
       {error && (

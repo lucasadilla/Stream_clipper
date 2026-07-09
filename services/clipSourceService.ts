@@ -3,15 +3,17 @@ import { existsSync } from "fs";
 import { prisma } from "@/lib/db";
 import { probeMedia } from "@/lib/ffmpeg";
 import { toJsonValue } from "@/lib/utils";
+import { MIN_CLIP_SECONDS } from "@/lib/clipConstants";
 import {
   getUploadDir,
   ensureDir,
   toRelativeStoragePath,
   resolveStoragePath,
   fileExists,
+  findBestSourceFileInDir,
 } from "@/lib/storage";
 import {
-  downloadClipSegmentFromYouTube,
+  downloadClipSegmentFromStream,
   isYtDlpAvailable,
 } from "@/services/youtubeDownloadService";
 import { getPreviewMp4Path } from "@/services/previewVideoService";
@@ -25,6 +27,10 @@ function formatYtDlpTime(seconds: number): string {
     return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   }
   return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function isSegmentFile(name: string): boolean {
+  return /^segment-\d+-\d+\.mp4$/i.test(name);
 }
 
 /** Best known duration: local video, live buffer, transcripts, or chat timestamps. */
@@ -66,48 +72,40 @@ export function isActivelyRecordingLive(session: {
   return isLive && recording;
 }
 
-async function resolveSourceDurationSeconds(
-  sourceMedia: { filePath: string; durationSeconds?: number | null },
-  liveRecordedSeconds?: number
+async function resolveFileDurationSeconds(
+  absolutePath: string,
+  liveRecordedSeconds: number,
+  isLiveRecording?: boolean,
+  clipEndSeconds?: number
 ): Promise<number> {
-  let duration = Math.max(
-    sourceMedia.durationSeconds ?? 0,
-    liveRecordedSeconds ?? 0
-  );
-
-  if (duration > 0) return duration;
-
-  if (!fileExists(sourceMedia.filePath)) return 0;
-
-  try {
-    duration = (await probeMedia(resolveStoragePath(sourceMedia.filePath)))
-      .durationSeconds;
-  } catch {
-    return liveRecordedSeconds ?? 0;
+  if (
+    isLiveRecording &&
+    liveRecordedSeconds > 0 &&
+    (!clipEndSeconds || liveRecordedSeconds >= clipEndSeconds - 0.5)
+  ) {
+    return liveRecordedSeconds;
   }
 
-  return Math.max(duration, liveRecordedSeconds ?? 0);
+  let duration = liveRecordedSeconds;
+  try {
+    duration = Math.max(
+      duration,
+      (await probeMedia(absolutePath)).durationSeconds
+    );
+  } catch {
+    // growing / partial files
+  }
+  return Math.max(duration, liveRecordedSeconds);
 }
 
-async function localSourceCoversRange(
-  sourceMedia: { filePath: string; durationSeconds?: number | null },
-  endTimeSeconds: number,
-  liveRecordedSeconds?: number
-): Promise<boolean> {
-  if (!fileExists(sourceMedia.filePath)) return false;
-
-  const duration = await resolveSourceDurationSeconds(
-    sourceMedia,
-    liveRecordedSeconds
-  );
-
-  return duration >= endTimeSeconds - 0.5;
-}
-
-async function ensurePreviewSourceMedia(
+async function ensureSourceMediaRow(
   streamSessionId: string,
   absolutePath: string,
-  durationSeconds: number
+  options: {
+    originalFilename: string;
+    durationSeconds: number;
+    isLiveRecording?: boolean;
+  }
 ) {
   const relativePath = toRelativeStoragePath(absolutePath);
   const existing = await prisma.sourceMedia.findFirst({
@@ -116,23 +114,58 @@ async function ensurePreviewSourceMedia(
   if (existing) return existing;
 
   const stat = await import("fs/promises").then((fs) => fs.stat(absolutePath));
+  const ext = path.extname(absolutePath).toLowerCase();
 
   return prisma.sourceMedia.create({
     data: {
       streamSessionId,
-      originalFilename: "preview.mp4",
+      originalFilename: options.originalFilename,
       filePath: relativePath,
-      mimeType: "video/mp4",
+      mimeType: ext === ".mkv" ? "video/x-matroska" : "video/mp4",
       sizeBytes: BigInt(stat.size),
-      durationSeconds,
-      isLiveRecording: true,
+      durationSeconds: options.durationSeconds,
+      isLiveRecording: options.isLiveRecording ?? false,
     },
   });
 }
 
+function localClipFromSource(options: {
+  sourceMediaId: string;
+  segmentStart?: number;
+  startTimeSeconds: number;
+  endTimeSeconds: number;
+  availableDuration: number;
+}): {
+  sourceMediaId: string;
+  renderStart: number;
+  renderEnd: number;
+} | null {
+  const { sourceMediaId, segmentStart, startTimeSeconds, endTimeSeconds } =
+    options;
+  const availableDuration = options.availableDuration;
+
+  if (segmentStart != null) {
+    const relStart = startTimeSeconds - segmentStart;
+    const relEnd = Math.min(endTimeSeconds - segmentStart, availableDuration);
+    if (relStart < 0 || relEnd - relStart < MIN_CLIP_SECONDS) return null;
+    return { sourceMediaId, renderStart: relStart, renderEnd: relEnd };
+  }
+
+  if (startTimeSeconds >= availableDuration - 0.25) return null;
+
+  const renderEnd = Math.min(endTimeSeconds, availableDuration);
+  if (renderEnd - startTimeSeconds < MIN_CLIP_SECONDS) return null;
+
+  return {
+    sourceMediaId,
+    renderStart: startTimeSeconds,
+    renderEnd,
+  };
+}
+
 /**
  * Ensure we have local video covering [start, end].
- * Uses existing file when possible; otherwise downloads just that segment from YouTube.
+ * Prefers the on-disk recording (instant ffmpeg cut). yt-dlp segment fetch is last resort.
  */
 export async function ensureClipSourceForRender(
   streamSessionId: string,
@@ -151,94 +184,117 @@ export async function ensureClipSourceForRender(
   if (!session) throw new Error("Session not found");
 
   const liveRecordedSeconds = session.liveRecording?.recordedSeconds ?? 0;
-
-  if (isActivelyRecordingLive(session)) {
-    const buffer = 2;
-    if (
-      liveRecordedSeconds > 0 &&
-      endTimeSeconds > liveRecordedSeconds - buffer
-    ) {
-      throw new Error(
-        `Only ${Math.floor(liveRecordedSeconds)}s has been captured so far. Wait for recording to catch up, then try again.`
-      );
-    }
-  }
+  const uploadDir = getUploadDir(streamSessionId);
 
   const allSources = await prisma.sourceMedia.findMany({
     where: { streamSessionId },
     orderBy: { createdAt: "desc" },
   });
 
-  const orderedSources = preferredSourceMediaId
-    ? [
-        ...allSources.filter((s) => s.id === preferredSourceMediaId),
-        ...allSources.filter((s) => s.id !== preferredSourceMediaId),
-      ]
-    : allSources;
-
-  for (const sourceMedia of orderedSources) {
-    if (
-      await localSourceCoversRange(
-        sourceMedia,
-        endTimeSeconds,
-        liveRecordedSeconds
-      )
-    ) {
-      const segmentMatch = sourceMedia.originalFilename.match(
-        /^segment-(\d+)-(\d+)\.mp4$/i
-      );
-      if (segmentMatch) {
-        const segmentStart = parseInt(segmentMatch[1], 10);
-        return {
-          sourceMediaId: sourceMedia.id,
-          renderStart: startTimeSeconds - segmentStart,
-          renderEnd: endTimeSeconds - segmentStart,
-        };
-      }
-
-      return {
-        sourceMediaId: sourceMedia.id,
-        renderStart: startTimeSeconds,
-        renderEnd: endTimeSeconds,
-      };
-    }
-  }
-
+  // 1. preview.mp4 — browser-playable, fast seek for render
   const previewPath = getPreviewMp4Path(streamSessionId);
   if (existsSync(previewPath)) {
-    let previewDuration = 0;
-    try {
-      previewDuration = (await probeMedia(previewPath)).durationSeconds;
-    } catch {
-      previewDuration = liveRecordedSeconds;
-    }
-    previewDuration = Math.max(previewDuration, liveRecordedSeconds);
-
-    if (previewDuration >= endTimeSeconds - 0.5) {
-      const previewMedia = await ensurePreviewSourceMedia(
-        streamSessionId,
-        previewPath,
-        previewDuration
-      );
-      return {
-        sourceMediaId: previewMedia.id,
-        renderStart: startTimeSeconds,
-        renderEnd: endTimeSeconds,
-      };
-    }
+    const duration = await resolveFileDurationSeconds(
+      previewPath,
+      liveRecordedSeconds,
+      true,
+      endTimeSeconds
+    );
+    const previewMedia = await ensureSourceMediaRow(streamSessionId, previewPath, {
+      originalFilename: "preview.mp4",
+      durationSeconds: duration,
+      isLiveRecording: true,
+    });
+    const local = localClipFromSource({
+      sourceMediaId: previewMedia.id,
+      startTimeSeconds,
+      endTimeSeconds,
+      availableDuration: duration,
+    });
+    if (local) return local;
   }
 
+  // 2. Main on-disk recording (source.mkv / source.mp4)
+  const mainAbsolute = await findBestSourceFileInDir(uploadDir);
+  if (mainAbsolute && existsSync(mainAbsolute)) {
+    const mainName = path.basename(mainAbsolute);
+    const relative = toRelativeStoragePath(mainAbsolute);
+    const existing =
+      allSources.find((s) => s.filePath === relative) ??
+      (await ensureSourceMediaRow(streamSessionId, mainAbsolute, {
+        originalFilename: mainName,
+        durationSeconds: liveRecordedSeconds,
+        isLiveRecording: isActivelyRecordingLive(session),
+      }));
+
+    const duration = await resolveFileDurationSeconds(
+      mainAbsolute,
+      liveRecordedSeconds,
+      existing.isLiveRecording,
+      endTimeSeconds
+    );
+
+    const local = localClipFromSource({
+      sourceMediaId: existing.id,
+      startTimeSeconds,
+      endTimeSeconds,
+      availableDuration: duration,
+    });
+    if (local) return local;
+  }
+
+  // 3. Other DB sources — main files before segments
+  const orderedSources = [
+    ...(preferredSourceMediaId
+      ? allSources.filter((s) => s.id === preferredSourceMediaId)
+      : []),
+    ...allSources.filter(
+      (s) =>
+        s.id !== preferredSourceMediaId &&
+        !isSegmentFile(s.originalFilename) &&
+        s.originalFilename !== "preview.mp4"
+    ),
+    ...allSources.filter((s) => s.originalFilename === "preview.mp4"),
+    ...allSources.filter((s) => isSegmentFile(s.originalFilename)),
+  ];
+
+  for (const sourceMedia of orderedSources) {
+    if (!fileExists(sourceMedia.filePath)) continue;
+
+    const absolutePath = resolveStoragePath(sourceMedia.filePath);
+    const duration = await resolveFileDurationSeconds(
+      absolutePath,
+      liveRecordedSeconds,
+      sourceMedia.isLiveRecording,
+      endTimeSeconds
+    );
+
+    const segmentMatch = sourceMedia.originalFilename.match(
+      /^segment-(\d+)-(\d+)\.mp4$/i
+    );
+    const segmentStart = segmentMatch ? parseInt(segmentMatch[1], 10) : undefined;
+
+    const local = localClipFromSource({
+      sourceMediaId: sourceMedia.id,
+      segmentStart,
+      startTimeSeconds,
+      endTimeSeconds,
+      availableDuration: duration,
+    });
+    if (local) return local;
+  }
+
+  // 4. Last resort: fetch segment from stream (slow)
   const ytDlpOk = await isYtDlpAvailable();
   if (!ytDlpOk) {
     throw new Error(
-      "No local video for this clip yet. Wait for the source download to finish, or install yt-dlp."
+      "No local video for this clip yet. Install yt-dlp or wait for recording to start."
     );
   }
 
-  if (isActivelyRecordingLive(session)) {
-    throw new Error(
-      "Local recording does not cover this clip range yet. Wait a few seconds and try again."
-    );
+  const streamUrl = session.youtubeUrl;
+  if (!streamUrl) {
+    throw new Error("Session has no stream URL.");
   }
 
   const leadIn = 3;
@@ -246,17 +302,22 @@ export async function ensureClipSourceForRender(
   const segmentStart = Math.max(0, startTimeSeconds - leadIn);
   const segmentEnd = endTimeSeconds + trailOut;
 
-  const uploadDir = getUploadDir(streamSessionId);
   await ensureDir(uploadDir);
   const segmentName = `segment-${Math.floor(segmentStart)}-${Math.floor(segmentEnd)}.mp4`;
   const absolutePath = path.join(uploadDir, segmentName);
 
   if (!existsSync(absolutePath)) {
-    await downloadClipSegmentFromYouTube(
-      session.youtubeUrl,
+    const fetchLiveFromStart =
+      session.liveStatus === "live" ||
+      session.liveStatus === "upcoming" ||
+      isActivelyRecordingLive(session);
+
+    await downloadClipSegmentFromStream(
+      streamUrl,
       formatYtDlpTime(segmentStart),
       formatYtDlpTime(segmentEnd),
-      absolutePath
+      absolutePath,
+      { liveFromStart: fetchLiveFromStart }
     );
   }
 
@@ -276,8 +337,6 @@ export async function ensureClipSourceForRender(
     };
   }
 
-  const stat = await import("fs/promises").then((fs) => fs.stat(absolutePath));
-
   const existingSegment = allSources.find((s) => s.filePath === relativePath);
   const segmentMedia =
     existingSegment ??
@@ -287,7 +346,9 @@ export async function ensureClipSourceForRender(
         originalFilename: segmentName,
         filePath: relativePath,
         mimeType: "video/mp4",
-        sizeBytes: BigInt(stat.size),
+        sizeBytes: BigInt(
+          (await import("fs/promises").then((fs) => fs.stat(absolutePath))).size
+        ),
         durationSeconds: probe.durationSeconds || segmentEnd - segmentStart,
         width: probe.width || null,
         height: probe.height || null,
@@ -297,12 +358,9 @@ export async function ensureClipSourceForRender(
       },
     }));
 
-  const renderStart = startTimeSeconds - segmentStart;
-  const renderEnd = endTimeSeconds - segmentStart;
-
   return {
     sourceMediaId: segmentMedia.id,
-    renderStart,
-    renderEnd,
+    renderStart: startTimeSeconds - segmentStart,
+    renderEnd: endTimeSeconds - segmentStart,
   };
 }

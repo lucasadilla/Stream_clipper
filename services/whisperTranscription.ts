@@ -9,8 +9,9 @@ import {
   getOpenAiWhisperModel,
   getOpenRouterApiKey,
   getOpenRouterWhisperModel,
+  getWhisperProviderOrder,
   hasAnyAiKey,
-  useOpenRouterForWhisper,
+  type WhisperProvider,
 } from "@/lib/aiProvider";
 
 const OPENROUTER_TRANSCRIBE_URL =
@@ -51,12 +52,13 @@ function audioFormatFromPath(audioPath: string): string {
   return ext || "wav";
 }
 
-function resolveWhisperProvider(): "openai" | "openrouter" {
-  const pref = process.env.WHISPER_PROVIDER?.trim().toLowerCase();
-  if (pref === "openrouter" && useOpenRouterForWhisper()) return "openrouter";
-  if (pref === "openai" || process.env.OPENAI_API_KEY?.trim()) return "openai";
-  if (useOpenRouterForWhisper()) return "openrouter";
-  return "openai";
+async function transcribeWithProvider(
+  provider: WhisperProvider,
+  audioPath: string
+): Promise<WhisperVerboseResponse> {
+  return provider === "openrouter"
+    ? transcribeViaOpenRouter(audioPath)
+    : transcribeViaOpenAiDirect(audioPath);
 }
 
 async function transcribeViaOpenRouter(
@@ -116,28 +118,51 @@ export async function transcribeWhisperAudio(
   audioPath: string,
   timeOffsetSeconds: number
 ): Promise<TranscriptSegmentWithMeta[]> {
-  const provider = resolveWhisperProvider();
+  const providers = getWhisperProviderOrder();
+  if (providers.length === 0) {
+    throw new Error("Set OPENROUTER_API_KEY or OPENAI_API_KEY for Whisper");
+  }
 
   let response: WhisperVerboseResponse | null = null;
-  for (let attempt = 1; attempt <= WHISPER_RETRIES; attempt++) {
-    try {
-      response =
-        provider === "openrouter"
-          ? await transcribeViaOpenRouter(audioPath)
-          : await transcribeViaOpenAiDirect(audioPath);
-      break;
-    } catch (err) {
-      if (attempt === WHISPER_RETRIES || !isProviderUnavailableError(err)) {
-        throw err;
+  let lastError: unknown;
+
+  providerLoop: for (let p = 0; p < providers.length; p++) {
+    const provider = providers[p]!;
+    for (let attempt = 1; attempt <= WHISPER_RETRIES; attempt++) {
+      try {
+        response = await transcribeWithProvider(provider, audioPath);
+        break providerLoop;
+      } catch (err) {
+        lastError = err;
+        const message = err instanceof Error ? err.message : String(err);
+        const canRetry =
+          attempt < WHISPER_RETRIES && isProviderUnavailableError(err);
+        if (canRetry) {
+          console.warn(
+            `[whisper] ${provider} transient error (attempt ${attempt}/${WHISPER_RETRIES}), retrying:`,
+            message
+          );
+          await new Promise((r) => setTimeout(r, 2000 * attempt));
+          continue;
+        }
+
+        const hasFallback = p < providers.length - 1;
+        if (hasFallback) {
+          console.warn(
+            `[whisper] ${provider} failed, trying ${providers[p + 1]}:`,
+            message
+          );
+        }
+        break;
       }
-      console.warn(
-        `[whisper] transient error (attempt ${attempt}/${WHISPER_RETRIES}), retrying:`,
-        err instanceof Error ? err.message : err
-      );
-      await new Promise((r) => setTimeout(r, 2000 * attempt));
     }
   }
-  if (!response) throw new Error("Whisper transcription failed");
+
+  if (!response) {
+    throw lastError instanceof Error
+      ? lastError
+      : new Error("Whisper transcription failed");
+  }
 
   const rawSegments = response.segments ?? [];
   const rawWords = response.words ?? [];
@@ -232,10 +257,7 @@ function mergeAdjacentSegments(
 }
 
 export function isWhisperAvailable(): boolean {
-  if (resolveWhisperProvider() === "openrouter") {
-    return Boolean(process.env.OPENROUTER_API_KEY?.trim());
-  }
-  return Boolean(process.env.OPENAI_API_KEY?.trim());
+  return getWhisperProviderOrder().length > 0;
 }
 
 export function isAiConfigured(): boolean {

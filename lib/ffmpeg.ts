@@ -402,6 +402,76 @@ function subtitleFilter(
   return `subtitles='${escapedSrt}':force_style='${style}'`;
 }
 
+function renderPreset(): string {
+  return process.env.FFMPEG_RENDER_PRESET?.trim() || "ultrafast";
+}
+
+/** Fast stream-copy trim — seek before input for large files. */
+export async function fastCutSegment(
+  inputPath: string,
+  outputPath: string,
+  startSeconds: number,
+  durationSeconds: number
+): Promise<void> {
+  await runCommand(getFfmpegPath(), [
+    "-y",
+    "-nostdin",
+    "-loglevel",
+    "error",
+    "-ss",
+    String(Math.max(0, startSeconds)),
+    "-i",
+    inputPath,
+    "-t",
+    String(Math.max(0.1, durationSeconds)),
+    "-map",
+    "0:v:0?",
+    "-map",
+    "0:a:0?",
+    "-c",
+    "copy",
+    "-avoid_negative_ts",
+    "make_zero",
+    outputPath,
+  ]);
+}
+
+async function encodeWithFilters(options: {
+  inputPath: string;
+  outputPath: string;
+  vf: string;
+  outputHeight: number;
+  withAudio: boolean;
+}): Promise<void> {
+  const args = [
+    "-y",
+    "-nostdin",
+    "-loglevel",
+    "error",
+    "-i",
+    options.inputPath,
+    "-vf",
+    options.vf,
+    "-c:v",
+    "libx264",
+    "-preset",
+    renderPreset(),
+    "-crf",
+    "24",
+    "-threads",
+    "0",
+  ];
+
+  if (options.withAudio) {
+    args.push("-c:a", "aac", "-b:a", "128k");
+  } else {
+    args.push("-an");
+  }
+
+  args.push("-movflags", "+faststart", options.outputPath);
+  await runCommand(getFfmpegPath(), args);
+}
+
 export async function renderShort(options: RenderShortOptions): Promise<void> {
   const {
     inputPath,
@@ -412,7 +482,6 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
     layout,
     width = 1080,
     height = 1920,
-    fps = 30,
     srtPath,
     subtitleFormat = format,
     outputHeight = format === "vertical" ? height : 1080,
@@ -422,102 +491,51 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
   const duration = endTimeSeconds - startTimeSeconds;
   if (duration <= 0) throw new Error("Invalid clip duration");
 
-  if (format === "native") {
-    if (srtPath) {
-      const args = [
-        "-y",
-        "-ss",
-        String(startTimeSeconds),
-        "-t",
-        String(duration),
-        "-i",
-        inputPath,
-        "-vf",
-        subtitleFilter(srtPath, subtitleFormat, outputHeight, captionAppearance),
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "23",
-        "-threads",
-        "0",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-movflags",
-        "+faststart",
-        outputPath,
-      ];
-      await runCommand(getFfmpegPath(), args);
-      return;
-    }
+  const needsReencode = format === "vertical" || !!srtPath;
 
-    const args = [
-      "-y",
-      "-ss",
-      String(startTimeSeconds),
-      "-t",
-      String(duration),
-      "-i",
-      inputPath,
-      "-c",
-      "copy",
-      "-avoid_negative_ts",
-      "make_zero",
-      outputPath,
-    ];
-    await runCommand(getFfmpegPath(), args);
+  if (!needsReencode) {
+    await fastCutSegment(inputPath, outputPath, startTimeSeconds, duration);
     return;
   }
 
-  let vf: string;
+  const fs = await import("fs/promises");
+  const tempCut = `${outputPath}.cut.mp4`;
 
-  switch (layout) {
-    case "center_crop":
-      vf = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`;
-      break;
-    case "facecam_overlay":
-    case "facecam_top_gameplay_bottom":
-      vf = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`;
-      break;
-    default:
-      vf = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`;
+  try {
+    await fastCutSegment(inputPath, tempCut, startTimeSeconds, duration);
+
+    if (format === "native" && srtPath) {
+      await encodeWithFilters({
+        inputPath: tempCut,
+        outputPath,
+        vf: subtitleFilter(srtPath, subtitleFormat, outputHeight, captionAppearance),
+        outputHeight,
+        withAudio: true,
+      });
+      return;
+    }
+
+    let vf: string;
+    switch (layout) {
+      case "center_crop":
+      case "facecam_overlay":
+      case "facecam_top_gameplay_bottom":
+      default:
+        vf = `scale=${width}:${height}:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=${width}:${height}`;
+    }
+
+    if (srtPath) {
+      vf += `,${subtitleFilter(srtPath, subtitleFormat, height, captionAppearance)}`;
+    }
+
+    await encodeWithFilters({
+      inputPath: tempCut,
+      outputPath,
+      vf,
+      outputHeight: height,
+      withAudio: true,
+    });
+  } finally {
+    await fs.unlink(tempCut).catch(() => {});
   }
-
-  if (srtPath) {
-    vf += `,${subtitleFilter(srtPath, subtitleFormat, height, captionAppearance)}`;
-  }
-
-  const args = [
-    "-y",
-    "-ss",
-    String(startTimeSeconds),
-    "-t",
-    String(duration),
-    "-i",
-    inputPath,
-    "-vf",
-    vf,
-    "-c:v",
-    "libx264",
-    "-preset",
-    "veryfast",
-    "-crf",
-    "23",
-    "-threads",
-    "0",
-    "-r",
-    String(fps),
-    "-c:a",
-    "aac",
-    "-b:a",
-    "128k",
-    "-movflags",
-    "+faststart",
-    outputPath,
-  ];
-
-  await runCommand(getFfmpegPath(), args);
 }

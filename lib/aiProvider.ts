@@ -41,12 +41,34 @@ export function getOpenRouterWhisperModel(): string {
   );
 }
 
+export type WhisperProvider = "openai" | "openrouter";
+
 /** Use OpenRouter for STT when key is set unless WHISPER_PROVIDER=openai. */
-export function useOpenRouterForWhisper(): boolean {
+export function shouldUseOpenRouterForWhisper(): boolean {
   const pref = process.env.WHISPER_PROVIDER?.trim().toLowerCase();
   if (pref === "openai") return false;
   if (pref === "openrouter") return isOpenRouterEnabled();
   return isOpenRouterEnabled();
+}
+
+/** Preferred Whisper backends in order (primary first, then fallbacks). */
+export function getWhisperProviderOrder(): WhisperProvider[] {
+  const pref = process.env.WHISPER_PROVIDER?.trim().toLowerCase();
+  const hasOpenRouter = isOpenRouterEnabled();
+  const hasOpenAi = Boolean(process.env.OPENAI_API_KEY?.trim());
+
+  if (pref === "openrouter") {
+    return hasOpenRouter ? ["openrouter"] : hasOpenAi ? ["openai"] : [];
+  }
+  if (pref === "openai") {
+    return hasOpenAi ? ["openai"] : hasOpenRouter ? ["openrouter"] : [];
+  }
+
+  const order: WhisperProvider[] = [];
+  if (shouldUseOpenRouterForWhisper() && hasOpenRouter) order.push("openrouter");
+  if (hasOpenAi) order.push("openai");
+  if (order.length === 0 && hasOpenRouter) order.push("openrouter");
+  return order;
 }
 
 let sharedClient: OpenAI | null = null;

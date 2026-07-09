@@ -449,18 +449,19 @@ export async function serveStorageFile(
     return new Response("File not found", { status: 404 });
   }
 
-  const data = await readFileFs(fullPath);
+  const stat = await statFs(fullPath);
   const filename = (downloadFilename ?? path.basename(fullPath)).replace(
     /[^\w.\-() ]/g,
     "_"
   );
 
-  return new Response(new Uint8Array(data), {
+  const stream = createReadStream(fullPath);
+  return new Response(stream as unknown as BodyInit, {
     status: 200,
     headers: {
       "Content-Type": contentTypeForFile(fullPath),
       "Content-Disposition": `attachment; filename="${filename}"`,
-      "Content-Length": String(data.byteLength),
+      "Content-Length": String(stat.size),
       "Cache-Control": "private, no-cache",
     },
   });

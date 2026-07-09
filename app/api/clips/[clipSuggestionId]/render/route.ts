@@ -34,24 +34,18 @@ export async function POST(
       where: { streamSessionId: clip.streamSessionId },
       orderBy: { createdAt: "desc" },
     });
-    if (!sourceMedia) {
-      return errorResponse(
-        "Source video not ready. Wait for download/recording to finish.",
-        400
-      );
-    }
 
     const jobId = await createRenderJobRecord({
       streamSessionId: clip.streamSessionId,
       clipSuggestionId: clip.id,
-      sourceMediaId: sourceMedia.id,
+      sourceMediaId: sourceMedia?.id,
       layout: clip.suggestedLayout,
       includeCaptions,
     });
 
     const renderParams = {
       streamSessionId: clip.streamSessionId,
-      sourceMediaId: sourceMedia.id,
+      sourceMediaId: sourceMedia?.id,
       clipSuggestionId: clip.id,
       startTimeSeconds: clip.startTimeSeconds,
       endTimeSeconds: clip.endTimeSeconds,
@@ -61,19 +55,19 @@ export async function POST(
       captionAppearance,
     };
 
-    void executeRenderJob(jobId, renderParams).catch(async (error) => {
+    try {
+      await executeRenderJob(jobId, renderParams);
+    } catch (error) {
       const message = error instanceof Error ? error.message : "Render failed";
       await failRenderJob(jobId, message);
-    });
+      return errorResponse(message, 500);
+    }
 
-    return jsonResponse(
-      {
-        jobId,
-        status: "processing",
-        downloadUrl: `/api/render-jobs/${jobId}/download`,
-      },
-      202
-    );
+    return jsonResponse({
+      jobId,
+      status: "completed",
+      downloadUrl: `/api/render-jobs/${jobId}/download`,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Render failed";
     return errorResponse(message, 500);

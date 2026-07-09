@@ -20,15 +20,96 @@ body {
 }
 
 .site-body {
-  background-image:
-    radial-gradient(ellipse 80% 50% at 50% -20%, rgba(139, 92, 246, 0.15), transparent),
-    radial-gradient(ellipse 60% 40% at 100% 0%, rgba(109, 40, 217, 0.08), transparent);
+  background: #050604;
+}
+
+.marketing-shell {
+  --color-background: #050604;
+  --color-foreground: #f4fff1;
+  --color-card: #0a0d0a;
+  --color-card-border: #21301f;
+  --color-muted: #9aa49a;
+  --color-accent: #95ff00;
+  --color-accent-hover: #b7ff3c;
+}
+
+.marketing-home {
+  background: #020302;
+}
+
+.marketing-hero-title {
+  font-size: 4.5rem;
+  line-height: 0.84;
+  letter-spacing: 0;
+}
+
+.marketing-display-title {
+  font-size: 3.75rem;
+  line-height: 0.86;
+  letter-spacing: 0;
+}
+
+.marketing-ghost-title {
+  color: transparent;
+  font-size: 7rem;
+  font-weight: 650;
+  line-height: 0.75;
+  letter-spacing: 0;
+  opacity: 0.5;
+  -webkit-text-stroke: 1px rgba(149, 255, 0, 0.18);
+  text-stroke: 1px rgba(149, 255, 0, 0.18);
+}
+
+@media (min-width: 640px) {
+  .marketing-hero-title {
+    font-size: 6.75rem;
+  }
+
+  .marketing-display-title {
+    font-size: 5.75rem;
+  }
+
+  .marketing-ghost-title {
+    font-size: 11rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .marketing-hero-title {
+    font-size: 8.5rem;
+  }
+
+  .marketing-display-title {
+    font-size: 8rem;
+  }
+
+  .marketing-ghost-title {
+    font-size: 17rem;
+  }
+}
+
+@media (min-width: 1280px) {
+  .marketing-hero-title {
+    font-size: 9rem;
+  }
+
+  .marketing-display-title {
+    font-size: 10rem;
+  }
+
+  .marketing-ghost-title {
+    font-size: 22rem;
+  }
+}
+
+@media (max-height: 760px) {
+  .hero-signal-strip {
+    display: none;
+  }
 }
 
 .site-hero-glow {
-  background:
-    radial-gradient(ellipse 70% 60% at 20% 40%, rgba(139, 92, 246, 0.12), transparent),
-    radial-gradient(ellipse 50% 50% at 80% 20%, rgba(217, 70, 239, 0.08), transparent);
+  background: linear-gradient(180deg, rgba(149, 255, 0, 0.08), transparent);
 }
 
 * {

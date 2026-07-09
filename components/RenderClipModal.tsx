@@ -6,7 +6,7 @@ import Link from "next/link";
 import { formatSeconds, formatDuration } from "@/lib/time";
 import { fetchJson } from "@/lib/apiClient";
 import { saveClip, renderClip } from "@/lib/clipActions";
-import { triggerFileDownload } from "@/lib/clientDownload";
+import { triggerDirectFileDownload } from "@/lib/clientDownload";
 import { clipDownloadUrl } from "@/lib/downloadUrls";
 import type { ClipSelection } from "@/components/LiveTimeline";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
@@ -43,7 +43,7 @@ interface RenderClipModalProps {
 }
 
 type Phase = "configure" | "exporting" | "done";
-type ExportStep = "saving" | "preparing" | "rendering" | "downloading";
+type ExportStep = "saving" | "rendering";
 
 export function RenderClipModal({
   open,
@@ -58,7 +58,7 @@ export function RenderClipModal({
   const [phase, setPhase] = useState<Phase>("configure");
   const [exportStep, setExportStep] = useState<ExportStep>("saving");
   const [exportProgress, setExportProgress] = useState(0);
-  const [format, setFormat] = useState<RenderFormat>("vertical");
+  const [format, setFormat] = useState<RenderFormat>("native");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [tagsText, setTagsText] = useState("");
@@ -70,6 +70,9 @@ export function RenderClipModal({
   const [publishBusy, setPublishBusy] = useState<PublishDestination | null>(null);
   const [publishStatus, setPublishStatus] = useState<string | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
+  const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  const [downloadFilename, setDownloadFilename] = useState("clip.mp4");
+  const [downloadDone, setDownloadDone] = useState(false);
 
   const duration = selection.end - selection.start;
   const canRender =
@@ -86,7 +89,7 @@ export function RenderClipModal({
     setPhase("configure");
     setExportStep("saving");
     setExportProgress(0);
-    setFormat("vertical");
+    setFormat("native");
     setTitle(`Clip ${formatSeconds(selection.start)}`);
     setDescription("");
     setTagsText("");
@@ -96,6 +99,9 @@ export function RenderClipModal({
     setCopied(null);
     setPublishStatus(null);
     setLinkCopied(false);
+    setDownloadUrl(null);
+    setDownloadFilename("clip.mp4");
+    setDownloadDone(false);
   }, [open, selection.start, selection.end, includeCaptions]);
 
   useEffect(() => {
@@ -149,6 +155,12 @@ export function RenderClipModal({
     }
   }
 
+  function downloadClipFile(url: string, filename: string) {
+    setError(null);
+    triggerDirectFileDownload(url, filename);
+    setDownloadDone(true);
+  }
+
   async function handleRender() {
     if (!canRender) return;
     setPhase("exporting");
@@ -159,7 +171,7 @@ export function RenderClipModal({
       const clipTitle = title.trim() || `Clip ${formatSeconds(selection.start)}`;
       const clip = await saveClip(sessionId, selection, clipTitle);
 
-      setExportStep("preparing");
+      setExportStep("rendering");
       const result = await renderClip(
         clip.id,
         format,
@@ -167,24 +179,18 @@ export function RenderClipModal({
         captionAppearance,
         (update) => {
           setExportProgress(update.progress);
-          if (update.progress < 30) {
-            setExportStep("preparing");
-          } else if (update.progress < 95) {
-            setExportStep("rendering");
-          } else {
-            setExportStep("downloading");
-          }
+          setExportStep("rendering");
         }
       );
 
-      setExportStep("downloading");
-      setExportProgress(98);
       const url = result.downloadUrl ?? clipDownloadUrl(clip.id);
       const suffix = format === "native" ? "-native" : "-vertical";
-      await triggerFileDownload(url, `${clip.title || "clip"}${suffix}.mp4`);
+      const filename = `${clip.title || "clip"}${suffix}.mp4`;
 
-      setExportProgress(100);
       setClipId(clip.id);
+      setDownloadUrl(url);
+      setDownloadFilename(filename);
+      setExportProgress(100);
       setPhase("done");
       onClipCreated?.();
     } catch (err) {
@@ -301,18 +307,18 @@ export function RenderClipModal({
                 </span>
                 <div className="grid grid-cols-2 gap-2">
                   <AspectOption
+                    active={format === "native"}
+                    onClick={() => setFormat("native")}
+                    label="Native"
+                    sublabel="16:9 · fastest"
+                    orientation="horizontal"
+                  />
+                  <AspectOption
                     active={format === "vertical"}
                     onClick={() => setFormat("vertical")}
                     label="Vertical"
                     sublabel="9:16 · Shorts"
                     orientation="vertical"
-                  />
-                  <AspectOption
-                    active={format === "native"}
-                    onClick={() => setFormat("native")}
-                    label="Native"
-                    sublabel="16:9 · landscape"
-                    orientation="horizontal"
                   />
                 </div>
               </div>
@@ -428,8 +434,20 @@ export function RenderClipModal({
             <div className="space-y-4">
               <p className="text-sm text-[#ccc]">
                 <span className="text-[var(--color-accent)] font-medium">{title}</span>{" "}
-                downloaded. Share or upload below.
+                {downloadDone
+                  ? "saved on your computer."
+                  : "rendered — click Download MP4 to save it to your computer."}
               </p>
+
+              {downloadUrl && (
+                <button
+                  type="button"
+                  onClick={() => downloadClipFile(downloadUrl, downloadFilename)}
+                  className="w-full text-sm px-4 py-2.5 rounded-lg font-semibold bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white"
+                >
+                  {downloadDone ? "Download again" : "Download MP4"}
+                </button>
+              )}
 
               {description.trim() && (
                 <div className="text-xs text-[#999] rounded-lg bg-[#0d0d0d] border border-[#333] px-3 py-2 line-clamp-3">
@@ -522,7 +540,7 @@ export function RenderClipModal({
                 disabled={!canRender}
                 className="text-xs px-4 py-2 rounded-lg font-semibold bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white disabled:opacity-40"
               >
-                Render & download
+                Render clip
               </button>
             </>
           )}
@@ -532,13 +550,24 @@ export function RenderClipModal({
             </p>
           )}
           {phase === "done" && (
-            <button
-              type="button"
-              onClick={handleClose}
-              className="text-xs px-4 py-2 rounded-lg font-semibold bg-[#333] hover:bg-[#444] text-white"
-            >
-              Done
-            </button>
+            <>
+              {downloadUrl && (
+                <button
+                  type="button"
+                  onClick={() => downloadClipFile(downloadUrl, downloadFilename)}
+                  className="text-xs px-4 py-2 rounded-lg font-semibold bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white"
+                >
+                  {downloadDone ? "Download again" : "Download MP4"}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleClose}
+                className="text-xs px-4 py-2 rounded-lg font-semibold bg-[#333] hover:bg-[#444] text-white"
+              >
+                Done
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -562,16 +591,10 @@ function ExportProgress({
   const steps: Array<{ id: ExportStep; label: string; detail: string }> = [
     { id: "saving", label: "Save clip", detail: "Storing your selection" },
     {
-      id: "preparing",
-      label: "Prepare source",
-      detail: "Finding or fetching video for this range",
-    },
-    {
       id: "rendering",
-      label: "Encode video",
-      detail: `${format === "vertical" ? "9:16 vertical" : "16:9 native"} · ${formatDuration(durationSeconds)}`,
+      label: "Render video",
+      detail: `Cutting from local recording · ${format === "vertical" ? "9:16" : "16:9"} · ${formatDuration(durationSeconds)}`,
     },
-    { id: "downloading", label: "Download", detail: "Saving file to your device" },
   ];
 
   const active = steps.find((s) => s.id === step) ?? steps[0];
@@ -625,16 +648,10 @@ function ExportProgress({
         })}
       </ol>
 
-      {step === "preparing" && (
-        <p className="text-[10px] text-[#666] leading-relaxed max-w-xs">
-          If no local file exists yet, we fetch just this segment from the stream
-          — that can take a minute.
-        </p>
-      )}
       {step === "rendering" && durationSeconds > 60 && (
         <p className="text-[10px] text-[#666] leading-relaxed max-w-xs">
-          Encoding {formatDuration(durationSeconds)} — usually 30–90s for short
-          clips, longer for big exports.
+          Longer vertical clips take longer to encode. Native (16:9) without
+          captions is fastest.
         </p>
       )}
     </div>

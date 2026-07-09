@@ -2,7 +2,7 @@ import path from "path";
 import fs from "fs/promises";
 import { existsSync } from "fs";
 import { prisma } from "@/lib/db";
-import { renderShort as ffmpegRender, isFfmpegAvailable, probeMedia } from "@/lib/ffmpeg";
+import { renderShort as ffmpegRender, isFfmpegAvailable } from "@/lib/ffmpeg";
 import { generateSrt } from "@/lib/time";
 import { formatCaptionTextForBurn } from "@/lib/captionStyles";
 import { buildCaptionTrack } from "@/lib/captionTrack";
@@ -78,7 +78,7 @@ export async function executeRenderJob(
     sourceMediaId
   );
 
-  await updateJobProgress(jobId, 28);
+  await updateJobProgress(jobId, 25);
 
   const renderSource = await prisma.sourceMedia.findUnique({
     where: { id: clipSource.sourceMediaId },
@@ -98,16 +98,7 @@ export async function executeRenderJob(
 
   const inputPath = resolveStoragePath(renderSource.filePath);
   let srtPath: string | undefined;
-  let outputHeight = format === "vertical" ? 1920 : 1080;
-
-  if (format === "native") {
-    try {
-      const probe = await probeMedia(inputPath);
-      outputHeight = probe.height > 0 ? probe.height : 1080;
-    } catch {
-      outputHeight = 1080;
-    }
-  }
+  const outputHeight = format === "vertical" ? 1920 : 1080;
 
   if (includeCaptions) {
     await updateJobProgress(jobId, 35);
@@ -145,12 +136,13 @@ export async function executeRenderJob(
     }
   }
 
-  await updateJobProgress(jobId, 45);
-
-  const facecam = await prisma.facecamRegion.findFirst({
-    where: { streamSessionId },
-    orderBy: { confidence: "desc" },
-  });
+  const facecam =
+    layout !== "center_crop"
+      ? await prisma.facecamRegion.findFirst({
+          where: { streamSessionId },
+          orderBy: { confidence: "desc" },
+        })
+      : null;
 
   await ffmpegRender({
     inputPath,

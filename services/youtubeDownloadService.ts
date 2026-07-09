@@ -236,12 +236,13 @@ export async function downloadSourceFromYouTube(streamSessionId: string) {
   });
 }
 
-/** Download only the time range needed for a clip (fast — no full VOD download). */
-export async function downloadClipSegmentFromYouTube(
-  youtubeUrl: string,
+/** Download only the time range needed for a clip (works for YouTube, Twitch, Kick). */
+export async function downloadClipSegmentFromStream(
+  streamUrl: string,
   startTime: string,
   endTime: string,
-  outputPath: string
+  outputPath: string,
+  options?: { liveFromStart?: boolean }
 ) {
   const available = await isYtDlpAvailable();
   if (!available) {
@@ -253,6 +254,7 @@ export async function downloadClipSegmentFromYouTube(
   await runYtDlpWithFormatFallback(
     [
       ...baseYtDlpArgs(),
+      ...(options?.liveFromStart ? ["--live-from-start"] : []),
       "--download-sections",
       section,
       "--force-keyframes-at-cuts",
@@ -261,6 +263,9 @@ export async function downloadClipSegmentFromYouTube(
       "-o",
       outputPath,
     ],
-    youtubeUrl
+    streamUrl
   );
 }
+
+/** @deprecated Use downloadClipSegmentFromStream */
+export const downloadClipSegmentFromYouTube = downloadClipSegmentFromStream;

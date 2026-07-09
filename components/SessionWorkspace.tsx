@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { EditorHeader } from "@/components/layout/EditorHeader";
 import { VideoPreview } from "@/components/VideoPreview";
@@ -15,7 +16,6 @@ import {
   TRANSCRIPTION_SLOW_TICK_MS,
 } from "@/lib/transcriptionConstants";
 import { buildLiveTimelineSegments } from "@/lib/timelineSegments";
-import { FindClipBar } from "@/components/FindClipBar";
 import { TranscriptChat } from "@/components/TranscriptChat";
 import { fetchJson } from "@/lib/apiClient";
 import {
@@ -74,6 +74,21 @@ interface SessionWorkspaceProps {
   sessionId: string;
 }
 
+function timelineThumbsEqual(
+  prev: Array<{ startTimeSeconds: number; endTimeSeconds: number; url: string }>,
+  next: Array<{ startTimeSeconds: number; endTimeSeconds: number; url: string }>
+) {
+  return (
+    next.length === prev.length &&
+    next.every(
+      (t, i) =>
+        t.startTimeSeconds === prev[i]?.startTimeSeconds &&
+        t.endTimeSeconds === prev[i]?.endTimeSeconds &&
+        t.url === prev[i]?.url
+    )
+  );
+}
+
 export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const router = useRouter();
   const [session, setSession] = useState<SessionData | null>(null);
@@ -122,6 +137,8 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const playerRef = useRef<StreamPlayerHandle>(null);
   const sourceStarted = useRef(false);
   const transcribeInFlight = useRef(false);
+  const thumbnailsInFlight = useRef(false);
+  const transcriptSignature = useRef("");
   const captionRebuildAttempted = useRef(false);
   const sessionLoadedOnce = useRef(false);
 
@@ -148,24 +165,21 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   }, []);
 
   async function loadThumbnails() {
+    if (thumbnailsInFlight.current) return;
+    thumbnailsInFlight.current = true;
     try {
       const res = await fetch(`/api/sessions/${sessionId}/timeline-thumbs`);
       const data = await res.json();
       if (!res.ok) return;
       const next = (data.thumbnails ?? []) as typeof thumbnails;
       setThumbnails((prev) => {
-        if (
-          next.length === prev.length &&
-          next.every(
-            (t, i) => t.startTimeSeconds === prev[i]?.startTimeSeconds
-          )
-        ) {
-          return prev;
-        }
+        if (timelineThumbsEqual(prev, next)) return prev;
         return next;
       });
     } catch {
       // optional
+    } finally {
+      thumbnailsInFlight.current = false;
     }
   }
 
@@ -307,18 +321,23 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       if (waveformRes.ok) {
         setAudioWaveform(waveformRes.data.buckets ?? []);
       }
-    const arrived = new Set<string>();
-    for (const t of chunks) {
-      if (!prevTranscriptIds.current.has(t.id)) arrived.add(t.id);
-    }
-    prevTranscriptIds.current = new Set(chunks.map((t: { id: string }) => t.id));
-    if (arrived.size > 0) {
-      setNewSegmentIds(arrived);
-      window.setTimeout(() => setNewSegmentIds(new Set()), 2500);
-    }
+    const nextTranscriptSignature = chunks
+      .map((t) => `${t.id}:${t.startTimeSeconds}:${t.endTimeSeconds}:${t.text.length}`)
+      .join("|");
+    if (nextTranscriptSignature !== transcriptSignature.current) {
+      transcriptSignature.current = nextTranscriptSignature;
+      const arrived = new Set<string>();
+      for (const t of chunks) {
+        if (!prevTranscriptIds.current.has(t.id)) arrived.add(t.id);
+      }
+      prevTranscriptIds.current = new Set(chunks.map((t: { id: string }) => t.id));
+      if (arrived.size > 0) {
+        setNewSegmentIds(arrived);
+        window.setTimeout(() => setNewSegmentIds(new Set()), 2500);
+      }
 
-    setTranscripts(chunks);
-    void loadThumbnails();
+      setTranscripts(chunks);
+    }
     } catch {
       // non-fatal
     }
@@ -449,10 +468,13 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         } else if (data.reason === "too_short") {
           setTranscriptionError("Recording too short — wait for more audio");
         } else if (data.reason === "provider_unavailable") {
+          const detail = data.error?.trim();
           setTranscriptionError(
-            /quota/i.test(data.error ?? "")
+            /quota/i.test(detail ?? "")
               ? "AI provider quota exceeded — add credits and transcription will resume automatically"
-              : "AI provider unreachable — retrying automatically"
+              : detail
+                ? `Transcription unavailable (${detail}) — retrying automatically`
+                : "AI provider unreachable — retrying automatically"
           );
         } else {
           setTranscriptionError(null);
@@ -526,9 +548,9 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         <EditorHeader title="Editor" />
         <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6">
           <p className="text-[var(--color-danger)]">{error ?? "Session not found"}</p>
-          <a href="/" className="text-[var(--color-accent)] text-sm hover:underline">
+          <Link href="/" className="text-[var(--color-accent)] text-sm hover:underline">
             ← Back to home
-          </a>
+          </Link>
         </div>
       </div>
     );
@@ -633,10 +655,6 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
             onTimeUpdate={handlePlayerTimeUpdate}
             onDurationChange={handlePlayerDurationChange}
           />
-        </div>
-
-        <div className="shrink-0 px-4 py-1.5 max-w-6xl w-full mx-auto">
-          <FindClipBar sessionId={sessionId} onComplete={loadEvents} />
         </div>
 
         {/* Timeline */}

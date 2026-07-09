@@ -6,8 +6,8 @@ import { SiteLogo } from "@/components/layout/SiteLogo";
 import { cn } from "@/lib/utils";
 
 const NAV_LINKS = [
-  { href: "/#features", label: "Features" },
-  { href: "/#how-it-works", label: "How it works" },
+  { href: "/#features", label: "System" },
+  { href: "/#how-it-works", label: "Workflow" },
   { href: "/#sessions", label: "Sessions" },
 ];
 
@@ -17,7 +17,7 @@ export function SiteHeader() {
 
   return (
     <header className="sticky top-0 z-50 border-b border-[var(--color-card-border)]/80 bg-[var(--color-background)]/85 backdrop-blur-md">
-      <div className="max-w-6xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-4">
+      <div className="mx-auto flex h-14 max-w-[1440px] items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
         <SiteLogo />
 
         <nav className="hidden md:flex items-center gap-1">
@@ -38,17 +38,17 @@ export function SiteHeader() {
               href="#analyze"
               className={cn(
                 "text-sm font-medium px-4 py-2 rounded-lg",
-                "bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white transition-colors"
+                "bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-black transition-colors"
               )}
             >
-              Analyze stream
+              Open timeline
             </a>
           ) : (
             <Link
               href="/#analyze"
               className={cn(
                 "text-sm font-medium px-4 py-2 rounded-lg",
-                "bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white transition-colors"
+                "bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-black transition-colors"
               )}
             >
               New session
