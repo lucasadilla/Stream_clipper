@@ -4,12 +4,29 @@ import type { RenderFormat } from "@/lib/renderFormat";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
 import { getFfmpegCaptionForceStyle } from "@/lib/captionAppearance";
 
+function isWindowsAbsolutePath(value: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(value) || value.includes("\\");
+}
+
+function configuredExecutablePath(envName: string, fallback: string): string {
+  const configured = process.env[envName]?.trim();
+  if (!configured) return fallback;
+
+  // Railway/Linux deploys sometimes inherit local Windows .env paths. Ignore
+  // those so the Docker-installed binaries on PATH still work.
+  if (process.platform !== "win32" && isWindowsAbsolutePath(configured)) {
+    return fallback;
+  }
+
+  return configured;
+}
+
 export function getFfmpegPath(): string {
-  return process.env.FFMPEG_PATH ?? "ffmpeg";
+  return configuredExecutablePath("FFMPEG_PATH", "ffmpeg");
 }
 
 export function getFfprobePath(): string {
-  return process.env.FFPROBE_PATH ?? "ffprobe";
+  return configuredExecutablePath("FFPROBE_PATH", "ffprobe");
 }
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {

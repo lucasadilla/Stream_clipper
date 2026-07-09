@@ -13,7 +13,12 @@ import {
   ensureDir,
   toRelativeStoragePath,
   isAllowedVideoFile,
+  fileExists,
 } from "@/lib/storage";
+import {
+  ensureLocalSourceMedia,
+  findLocalSourceMedia,
+} from "@/services/sourceMediaRepairService";
 
 const MIN_SEGMENT_SECONDS = 3;
 
@@ -73,10 +78,7 @@ export async function saveSourceMedia(streamSessionId: string, file: File) {
 }
 
 export async function processVideoIncremental(streamSessionId: string) {
-  const sourceMedia = await prisma.sourceMedia.findFirst({
-    where: { streamSessionId },
-    orderBy: { createdAt: "desc" },
-  });
+  const sourceMedia = await findLocalSourceMedia(streamSessionId);
   if (!sourceMedia) return { skipped: true, reason: "no_media" };
 
   const recorded = sourceMedia.durationSeconds ?? 0;
@@ -127,12 +129,11 @@ export async function processVideoIncremental(streamSessionId: string) {
 }
 
 export async function processVideo(streamSessionId: string) {
-  const sourceMedia = await prisma.sourceMedia.findFirst({
-    where: { streamSessionId },
-    orderBy: { createdAt: "desc" },
-  });
-  if (!sourceMedia) {
-    throw new Error("Source video not ready. Wait for YouTube download to finish.");
+  const sourceMedia = await ensureLocalSourceMedia(streamSessionId);
+  if (!sourceMedia?.filePath || !fileExists(sourceMedia.filePath)) {
+    throw new Error(
+      "Source video not ready. Download or record the source again before processing."
+    );
   }
 
   const { generateTranscript } = await import("@/services/transcriptService");

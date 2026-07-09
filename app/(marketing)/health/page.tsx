@@ -13,6 +13,13 @@ interface RuntimeHealth {
   whisperConfigured?: boolean;
   storageRoot?: string;
   storageWritable?: boolean;
+  databaseConfigured?: boolean;
+  billingConfigured?: boolean;
+  stripeSecretConfigured?: boolean;
+  stripeWebhookConfigured?: boolean;
+  stripePricesConfigured?: boolean;
+  stripeMissingEnvVars?: string[];
+  stripeInvalidPriceEnvVars?: string[];
   nodeEnv?: string;
   issues?: string[];
   error?: string;
@@ -103,6 +110,14 @@ export default function HealthPage() {
               </div>
 
               <div className="grid gap-2">
+                <StatusPill
+                  ok={Boolean(health.databaseConfigured)}
+                  label="Database URL"
+                />
+                <StatusPill
+                  ok={Boolean(health.billingConfigured)}
+                  label="Stripe billing"
+                />
                 <StatusPill ok={Boolean(health.ffmpeg)} label="FFmpeg" />
                 <StatusPill ok={Boolean(health.ytDlp)} label="yt-dlp" />
                 <StatusPill
@@ -124,6 +139,26 @@ export default function HealthPage() {
                   Storage root: <code className="text-white/80">{health.storageRoot}</code>
                 </p>
               )}
+
+              {health.stripeMissingEnvVars &&
+                health.stripeMissingEnvVars.length > 0 && (
+                  <p className="text-xs leading-6 text-[var(--color-muted)]">
+                    Missing Stripe vars:{" "}
+                    <code className="text-white/80">
+                      {health.stripeMissingEnvVars.join(", ")}
+                    </code>
+                  </p>
+                )}
+
+              {health.stripeInvalidPriceEnvVars &&
+                health.stripeInvalidPriceEnvVars.length > 0 && (
+                  <p className="text-xs leading-6 text-[var(--color-muted)]">
+                    Invalid Stripe price IDs:{" "}
+                    <code className="text-white/80">
+                      {health.stripeInvalidPriceEnvVars.join(", ")}
+                    </code>
+                  </p>
+                )}
 
               {health.issues && health.issues.length > 0 && (
                 <div className="space-y-2">

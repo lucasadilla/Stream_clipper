@@ -161,8 +161,11 @@ Checkout sessions are created with `managed_payments.enabled=true` using Stripe 
    - `FFMPEG_PATH=ffmpeg`, `FFPROBE_PATH=ffprobe`, `YT_DLP_PATH=yt-dlp`
    - `OPENROUTER_API_KEY` or `OPENAI_API_KEY`
    - `YOUTUBE_API_KEY`
-   - Stripe + `UNLIMITED_ACCESS_EMAILS` as needed
-5. Redeploy, then verify **`/api/health`** shows `"ffmpeg":true,"ytDlp":true`.
+   - Stripe keys and real `price_...` IDs for every `STRIPE_PRICE_*` var
+5. Do not copy local Windows paths like `C:\...\ffmpeg.exe` into Railway. The Docker image already installs Linux `ffmpeg`, `ffprobe`, and `yt-dlp`; use the bare command names above.
+6. Redeploy, then verify **`/health`** or **`/api/health`** shows database, Stripe billing, FFmpeg, yt-dlp, AI, Whisper, and storage as ready.
+
+If Railway can load the page but transcription/rendering do nothing, check `/health` first. Missing Stripe config blocks the paid app gates; missing FFmpeg/yt-dlp blocks media download, audio extraction, thumbnails, and renders.
 
 ## Architecture Notes
 

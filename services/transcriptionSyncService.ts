@@ -29,6 +29,7 @@ import {
   isWhisperAvailable,
   transcribeWhisperAudio,
 } from "@/services/whisperTranscription";
+import { ensureLocalSourceMedia } from "@/services/sourceMediaRepairService";
 
 const MIN_SEGMENT_SECONDS = 3;
 /** Give a failing range this many tries before permanently skipping it. */
@@ -592,16 +593,19 @@ async function runSyncTranscription(
   options: TranscriptionSyncOptions
 ): Promise<TranscriptionSyncResult> {
 
-  const sourceMedia = await prisma.sourceMedia.findFirst({
-    where: { streamSessionId },
-    orderBy: { createdAt: "desc" },
-  });
+  const sourceMedia = await ensureLocalSourceMedia(streamSessionId);
   if (!sourceMedia) return { skipped: true, reason: "no_media" };
 
-  const inputPath = await resolveSourceForTranscription(
+  let inputPath = await resolveSourceForTranscription(
     streamSessionId,
     sourceMedia
   );
+  if (!inputPath) {
+    const repairedSourceMedia = await ensureLocalSourceMedia(streamSessionId);
+    inputPath = repairedSourceMedia
+      ? await resolveSourceForTranscription(streamSessionId, repairedSourceMedia)
+      : null;
+  }
   if (!inputPath) {
     return { skipped: true, reason: "no_file", recordedSeconds: 0 };
   }

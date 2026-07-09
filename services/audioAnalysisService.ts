@@ -15,6 +15,7 @@ import {
 import { existsSync } from "fs";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
+import { findLocalSourceMedia } from "@/services/sourceMediaRepairService";
 
 export interface AudioVolumeSample {
   timeSeconds: number;
@@ -99,10 +100,7 @@ async function mergeWaveformSegment(
 }
 
 export async function syncSessionAudioAnalysis(streamSessionId: string) {
-  const sourceMedia = await prisma.sourceMedia.findFirst({
-    where: { streamSessionId },
-    orderBy: { createdAt: "desc" },
-  });
+  const sourceMedia = await findLocalSourceMedia(streamSessionId);
   if (!sourceMedia?.filePath) {
     return { eventsAdded: 0, analyzed: false, reason: "no_source" as const };
   }

@@ -9,6 +9,7 @@ import {
   ensureDir,
   toRelativeStoragePath,
   findBestSourceFileInDir,
+  fileExists,
 } from "@/lib/storage";
 import { getYtDlpInvocationCandidates, type YtDlpInvocation } from "@/lib/ytDlp";
 
@@ -191,7 +192,12 @@ export async function downloadSourceFromYouTube(streamSessionId: string) {
 
   // Skip if already downloaded (not an in-progress live buffer)
   const existing = session.sourceMedia[0];
-  if (existing && !existing.isLiveRecording && (existing.durationSeconds ?? 0) > 0) {
+  if (
+    existing &&
+    !existing.isLiveRecording &&
+    (existing.durationSeconds ?? 0) > 0 &&
+    fileExists(existing.filePath)
+  ) {
     return existing;
   }
 

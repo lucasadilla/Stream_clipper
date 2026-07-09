@@ -4,6 +4,7 @@ import { getStorageRoot, ensureDir } from "@/lib/storage";
 import { isYtDlpAvailable, getLastYtDlpProbeError } from "@/services/youtubeDownloadService";
 import { getYtDlpPathCandidates } from "@/lib/ytDlp";
 import { isWhisperAvailable } from "@/services/whisperTranscription";
+import { PRICING_PLANS } from "@/lib/pricing";
 import path from "path";
 import fs from "fs/promises";
 
@@ -15,6 +16,13 @@ export interface RuntimeHealthReport {
   whisperConfigured: boolean;
   storageRoot: string;
   storageWritable: boolean;
+  databaseConfigured: boolean;
+  billingConfigured: boolean;
+  stripeSecretConfigured: boolean;
+  stripeWebhookConfigured: boolean;
+  stripePricesConfigured: boolean;
+  stripeMissingEnvVars: string[];
+  stripeInvalidPriceEnvVars: string[];
   nodeEnv: string;
   ffmpegPath: string;
   ffprobePath: string;
@@ -22,6 +30,20 @@ export interface RuntimeHealthReport {
   ytDlpPathCandidates: string[];
   ytDlpProbeError: string | null;
   issues: string[];
+}
+
+function hasEnv(name: string): boolean {
+  return Boolean(process.env[name]?.trim());
+}
+
+function isStripePriceId(name: string): boolean {
+  return /^price_/.test(process.env[name]?.trim() ?? "");
+}
+
+function getRequiredStripePriceEnvVars(): string[] {
+  return PRICING_PLANS.flatMap((plan) =>
+    Object.values(plan.stripePriceEnvVars ?? {})
+  );
 }
 
 export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
@@ -45,7 +67,42 @@ export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
     isYtDlpAvailable(),
   ]);
 
+  const stripeMissingEnvVars = [
+    "STRIPE_SECRET_KEY",
+    "STRIPE_WEBHOOK_SECRET",
+    ...getRequiredStripePriceEnvVars(),
+  ].filter((name) => !hasEnv(name));
+  const stripeInvalidPriceEnvVars = getRequiredStripePriceEnvVars().filter(
+    (name) => hasEnv(name) && !isStripePriceId(name)
+  );
+  const databaseConfigured = hasEnv("DATABASE_URL");
+  const stripeSecretConfigured = hasEnv("STRIPE_SECRET_KEY");
+  const stripeWebhookConfigured = hasEnv("STRIPE_WEBHOOK_SECRET");
+  const stripePricesConfigured =
+    getRequiredStripePriceEnvVars().every(hasEnv) &&
+    stripeInvalidPriceEnvVars.length === 0;
+  const billingConfigured =
+    stripeSecretConfigured && stripeWebhookConfigured && stripePricesConfigured;
+
   const issues: string[] = [];
+  if (!databaseConfigured) {
+    issues.push("Set DATABASE_URL so sessions, transcripts, usage, and render jobs can be saved.");
+  }
+  if (!billingConfigured) {
+    const billingProblems = [
+      stripeMissingEnvVars.length > 0
+        ? `missing: ${stripeMissingEnvVars.join(", ")}`
+        : null,
+      stripeInvalidPriceEnvVars.length > 0
+        ? `invalid price IDs: ${stripeInvalidPriceEnvVars.join(", ")}`
+        : null,
+    ]
+      .filter(Boolean)
+      .join("; ");
+    issues.push(
+      `Stripe billing is not fully configured (${billingProblems}). Without a paid billing account cookie, session creation, transcription, and rendering are blocked.`
+    );
+  }
   if (!ffmpeg) {
     issues.push(
       "FFmpeg not found. Install ffmpeg on the server or set FFMPEG_PATH / FFPROBE_PATH."
@@ -77,6 +134,13 @@ export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
     whisperConfigured: isWhisperAvailable(),
     storageRoot,
     storageWritable,
+    databaseConfigured,
+    billingConfigured,
+    stripeSecretConfigured,
+    stripeWebhookConfigured,
+    stripePricesConfigured,
+    stripeMissingEnvVars,
+    stripeInvalidPriceEnvVars,
     nodeEnv: process.env.NODE_ENV ?? "development",
     ffmpegPath: getFfmpegPath(),
     ffprobePath: getFfprobePath(),
