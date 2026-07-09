@@ -54,6 +54,7 @@ model BillingAccount {
   stripeSubscriptionId   String?  @unique
   plan                   String
   status                 String   @default("incomplete")
+  unlimitedAccess        Boolean  @default(false)
   currentPeriodEnd       DateTime?
   cancelAtPeriodEnd      Boolean  @default(false)
   createdAt              DateTime @default(now())
@@ -63,6 +64,7 @@ model BillingAccount {
 
   @@index([status])
   @@index([plan])
+  @@index([email])
 }
 
 model LiveRecordingState {

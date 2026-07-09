@@ -6,7 +6,7 @@ import {
 } from "@/lib/pricing";
 import {
   getBillingAccount,
-  isActiveBillingStatus,
+  hasAppAccess,
   serializeBillingAccount,
   type BillingAccountSummary,
 } from "@/services/billingService";
@@ -79,16 +79,37 @@ function billingRequiredSnapshot(periodStart: Date, periodEnd: Date): UsageSnaps
   };
 }
 
+function unlimitedEntitlements(): PlanEntitlements {
+  return {
+    plan: "studio",
+    processingHoursLimit: null,
+    exportsLimit: null,
+    storageRetentionDays: null,
+    maxResolution: "custom",
+    watermarkEnabled: false,
+    priorityQueue: true,
+    seatLimit: null,
+    streamStartsLimit: null,
+  };
+}
+
 export async function getUsageSnapshot(
   billingAccountId: string | null | undefined
 ): Promise<UsageSnapshot> {
   const { periodStart, periodEnd } = monthWindow();
   const account = await getBillingAccount(billingAccountId);
-  if (!account || !isActiveBillingStatus(account.status)) {
+  if (!account || !hasAppAccess(account)) {
     return billingRequiredSnapshot(periodStart, periodEnd);
   }
 
   const plan = getPricingPlan(account.plan);
+  const entitlements = account.unlimitedAccess
+    ? unlimitedEntitlements()
+    : {
+        ...plan.entitlements,
+        processingHoursLimit: withOverageHours(plan.entitlements.processingHoursLimit),
+        exportsLimit: withOverageExports(plan.entitlements.exportsLimit),
+      };
 
   const [sessions, sourceMedia, renderedExports, transcriptChunks, eventWindows] =
     await Promise.all([
@@ -148,11 +169,7 @@ export async function getUsageSnapshot(
   return {
     billingAccount: serializeBillingAccount(account),
     plan,
-    entitlements: {
-      ...plan.entitlements,
-      processingHoursLimit: withOverageHours(plan.entitlements.processingHoursLimit),
-      exportsLimit: withOverageExports(plan.entitlements.exportsLimit),
-    },
+    entitlements,
     usage: {
       periodStart: periodStart.toISOString(),
       periodEnd: periodEnd.toISOString(),

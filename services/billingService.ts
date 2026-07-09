@@ -21,6 +21,7 @@ export interface BillingAccountSummary {
   email: string | null;
   plan: PlanId;
   status: string;
+  unlimitedAccess: boolean;
   stripeCustomerId: string;
   stripeSubscriptionId: string | null;
   currentPeriodEnd: string | null;
@@ -40,11 +41,21 @@ export function isActiveBillingStatus(status: string | null | undefined) {
   return status === "active" || status === "trialing";
 }
 
+export function hasAppAccess(account: {
+  status: string;
+  unlimitedAccess?: boolean;
+} | null | undefined): boolean {
+  if (!account) return false;
+  if (account.unlimitedAccess) return true;
+  return isActiveBillingStatus(account.status);
+}
+
 export function serializeBillingAccount(account: {
   id: string;
   email: string | null;
   plan: string;
   status: string;
+  unlimitedAccess?: boolean;
   stripeCustomerId: string;
   stripeSubscriptionId: string | null;
   currentPeriodEnd: Date | null;
@@ -55,6 +66,7 @@ export function serializeBillingAccount(account: {
     email: account.email,
     plan: getPricingPlan(account.plan).id,
     status: account.status,
+    unlimitedAccess: account.unlimitedAccess ?? false,
     stripeCustomerId: account.stripeCustomerId,
     stripeSubscriptionId: account.stripeSubscriptionId,
     currentPeriodEnd: account.currentPeriodEnd?.toISOString() ?? null,

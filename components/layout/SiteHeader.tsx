@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { SiteLogo } from "@/components/layout/SiteLogo";
+import { AccountMenu } from "@/components/AccountMenu";
 import { cn } from "@/lib/utils";
 
 const NAV_LINKS = [
@@ -34,6 +35,7 @@ export function SiteHeader() {
         </nav>
 
         <div className="flex items-center gap-2">
+          <AccountMenu />
           {onHome ? (
             <a
               href="#analyze"
