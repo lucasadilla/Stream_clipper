@@ -12,6 +12,49 @@ export function getFfprobePath(): string {
   return process.env.FFPROBE_PATH ?? "ffprobe";
 }
 
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** Limit ffmpeg RAM on small hosts (Railway hobby, etc.). Default on in production. */
+export function isFfmpegLowMemoryMode(): boolean {
+  const configured = process.env.FFMPEG_LOW_MEMORY?.trim().toLowerCase();
+  if (configured === "1" || configured === "true" || configured === "yes") return true;
+  if (configured === "0" || configured === "false" || configured === "no") return false;
+  return process.env.NODE_ENV === "production";
+}
+
+export function getFfmpegThreadCount(): number {
+  const configured = process.env.FFMPEG_THREADS?.trim();
+  if (configured) return parsePositiveInt(configured, 1);
+  return isFfmpegLowMemoryMode() ? 1 : 0;
+}
+
+function getRenderMaxSourceHeight(): number {
+  return parsePositiveInt(process.env.RENDER_MAX_SOURCE_HEIGHT?.trim(), 1080);
+}
+
+function getRenderVerticalHeight(): number {
+  return parsePositiveInt(process.env.RENDER_VERTICAL_HEIGHT?.trim(), 1920);
+}
+
+function x264MemoryArgs(): string[] {
+  if (!isFfmpegLowMemoryMode()) return [];
+  return ["-x264-params", "ref=1:bframes=0:rc-lookahead=10"];
+}
+
+export function formatFfmpegProcessError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/out of memory|cannot allocate memory|killed|sigkill|\boom\b/i.test(message)) {
+    return (
+      "Render ran out of server memory. Try a shorter clip, turn off burned captions, " +
+      "or set FFMPEG_LOW_MEMORY=1 and FFMPEG_THREADS=1. On Railway, upgrade RAM if needed."
+    );
+  }
+  return message;
+}
+
 export async function isFfmpegAvailable(): Promise<boolean> {
   try {
     await runCommand(getFfmpegPath(), ["-version"]);
@@ -443,6 +486,7 @@ async function encodeWithFilters(options: {
   outputHeight: number;
   withAudio: boolean;
 }): Promise<void> {
+  const lowMemory = isFfmpegLowMemoryMode();
   const args = [
     "-y",
     "-nostdin",
@@ -450,6 +494,12 @@ async function encodeWithFilters(options: {
     "error",
     "-i",
     options.inputPath,
+    "-map",
+    "0:v:0?",
+    "-map",
+    "0:a:0?",
+    "-sn",
+    "-dn",
     "-vf",
     options.vf,
     "-c:v",
@@ -457,10 +507,15 @@ async function encodeWithFilters(options: {
     "-preset",
     renderPreset(),
     "-crf",
-    "24",
+    lowMemory ? "26" : "24",
     "-threads",
-    "0",
+    String(getFfmpegThreadCount()),
+    ...x264MemoryArgs(),
   ];
+
+  if (lowMemory) {
+    args.push("-filter_threads", "1", "-max_muxing_queue_size", "1024");
+  }
 
   if (options.withAudio) {
     args.push("-c:a", "aac", "-b:a", "128k");
@@ -472,6 +527,36 @@ async function encodeWithFilters(options: {
   await runCommand(getFfmpegPath(), args);
 }
 
+/** Downscale 4K+ cuts before vertical encode to avoid OOM on small containers. */
+async function maybeDownscaleSourceForMemory(
+  inputPath: string,
+  outputPath: string
+): Promise<string> {
+  if (!isFfmpegLowMemoryMode()) return inputPath;
+
+  let probe: MediaProbeResult;
+  try {
+    probe = await probeMedia(inputPath);
+  } catch {
+    return inputPath;
+  }
+
+  const maxHeight = getRenderMaxSourceHeight();
+  const maxWidth = maxHeight * 2;
+  if (probe.height <= maxHeight && probe.width <= maxWidth) {
+    return inputPath;
+  }
+
+  await encodeWithFilters({
+    inputPath,
+    outputPath,
+    vf: `scale=-2:${maxHeight}:flags=fast_bilinear`,
+    outputHeight: maxHeight,
+    withAudio: true,
+  });
+  return outputPath;
+}
+
 export async function renderShort(options: RenderShortOptions): Promise<void> {
   const {
     inputPath,
@@ -480,13 +565,20 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
     endTimeSeconds,
     format = "vertical",
     layout,
-    width = 1080,
-    height = 1920,
+    width: widthOption,
+    height: heightOption,
     srtPath,
     subtitleFormat = format,
-    outputHeight = format === "vertical" ? height : 1080,
+    outputHeight: outputHeightOption,
     captionAppearance,
   } = options;
+
+  const verticalHeight = getRenderVerticalHeight();
+  const verticalWidth = Math.round((verticalHeight * 9) / 16);
+  const width = widthOption ?? (format === "vertical" ? verticalWidth : 1080);
+  const height = heightOption ?? (format === "vertical" ? verticalHeight : 1920);
+  const outputHeight =
+    outputHeightOption ?? (format === "vertical" ? height : 1080);
 
   const duration = endTimeSeconds - startTimeSeconds;
   if (duration <= 0) throw new Error("Invalid clip duration");
@@ -500,13 +592,18 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
 
   const fs = await import("fs/promises");
   const tempCut = `${outputPath}.cut.mp4`;
+  const tempFiles = [tempCut];
 
   try {
     await fastCutSegment(inputPath, tempCut, startTimeSeconds, duration);
 
+    const memcapPath = `${outputPath}.memcap.mp4`;
+    const encodeInput = await maybeDownscaleSourceForMemory(tempCut, memcapPath);
+    if (encodeInput !== tempCut) tempFiles.push(encodeInput);
+
     if (format === "native" && srtPath) {
       await encodeWithFilters({
-        inputPath: tempCut,
+        inputPath: encodeInput,
         outputPath,
         vf: subtitleFilter(srtPath, subtitleFormat, outputHeight, captionAppearance),
         outputHeight,
@@ -529,13 +626,15 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
     }
 
     await encodeWithFilters({
-      inputPath: tempCut,
+      inputPath: encodeInput,
       outputPath,
       vf,
       outputHeight: height,
       withAudio: true,
     });
   } finally {
-    await fs.unlink(tempCut).catch(() => {});
+    for (const file of tempFiles) {
+      await fs.unlink(file).catch(() => {});
+    }
   }
 }

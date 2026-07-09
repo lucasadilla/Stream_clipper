@@ -2,7 +2,7 @@ import path from "path";
 import fs from "fs/promises";
 import { existsSync } from "fs";
 import { prisma } from "@/lib/db";
-import { renderShort as ffmpegRender, isFfmpegAvailable } from "@/lib/ffmpeg";
+import { renderShort as ffmpegRender, isFfmpegAvailable, formatFfmpegProcessError } from "@/lib/ffmpeg";
 import { generateSrt } from "@/lib/time";
 import { formatCaptionTextForBurn } from "@/lib/captionStyles";
 import { buildCaptionTrack } from "@/lib/captionTrack";
@@ -227,9 +227,9 @@ export async function renderShort(params: RenderShortParams) {
     const result = await executeRenderJob(jobId, params);
     return { jobId, outputPath: result.outputPath };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = formatFfmpegProcessError(error);
     await failRenderJob(jobId, message);
-    throw error;
+    throw new Error(message);
   }
 }
 

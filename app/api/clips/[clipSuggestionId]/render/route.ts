@@ -7,6 +7,7 @@ import {
 } from "@/services/renderService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import { parseRenderFormat } from "@/lib/renderFormat";
+import { formatFfmpegProcessError } from "@/lib/ffmpeg";
 import { normalizeCaptionAppearance, type CaptionAppearance } from "@/lib/captionAppearance";
 import { canRenderExport } from "@/services/usageService";
 import { getBillingAccountIdFromRequest } from "@/services/billingService";
@@ -83,7 +84,7 @@ export async function POST(
     try {
       await executeRenderJob(jobId, renderParams);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Render failed";
+      const message = formatFfmpegProcessError(error);
       await failRenderJob(jobId, message);
       return errorResponse(message, 500);
     }

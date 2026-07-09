@@ -29,6 +29,9 @@ ENV STORAGE_ROOT=/app/storage
 ENV FFMPEG_PATH=ffmpeg
 ENV FFPROBE_PATH=ffprobe
 ENV YT_DLP_PATH=yt-dlp
+ENV FFMPEG_LOW_MEMORY=1
+ENV FFMPEG_THREADS=1
+ENV NODE_OPTIONS=--max-old-space-size=384
 
 RUN mkdir -p /app/storage
 
