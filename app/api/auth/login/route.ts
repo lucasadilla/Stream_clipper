@@ -3,6 +3,7 @@ import { z } from "zod";
 import { BILLING_ACCOUNT_COOKIE } from "@/lib/stripe";
 import { loginWithEmail } from "@/services/accessService";
 import { errorResponse, parseRequestJson } from "@/lib/utils";
+import { getPostHogClient } from "@/lib/posthog-server";
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -25,6 +26,15 @@ export async function POST(request: NextRequest) {
     if (!body) return errorResponse("Request body required", 400);
     const { email, inviteCode } = loginSchema.parse(body);
     const result = await loginWithEmail({ email, inviteCode });
+
+    const posthog = getPostHogClient();
+    posthog.identify({
+      distinctId: result.account.id,
+      properties: {
+        email: result.account.email,
+        unlimited_access: result.unlimitedAccess,
+      },
+    });
 
     const response = NextResponse.json({
       account: result.account,

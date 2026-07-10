@@ -4,6 +4,7 @@ import {
   syncBillingAccountFromSubscription,
   upsertBillingAccountFromCheckout,
 } from "@/services/billingService";
+import { getPostHogClient } from "@/lib/posthog-server";
 
 export const runtime = "nodejs";
 
@@ -30,9 +31,17 @@ export async function POST(request: NextRequest) {
   try {
     switch (event.type) {
       case "checkout.session.completed":
-      case "checkout.session.async_payment_succeeded":
-        await upsertBillingAccountFromCheckout(event.data.object);
+      case "checkout.session.async_payment_succeeded": {
+        const account = await upsertBillingAccountFromCheckout(event.data.object);
+        getPostHogClient().capture({
+          distinctId: account.id,
+          event: "subscription_activated",
+          properties: {
+            stripe_event_type: event.type,
+          },
+        });
         break;
+      }
       case "checkout.session.async_payment_failed":
         console.warn(
           "[stripe/webhook] async checkout payment failed:",
