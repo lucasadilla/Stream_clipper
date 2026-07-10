@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import posthog from "posthog-js";
 import { fetchJson } from "@/lib/apiClient";
 import { normalizeUserStreamUrl, parseStreamUrl } from "@/lib/streamPlatform";
 import { cn } from "@/lib/utils";
@@ -41,6 +42,7 @@ export function StreamUrlInput() {
 
       if (!ok) throw new Error(data.error ?? "Failed to create session");
       if (!data.session?.id) throw new Error("Failed to create session");
+      posthog.capture("stream_url_submitted");
       window.location.assign(`/sessions/${data.session.id}`);
       return;
     } catch (err) {

@@ -11,6 +11,7 @@ import {
   ensureSessionBillingAccess,
   SessionAccessError,
 } from "@/services/sessionAccessService";
+import { getPostHogClient } from "@/lib/posthog-server";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -56,6 +57,16 @@ export async function POST(
       session.liveStatus === "live" || session.liveStatus === "upcoming";
 
     const result = await syncTranscription(sessionId, { isLive });
+    if (billingAccountId) {
+      getPostHogClient().capture({
+        distinctId: billingAccountId,
+        event: "transcription_completed",
+        properties: {
+          session_id: sessionId,
+          is_live: isLive,
+        },
+      });
+    }
     return jsonResponse({ success: true, cleared, ...result });
   } catch (error) {
     const message =

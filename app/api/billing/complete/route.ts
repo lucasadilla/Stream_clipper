@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { BILLING_ACCOUNT_COOKIE, getStripe } from "@/lib/stripe";
 import { upsertBillingAccountFromCheckout } from "@/services/billingService";
+import { getPostHogClient } from "@/lib/posthog-server";
 
 export async function GET(request: NextRequest) {
   const sessionId = request.nextUrl.searchParams.get("session_id");
@@ -16,6 +17,10 @@ export async function GET(request: NextRequest) {
       expand: ["customer", "subscription"],
     });
     const account = await upsertBillingAccountFromCheckout(session);
+    getPostHogClient().capture({
+      distinctId: account.id,
+      event: "subscription_checkout_completed",
+    });
     redirectUrl.searchParams.set("billing", "success");
 
     const response = NextResponse.redirect(redirectUrl);

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import posthog from "posthog-js";
 import { fetchJson } from "@/lib/apiClient";
 import type { BillingInterval, PlanId } from "@/lib/pricing";
 
@@ -15,6 +16,7 @@ export function BillingPlanButton({ planId }: BillingPlanButtonProps) {
   async function startCheckout(interval: BillingInterval) {
     setLoading(interval);
     setError(null);
+    posthog.capture("checkout_started", { plan_id: planId, interval });
     try {
       const { ok, data } = await fetchJson<{ url?: string; error?: string }>(
         "/api/billing/checkout",

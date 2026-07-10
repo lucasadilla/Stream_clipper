@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import posthog from "posthog-js";
 import { createPortal } from "react-dom";
 import Link from "next/link";
 import { formatSeconds, formatDuration } from "@/lib/time";
@@ -160,6 +161,7 @@ export function RenderClipModal({
 
   function downloadClipFile(url: string, filename: string) {
     setError(null);
+    posthog.capture("clip_downloaded", { format });
     triggerDirectFileDownload(url, filename);
     setDownloadDone(true);
   }
@@ -170,6 +172,11 @@ export function RenderClipModal({
     setExportStep("saving");
     setExportProgress(0);
     setError(null);
+    posthog.capture("clip_render_started", {
+      format,
+      duration_seconds: duration,
+      burn_captions: burnCaptions,
+    });
     try {
       const clipTitle = title.trim() || `Clip ${formatSeconds(selection.start)}`;
       const clip = await saveClip(sessionId, selection, clipTitle);
@@ -200,6 +207,11 @@ export function RenderClipModal({
       setDownloadFilename(filename);
       setExportProgress(100);
       setPhase("done");
+      posthog.capture("clip_exported", {
+        format,
+        duration_seconds: duration,
+        burn_captions: burnCaptions,
+      });
       onClipCreated?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Render failed");
@@ -231,6 +243,7 @@ export function RenderClipModal({
     setPublishBusy(destination);
     setPublishStatus(null);
     setError(null);
+    posthog.capture("clip_publish_opened", { destination, format });
     try {
       const result = await publishHalfStep(destination, uploadCopy, title);
       const label = destinationLabel(destination);
@@ -240,6 +253,7 @@ export function RenderClipModal({
           : `${label} opened - paste your title manually`
       );
     } catch (err) {
+      posthog.captureException(err);
       setError(err instanceof Error ? err.message : "Publish step failed");
     } finally {
       setPublishBusy(null);
