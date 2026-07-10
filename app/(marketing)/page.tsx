@@ -3,7 +3,7 @@ import { ParticleEditingHero } from "@/components/ParticleEditingHero";
 import { SessionStorageList } from "@/components/SessionStorageList";
 import { StreamUrlInput } from "@/components/YouTubeUrlInput";
 import { BillingPlanButton } from "@/components/BillingPlanButton";
-import { PRICING_PLANS, USAGE_PACKS } from "@/lib/pricing";
+import { PRICING_PLANS } from "@/lib/pricing";
 
 export const metadata: Metadata = {
   alternates: { canonical: "/" },
@@ -363,30 +363,17 @@ export default function HomePage() {
             ))}
           </div>
 
-          <div className="mt-8 grid gap-px overflow-hidden border border-[var(--color-card-border)] bg-[var(--color-card-border)] lg:grid-cols-[0.8fr_1.2fr]">
-            <div className="bg-[#071007] p-6 sm:p-8">
-              <p className="text-xs font-semibold uppercase text-[var(--color-accent)]">
-                Overage packs
-              </p>
-              <h3 className="mt-4 text-4xl font-semibold leading-none text-white sm:text-5xl">
-                Keep shipping when the month gets hot.
-              </h3>
-            </div>
-            <div className="grid gap-px bg-[var(--color-card-border)] sm:grid-cols-2">
-              {USAGE_PACKS.map((pack) => (
-                <div key={pack.id} className="bg-[#050805] p-6 sm:p-8">
-                  <p className="text-3xl font-semibold text-white">
-                    ${pack.price}
-                  </p>
-                  <h4 className="mt-4 text-xl font-semibold text-white">
-                    {pack.name}
-                  </h4>
-                  <p className="mt-3 text-sm leading-6 text-[var(--color-muted)]">
-                    {pack.description}
-                  </p>
-                </div>
-              ))}
-            </div>
+          <div className="mt-8 border border-[var(--color-card-border)] bg-[#071007] p-6 sm:p-8">
+            <p className="text-xs font-semibold uppercase text-[var(--color-accent)]">
+              Need more capacity?
+            </p>
+            <h3 className="mt-4 text-3xl font-semibold text-white sm:text-4xl">
+              Upgrade your plan when you hit the limit.
+            </h3>
+            <p className="mt-4 max-w-2xl text-base leading-7 text-[var(--color-muted)]">
+              Processing hours and exports reset each billing period. Move up to
+              Pro or Studio for more room — no overage packs.
+            </p>
           </div>
         </div>
       </section>

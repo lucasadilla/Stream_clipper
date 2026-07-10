@@ -14,12 +14,17 @@ const createSessionSchema = z.object({
 
 export async function GET(request: NextRequest) {
   try {
+    const billingAccountId = getBillingAccountIdFromRequest(request);
+    if (!billingAccountId) {
+      return jsonResponse({ sessions: [], signedIn: false });
+    }
+
     const limit = Math.min(
       50,
       parseInt(request.nextUrl.searchParams.get("limit") ?? "20", 10) || 20
     );
-    const sessions = await listSessionsWithStorage(limit);
-    return jsonResponse({ sessions });
+    const sessions = await listSessionsWithStorage(limit, billingAccountId);
+    return jsonResponse({ sessions, signedIn: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to list sessions";
     return errorResponse(message, 500);

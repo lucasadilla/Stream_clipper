@@ -50,6 +50,7 @@ model StreamSession {
 model BillingAccount {
   id                     String   @id @default(cuid())
   email                  String?
+  displayName            String?
   stripeCustomerId       String   @unique
   stripeSubscriptionId   String?  @unique
   plan                   String
@@ -57,6 +58,7 @@ model BillingAccount {
   unlimitedAccess        Boolean  @default(false)
   currentPeriodEnd       DateTime?
   cancelAtPeriodEnd      Boolean  @default(false)
+  lastSignedInAt         DateTime?
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 

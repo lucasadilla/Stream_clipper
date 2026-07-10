@@ -42,12 +42,18 @@ export function AccountMenu() {
     );
   }
 
+  const label = account.displayName?.trim() || account.email || "Account";
+
   return (
     <div className="hidden items-center gap-2 sm:flex">
-      <div className="max-w-[10rem] truncate text-xs text-[var(--color-muted)]">
+      <Link
+        href="/profile"
+        className="max-w-[10rem] truncate text-xs text-[var(--color-muted)] hover:text-white transition-colors"
+        title="Open profile"
+      >
         {account.unlimitedAccess ? "∞ " : ""}
-        {account.email ?? "Account"}
-      </div>
+        {label}
+      </Link>
       <button
         type="button"
         onClick={() => void handleLogout()}

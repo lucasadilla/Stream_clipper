@@ -26,6 +26,7 @@ export interface UsageSnapshot {
   plan: PricingPlan | null;
   entitlements: PlanEntitlements | null;
   usage: MonthlyUsage;
+  nearLimit: boolean;
 }
 
 export interface UsageGateResult {
@@ -58,24 +59,13 @@ function numberFromBigInt(value: bigint | number | null | undefined): number {
   return Number(value ?? 0);
 }
 
-function withOverageHours(limit: number | null): number | null {
-  if (limit === null) return null;
-  const overage = Number(process.env.STREAM_CLIPPER_OVERAGE_PROCESSING_HOURS ?? 0);
-  return limit + (Number.isFinite(overage) && overage > 0 ? overage : 0);
-}
-
-function withOverageExports(limit: number | null): number | null {
-  if (limit === null) return null;
-  const overage = Number(process.env.STREAM_CLIPPER_OVERAGE_EXPORTS ?? 0);
-  return limit + (Number.isFinite(overage) && overage > 0 ? overage : 0);
-}
-
 function billingRequiredSnapshot(periodStart: Date, periodEnd: Date): UsageSnapshot {
   return {
     billingAccount: null,
     plan: null,
     entitlements: null,
     usage: emptyUsage(periodStart, periodEnd),
+    nearLimit: false,
   };
 }
 
@@ -93,6 +83,22 @@ function unlimitedEntitlements(): PlanEntitlements {
   };
 }
 
+function isNearLimit(
+  usage: MonthlyUsage,
+  entitlements: PlanEntitlements | null
+): boolean {
+  if (!entitlements) return false;
+  const hoursLimit = entitlements.processingHoursLimit;
+  if (hoursLimit !== null && usage.processedSeconds / 3600 >= hoursLimit * 0.8) {
+    return true;
+  }
+  const exportsLimit = entitlements.exportsLimit;
+  if (exportsLimit !== null && usage.renderedExports >= exportsLimit * 0.8) {
+    return true;
+  }
+  return false;
+}
+
 export async function getUsageSnapshot(
   billingAccountId: string | null | undefined
 ): Promise<UsageSnapshot> {
@@ -105,11 +111,7 @@ export async function getUsageSnapshot(
   const plan = getPricingPlan(account.plan);
   const entitlements = account.unlimitedAccess
     ? unlimitedEntitlements()
-    : {
-        ...plan.entitlements,
-        processingHoursLimit: withOverageHours(plan.entitlements.processingHoursLimit),
-        exportsLimit: withOverageExports(plan.entitlements.exportsLimit),
-      };
+    : plan.entitlements;
 
   const [sessions, sourceMedia, renderedExports, transcriptChunks, eventWindows] =
     await Promise.all([
@@ -166,19 +168,22 @@ export async function getUsageSnapshot(
     0
   );
 
+  const usage: MonthlyUsage = {
+    periodStart: periodStart.toISOString(),
+    periodEnd: periodEnd.toISOString(),
+    streamStarts: sessions.length,
+    processedSeconds: Math.max(sessionSeconds, mediaSeconds),
+    renderedExports,
+    aiRequests: transcriptChunks + eventWindows,
+    storedMediaBytes,
+  };
+
   return {
     billingAccount: serializeBillingAccount(account),
     plan,
     entitlements,
-    usage: {
-      periodStart: periodStart.toISOString(),
-      periodEnd: periodEnd.toISOString(),
-      streamStarts: sessions.length,
-      processedSeconds: Math.max(sessionSeconds, mediaSeconds),
-      renderedExports,
-      aiRequests: transcriptChunks + eventWindows,
-      storedMediaBytes,
-    },
+    usage,
+    nearLimit: !account.unlimitedAccess && isNearLimit(usage, entitlements),
   };
 }
 
@@ -223,7 +228,7 @@ export async function canProcessMoreSeconds(
       return {
         allowed: false,
         status: 402,
-        message: `Your ${snapshot.plan.name} plan includes ${limit} processing hours per month. Add an overage pack or upgrade to keep transcribing.`,
+        message: `Your ${snapshot.plan.name} plan includes ${limit} processing hours per month. Upgrade your plan to keep transcribing.`,
         snapshot,
       };
     }
@@ -242,7 +247,7 @@ export async function canRenderExport(
     return {
       allowed: false,
       status: 402,
-      message: `Your ${snapshot.plan.name} plan includes ${limit} exports per month. Add an export pack or upgrade to render more clips.`,
+      message: `Your ${snapshot.plan.name} plan includes ${limit} exports per month. Upgrade your plan to render more clips.`,
       snapshot,
     };
   }
