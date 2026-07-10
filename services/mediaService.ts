@@ -19,6 +19,7 @@ import {
   ensureLocalSourceMedia,
   findLocalSourceMedia,
 } from "@/services/sourceMediaRepairService";
+import { resolveSourceRecordedSeconds, canAttemptTranscription } from "@/services/liveRecordingService";
 
 const MIN_SEGMENT_SECONDS = 3;
 
@@ -81,8 +82,10 @@ export async function processVideoIncremental(streamSessionId: string) {
   const sourceMedia = await findLocalSourceMedia(streamSessionId);
   if (!sourceMedia) return { skipped: true, reason: "no_media" };
 
-  const recorded = sourceMedia.durationSeconds ?? 0;
-  if (recorded < MIN_SEGMENT_SECONDS) return { skipped: true, reason: "too_short" };
+  const recorded = await resolveSourceRecordedSeconds(streamSessionId);
+  if (!(await canAttemptTranscription(streamSessionId))) {
+    return { skipped: true, reason: "too_short" };
+  }
 
   const session = await prisma.streamSession.findUnique({
     where: { id: streamSessionId },

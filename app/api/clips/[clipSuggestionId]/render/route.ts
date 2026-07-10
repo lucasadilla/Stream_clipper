@@ -16,6 +16,36 @@ import {
   SessionAccessError,
 } from "@/services/sessionAccessService";
 
+interface ClientCaptionCue {
+  startTimeSeconds: number;
+  endTimeSeconds: number;
+  text: string;
+}
+
+function parseCaptionCues(value: unknown): ClientCaptionCue[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value
+    .slice(0, 500)
+    .flatMap((cue) => {
+      if (!cue || typeof cue !== "object") return [];
+      const raw = cue as Record<string, unknown>;
+      const start = raw.startTimeSeconds;
+      const end = raw.endTimeSeconds;
+      const text = typeof raw.text === "string" ? raw.text.trim() : "";
+      if (
+        typeof start !== "number" ||
+        !Number.isFinite(start) ||
+        typeof end !== "number" ||
+        !Number.isFinite(end) ||
+        end <= start ||
+        !text
+      ) {
+        return [];
+      }
+      return [{ startTimeSeconds: start, endTimeSeconds: end, text: text.slice(0, 1000) }];
+    });
+}
+
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
@@ -27,6 +57,9 @@ export async function POST(
     const { clipSuggestionId } = await params;
     const body = await request.json().catch(() => ({}));
     const includeCaptions = (body as { includeCaptions?: boolean }).includeCaptions ?? false;
+    const captionCues = parseCaptionCues(
+      (body as { captionCues?: unknown }).captionCues
+    );
     const format = parseRenderFormat((body as { format?: unknown }).format);
     const captionAppearance = normalizeCaptionAppearance(
       (body as { captionAppearance?: Partial<CaptionAppearance> }).captionAppearance
@@ -79,6 +112,7 @@ export async function POST(
       layout: clip.suggestedLayout as "center_crop",
       includeCaptions,
       captionAppearance,
+      captionCues,
     };
 
     try {

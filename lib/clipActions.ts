@@ -4,6 +4,7 @@ import { formatSeconds } from "@/lib/time";
 import type { RenderFormat } from "@/lib/renderFormat";
 import type { ClipSelection } from "@/components/LiveTimeline";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
+import type { CaptionCue } from "@/lib/captionTrack";
 
 export interface RenderProgressUpdate {
   progress: number;
@@ -35,6 +36,7 @@ export async function renderClip(
   format: RenderFormat = "vertical",
   includeCaptions = true,
   captionAppearance?: CaptionAppearance,
+  captionCues?: CaptionCue[],
   onProgress?: (update: RenderProgressUpdate) => void
 ) {
   onProgress?.({ progress: 20, status: "processing" });
@@ -42,7 +44,12 @@ export async function renderClip(
   const res = await fetch(`/api/clips/${clipId}/render`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ includeCaptions, format, captionAppearance }),
+    body: JSON.stringify({
+      includeCaptions,
+      format,
+      captionAppearance,
+      captionCues,
+    }),
   });
   const data = (await res.json()) as {
     jobId?: string;
@@ -78,6 +85,7 @@ export async function saveAndRenderClip(
     format,
     includeCaptions,
     captionAppearance,
+    undefined,
     onProgress
   );
   const url = result.downloadUrl ?? clipDownloadUrl(clip.id);

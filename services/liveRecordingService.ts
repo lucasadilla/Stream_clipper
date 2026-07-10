@@ -3,7 +3,7 @@ import fs from "fs/promises";
 import { existsSync } from "fs";
 import { type ChildProcess, spawn, spawnSync } from "child_process";
 import { prisma } from "@/lib/db";
-import { probeMedia } from "@/lib/ffmpeg";
+import { probeMedia, probeMediaDurationBestEffort } from "@/lib/ffmpeg";
 import { toJsonValue } from "@/lib/utils";
 import {
   getUploadDir,
@@ -11,6 +11,7 @@ import {
   toRelativeStoragePath,
   resolveStoragePath,
   findBestSourceFileInDir,
+  listSourceCandidateFiles,
 } from "@/lib/storage";
 import { syncPreviewMp4 } from "@/services/previewVideoService";
 import {
@@ -20,6 +21,58 @@ import {
 
 const LIVE_FORMAT =
   "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best[height<=1080]/best";
+
+const MIN_RECORDED_SECONDS = 3;
+/** Growing live captures below this size are likely still starting up. */
+const MIN_FILE_BYTES_FOR_ESTIMATE = 500_000;
+
+function estimateDurationFromFileSize(sizeBytes: number): number {
+  // Conservative ~300 KB/s for live 1080p-ish capture.
+  return sizeBytes / (300 * 1024);
+}
+
+function recordingElapsedSeconds(startedAt?: Date | null): number {
+  if (!startedAt) return 0;
+  return Math.max(0, (Date.now() - startedAt.getTime()) / 1000);
+}
+
+/** Probe every source.* file — split yt-dlp tracks can disagree on duration. */
+export async function probeUploadDirRecordedSeconds(
+  uploadDir: string
+): Promise<number> {
+  const files = await listSourceCandidateFiles(uploadDir);
+  let best = 0;
+  for (const filePath of files) {
+    try {
+      best = Math.max(best, await probeMediaDurationBestEffort(filePath));
+    } catch {
+      // partial / growing files
+    }
+  }
+  return best;
+}
+
+async function resolveDurationFromFile(
+  absolutePath: string,
+  sizeBytes: number,
+  options?: {
+    knownSeconds?: number;
+  }
+): Promise<number> {
+  let recorded = options?.knownSeconds ?? 0;
+
+  try {
+    recorded = Math.max(recorded, await probeMediaDurationBestEffort(absolutePath));
+  } catch {
+    // partial / growing files
+  }
+
+  if (sizeBytes >= MIN_FILE_BYTES_FOR_ESTIMATE) {
+    recorded = Math.max(recorded, estimateDurationFromFileSize(sizeBytes));
+  }
+
+  return recorded;
+}
 
 /** In-memory handles for active yt-dlp recording processes (dev server). */
 const activeRecordings = new Map<string, ChildProcess>();
@@ -40,7 +93,8 @@ async function upsertSourceFromFile(
   streamSessionId: string,
   absolutePath: string,
   youtubeVideoId: string,
-  isLiveRecording: boolean
+  isLiveRecording: boolean,
+  options?: { durationOverride?: number }
 ) {
   let stat;
   try {
@@ -67,6 +121,12 @@ async function upsertSourceFromFile(
     };
   }
 
+  const durationSeconds =
+    options?.durationOverride ??
+    (await resolveDurationFromFile(absolutePath, stat.size, {
+      knownSeconds: probe.durationSeconds || 0,
+    }));
+
   const existing = await prisma.sourceMedia.findFirst({
     where: { streamSessionId },
     orderBy: { createdAt: "desc" },
@@ -77,7 +137,7 @@ async function upsertSourceFromFile(
     filePath: relativePath,
     mimeType: absolutePath.endsWith(".mkv") ? "video/x-matroska" : "video/mp4",
     sizeBytes: BigInt(stat.size),
-    durationSeconds: probe.durationSeconds || null,
+    durationSeconds: durationSeconds > 0 ? durationSeconds : null,
     isLiveRecording,
     width: probe.width || null,
     height: probe.height || null,
@@ -209,7 +269,8 @@ export async function syncLiveRecording(streamSessionId: string) {
     streamSessionId,
     filePath,
     session.youtubeVideoId,
-    session.liveRecording?.status === "recording"
+    session.liveRecording?.status === "recording",
+    { durationOverride: await probeUploadDirRecordedSeconds(uploadDir) }
   );
 
   if (!sourceMedia) {
@@ -355,6 +416,74 @@ export function getRecordedSecondsForSession(
     liveRecording?.recordedSeconds ?? 0,
     sourceMedia?.durationSeconds ?? 0
   );
+}
+
+/** Best known captured length from files on disk (not stream wall-clock). */
+export async function resolveSourceRecordedSeconds(
+  streamSessionId: string
+): Promise<number> {
+  const session = await prisma.streamSession.findUnique({
+    where: { id: streamSessionId },
+    select: {
+      metadataJson: true,
+      actualStartTime: true,
+      liveStatus: true,
+      sourceMedia: { orderBy: { createdAt: "desc" }, take: 1 },
+      liveRecording: true,
+    },
+  });
+  if (!session) return 0;
+
+  const sourceMedia = session.sourceMedia[0] ?? null;
+  const liveRecording = session.liveRecording;
+  let recorded = getRecordedSecondsForSession(sourceMedia, liveRecording);
+
+  const uploadDir = getUploadDir(streamSessionId);
+  recorded = Math.max(recorded, await probeUploadDirRecordedSeconds(uploadDir));
+
+  if (recorded >= MIN_RECORDED_SECONDS) return recorded;
+
+  const { resolveVideoDurationFromMetadata } = await import("@/lib/youtube");
+  const metadataDuration = resolveVideoDurationFromMetadata(
+    session.metadataJson,
+    {
+      actualStartTime: session.actualStartTime,
+      liveStatus: session.liveStatus,
+    }
+  );
+  if (metadataDuration >= MIN_RECORDED_SECONDS) {
+    recorded = Math.max(recorded, metadataDuration);
+  }
+
+  return recorded;
+}
+
+/** Gate before starting transcription — allows a growing capture to warm up. */
+export async function canAttemptTranscription(
+  streamSessionId: string
+): Promise<boolean> {
+  const recorded = await resolveSourceRecordedSeconds(streamSessionId);
+  if (recorded >= MIN_RECORDED_SECONDS) return true;
+
+  const session = await prisma.streamSession.findUnique({
+    where: { id: streamSessionId },
+    select: { liveRecording: { select: { status: true, startedAt: true } } },
+  });
+  if (
+    session?.liveRecording?.status === "recording" &&
+    recordingElapsedSeconds(session.liveRecording.startedAt) >=
+      MIN_RECORDED_SECONDS
+  ) {
+    return true;
+  }
+
+  const files = await listSourceCandidateFiles(getUploadDir(streamSessionId));
+  for (const filePath of files) {
+    const size = await fs.stat(filePath).then((s) => s.size).catch(() => 0);
+    if (size >= MIN_FILE_BYTES_FOR_ESTIMATE) return true;
+  }
+
+  return false;
 }
 
 /** @deprecated Use ensureClipSourceForRender — kept for live-only guardrails */

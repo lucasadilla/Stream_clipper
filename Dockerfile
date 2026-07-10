@@ -3,12 +3,19 @@ FROM node:20-bookworm-slim AS base
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ffmpeg \
+    fontconfig \
+    fonts-dejavu-core \
+    fonts-freefont-ttf \
+    fonts-liberation \
+    fonts-roboto \
     ca-certificates \
     curl \
     python3 \
     python3-pip \
   && pip3 install --break-system-packages --no-cache-dir yt-dlp \
   && yt-dlp --version \
+  && ffmpeg -hide_banner -filters 2>&1 | grep -q subtitles \
+  && fc-match "Arial" \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

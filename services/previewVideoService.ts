@@ -1,17 +1,22 @@
 import path from "path";
 import { existsSync } from "fs";
-import { stat } from "fs/promises";
-import { getFfmpegPath, runCommand } from "@/lib/ffmpeg";
+import { rename, stat, unlink } from "fs/promises";
+import {
+  getFfmpegPath,
+  hasAudioStream,
+  probeMediaDurationBestEffort,
+  runCommand,
+} from "@/lib/ffmpeg";
 import {
   getUploadDir,
   toRelativeStoragePath,
-  resolveStoragePath,
   fileExists,
+  listSourceCandidateFiles,
 } from "@/lib/storage";
 
 const PREVIEW_FILENAME = "preview.mp4";
 const MIN_PREVIEW_BYTES = 48 * 1024;
-const REMUX_INTERVAL_MS = 12_000;
+const REMUX_INTERVAL_MS = 60_000;
 
 const lastRemuxAt = new Map<string, number>();
 const remuxInFlight = new Set<string>();
@@ -27,7 +32,9 @@ export async function previewMp4Ready(
   if (!existsSync(full)) return false;
   try {
     const s = await stat(full);
-    return s.size >= MIN_PREVIEW_BYTES;
+    if (s.size < MIN_PREVIEW_BYTES) return false;
+    const probe = await probeMediaDurationBestEffort(full);
+    return probe >= 1;
   } catch {
     return false;
   }
@@ -41,7 +48,26 @@ export function getPreviewVideoRelativePath(
 }
 
 /**
+ * Find a companion audio-only yt-dlp track (e.g. source.f140.mkv) when the
+ * primary capture is video-only. Needed so preview A/V matches transcription.
+ */
+async function findCompanionAudioPath(
+  streamSessionId: string,
+  videoPath: string
+): Promise<string | null> {
+  if (await hasAudioStream(videoPath)) return null;
+
+  const candidates = await listSourceCandidateFiles(getUploadDir(streamSessionId));
+  for (const candidate of candidates) {
+    if (candidate === videoPath) continue;
+    if (await hasAudioStream(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
  * Remux the growing capture (usually .mkv) into browser-playable MP4 for preview.
+ * When yt-dlp splits video/audio, merge both so playback stays in sync with Whisper.
  * Throttled — safe to call on every live sync tick.
  */
 export async function syncPreviewMp4(
@@ -60,29 +86,72 @@ export async function syncPreviewMp4(
 
   remuxInFlight.add(streamSessionId);
   const outputPath = getPreviewMp4Path(streamSessionId);
+  const tempPath = `${outputPath}.${process.pid}-${Date.now()}.tmp.mp4`;
 
   try {
-    await runCommand(getFfmpegPath(), [
+    const companionAudio = await findCompanionAudioPath(
+      streamSessionId,
+      sourceAbsolutePath
+    );
+
+    const videoSeconds = await probeMediaDurationBestEffort(
+      sourceAbsolutePath
+    ).catch(() => 0);
+    const audioSeconds = companionAudio
+      ? await probeMediaDurationBestEffort(companionAudio).catch(() => 0)
+      : 0;
+    const readableSeconds = Math.max(videoSeconds, audioSeconds);
+    if (readableSeconds < 1) return;
+
+    const args = [
       "-y",
       "-nostdin",
       "-loglevel",
       "error",
       "-i",
       sourceAbsolutePath,
-      "-map",
-      "0:v:0?",
-      "-map",
-      "0:a:0?",
-      "-c",
-      "copy",
-      "-movflags",
-      "+faststart",
-      outputPath,
-    ]);
+    ];
+
+    if (companionAudio) {
+      // Separate DASH tracks — mux video + audio so captions match what you hear.
+      args.push("-i", companionAudio, "-t", String(readableSeconds));
+      args.push(
+        "-map",
+        "0:v:0?",
+        "-map",
+        "1:a:0?",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+        "-shortest"
+      );
+    } else {
+      args.push(
+        "-t",
+        String(readableSeconds),
+        "-map",
+        "0:v:0?",
+        "-map",
+        "0:a:0?",
+        "-c",
+        "copy"
+      );
+    }
+
+    args.push("-movflags", "+faststart", tempPath);
+
+    await runCommand(getFfmpegPath(), args);
+    // Never expose a half-written MP4. rename() makes the finalized moov atom
+    // and media data visible together to browsers and render jobs.
+    await rename(tempPath, outputPath);
     lastRemuxAt.set(streamSessionId, Date.now());
   } catch {
     // Growing file may be locked or incomplete — retry on next tick.
   } finally {
+    await unlink(tempPath).catch(() => {});
     remuxInFlight.delete(streamSessionId);
   }
 }

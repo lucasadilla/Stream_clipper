@@ -1,6 +1,5 @@
 import path from "path";
 import fs from "fs/promises";
-import { existsSync } from "fs";
 import { prisma } from "@/lib/db";
 import { renderShort as ffmpegRender, isFfmpegAvailable, formatFfmpegProcessError } from "@/lib/ffmpeg";
 import { generateSrt } from "@/lib/time";
@@ -30,6 +29,11 @@ export interface RenderShortParams {
   layout?: "center_crop" | "facecam_overlay" | "facecam_top_gameplay_bottom" | "gameplay_full";
   includeCaptions?: boolean;
   captionAppearance?: CaptionAppearance;
+  captionCues?: Array<{
+    startTimeSeconds: number;
+    endTimeSeconds: number;
+    text: string;
+  }>;
 }
 
 async function updateJobProgress(jobId: string, progress: number) {
@@ -54,6 +58,7 @@ export async function executeRenderJob(
     layout = "center_crop",
     includeCaptions = true,
     captionAppearance = DEFAULT_CAPTION_APPEARANCE,
+    captionCues: clientCaptionCues,
   } = params;
 
   const ffmpegOk = await isFfmpegAvailable();
@@ -102,37 +107,59 @@ export async function executeRenderJob(
 
   if (includeCaptions) {
     await updateJobProgress(jobId, 35);
-    const chunks = await getTranscriptChunksForRange(
-      streamSessionId,
-      startTimeSeconds,
-      endTimeSeconds
+    const clientCues = (clientCaptionCues ?? []).filter(
+      (cue) =>
+        cue.startTimeSeconds <= endTimeSeconds &&
+        cue.endTimeSeconds >= startTimeSeconds
     );
-    if (chunks.length > 0) {
+    const chunks = clientCues.length
+      ? []
+      : await getTranscriptChunksForRange(
+          streamSessionId,
+          startTimeSeconds,
+          endTimeSeconds
+        );
+    if (clientCues.length > 0 || chunks.length > 0) {
       const captionEdits = await readCaptionEdits(streamSessionId);
-      const captionLines = applyCaptionEdits(
-        buildCaptionTrack(
-          chunks
-            .filter((c) => c.text.trim().length > 0)
-            .map((c) => ({
-              id: c.id ?? `chunk-${c.startTimeSeconds}`,
-              startTimeSeconds: c.startTimeSeconds,
-              endTimeSeconds: c.endTimeSeconds,
-              text: c.text,
-              rawJson: c.rawJson,
-            })),
-          format
-        ),
-        captionEdits
-      );
+      const captionLines = clientCues.length
+        ? clientCues.map((cue, index) => ({ ...cue, id: `client-${index}` }))
+        : applyCaptionEdits(
+            buildCaptionTrack(
+              chunks
+                .filter((c) => c.text.trim().length > 0)
+                .map((c) => ({
+                  id: c.id ?? `chunk-${c.startTimeSeconds}`,
+                  startTimeSeconds: c.startTimeSeconds,
+                  endTimeSeconds: c.endTimeSeconds,
+                  text: c.text,
+                  rawJson: c.rawJson,
+                })),
+              format
+            ),
+            captionEdits
+          );
       const srtContent = generateSrt(
-        captionLines.map((c) => ({
-          startTimeSeconds: Math.max(0, c.startTimeSeconds - startTimeSeconds),
-          endTimeSeconds: c.endTimeSeconds - startTimeSeconds,
-          text: formatCaptionTextForBurn(c.text, format),
-        }))
+        captionLines
+          .map((c) => ({
+            startTimeSeconds: Math.max(0, c.startTimeSeconds - startTimeSeconds),
+            endTimeSeconds: Math.min(
+              endTimeSeconds - startTimeSeconds,
+              c.endTimeSeconds - startTimeSeconds
+            ),
+            text: formatCaptionTextForBurn(c.text, format),
+          }))
+          .filter((cue) => cue.endTimeSeconds > cue.startTimeSeconds)
       );
+      if (!srtContent.trim()) {
+        throw new Error("Captions are enabled, but no caption cues overlap this clip.");
+      }
       srtPath = path.join(rendersDir, `clip-${clipId}.srt`);
       await fs.writeFile(srtPath, srtContent);
+    } else {
+      throw new Error(
+        "Captions are enabled, but transcription has not reached this clip yet. " +
+          "Wait until captions appear in the selected timeline range, then render again."
+      );
     }
   }
 

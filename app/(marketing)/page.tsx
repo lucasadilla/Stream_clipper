@@ -1,8 +1,13 @@
+import type { Metadata } from "next";
 import { ParticleEditingHero } from "@/components/ParticleEditingHero";
 import { SessionStorageList } from "@/components/SessionStorageList";
 import { StreamUrlInput } from "@/components/YouTubeUrlInput";
 import { BillingPlanButton } from "@/components/BillingPlanButton";
 import { PRICING_PLANS, USAGE_PACKS } from "@/lib/pricing";
+
+export const metadata: Metadata = {
+  alternates: { canonical: "/" },
+};
 
 const HERO_SIGNALS = ["Live input", "AI transcript", "Fast export"];
 
@@ -15,7 +20,7 @@ const PROCESS = [
   {
     step: "02",
     title: "Locate",
-    desc: "Search transcript, chat, timestamps, and audio spikes instead of dragging through dead air.",
+    desc: "Search transcript, timestamps, and audio spikes instead of dragging through dead air.",
   },
   {
     step: "03",
@@ -40,7 +45,7 @@ const SIGNALS = [
   },
   {
     label: "Momentum",
-    desc: "Chat hype, audio movement, and clip context stay visible while you decide what to post.",
+    desc: "Audio movement and clip context stay visible while you decide what to post.",
   },
 ];
 
@@ -55,9 +60,86 @@ const EXPORTS = [
   },
 ];
 
+const FAQS = [
+  {
+    question: "What is Stream Clipper?",
+    answer:
+      "Stream Clipper is an AI-assisted video editor for turning livestreams and VODs into publishable highlights. It combines transcript search, audio signals, captions, and a synchronized timeline in one workspace.",
+  },
+  {
+    question: "How does Stream Clipper find the best moments in a stream?",
+    answer:
+      "It helps you locate promising moments using searchable transcripts, timestamps, audio movement, and clip context. You stay in control of the final in and out points before export.",
+  },
+  {
+    question: "Can I create YouTube Shorts from a livestream or VOD?",
+    answer:
+      "Yes. Stream Clipper can turn stream moments into vertical 9:16 videos with captions for YouTube Shorts and other short-form platforms. It can also preserve the original 16:9 frame for native highlights.",
+  },
+  {
+    question: "Does Stream Clipper support live streams as well as recorded video?",
+    answer:
+      "Yes. The workflow is designed for both live streams and VODs, so you can begin finding and cutting moments while a stream is active or work from a completed recording.",
+  },
+  {
+    question: "Do I need professional video editing experience?",
+    answer:
+      "No. Paste a supported stream or video URL, jump to moments through the transcript and signals, set the clip boundaries, choose captions and format, then render the MP4.",
+  },
+  {
+    question: "What video formats can I export?",
+    answer:
+      "You can export native 16:9 clips for YouTube highlights and recaps, or vertical 9:16 clips with captions for Shorts and other vertical feeds.",
+  },
+];
+
+const structuredData = {
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "Organization",
+      "@id": "https://streamclipper.app/#organization",
+      name: "Stream Clipper",
+      url: "https://streamclipper.app/",
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://streamclipper.app/#software",
+      name: "Stream Clipper",
+      url: "https://streamclipper.app/",
+      applicationCategory: "MultimediaApplication",
+      operatingSystem: "Web",
+      description:
+        "AI-assisted livestream and VOD editor for finding highlights, adding captions, and exporting 16:9 clips or 9:16 Shorts.",
+      featureList: [
+        "Searchable video transcripts",
+        "Audio signal analysis",
+        "Synchronized video editing timeline",
+        "Automatic captions",
+        "16:9 and 9:16 video export",
+      ],
+      provider: { "@id": "https://streamclipper.app/#organization" },
+    },
+    {
+      "@type": "FAQPage",
+      mainEntity: FAQS.map((item) => ({
+        "@type": "Question",
+        name: item.question,
+        acceptedAnswer: { "@type": "Answer", text: item.answer },
+      })),
+    },
+  ],
+};
+
 export default function HomePage() {
   return (
     <div className="marketing-shell marketing-home overflow-hidden bg-[#020302]">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify(structuredData).replace(/</g, "\\u003c"),
+        }}
+      />
       <section
         className="relative isolate overflow-hidden border-b border-[var(--color-card-border)] bg-[#020302]"
         style={{ minHeight: "calc(86svh - 3.5rem)" }}
@@ -65,9 +147,6 @@ export default function HomePage() {
         <ParticleEditingHero />
         <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(90deg,#020302_0%,rgba(2,3,2,0.97)_28%,rgba(2,3,2,0.16)_64%,rgba(2,3,2,0.34)_100%)]" />
         <div className="pointer-events-none absolute inset-x-0 top-8 overflow-hidden">
-          <p className="marketing-ghost-title translate-x-[-0.08em] whitespace-nowrap">
-            LIVE CUT
-          </p>
         </div>
         <div className="pointer-events-none absolute inset-x-0 bottom-0 h-32 bg-[linear-gradient(0deg,#020302_8%,rgba(2,3,2,0))]" />
 
@@ -187,12 +266,10 @@ export default function HomePage() {
         <div className="mx-auto max-w-[1440px] px-4 py-16 sm:px-6 lg:px-8 lg:py-24">
           <div className="grid gap-10 lg:grid-cols-[1fr_1fr] lg:items-end">
             <h2 className="marketing-display-title max-w-5xl font-semibold text-white">
-              Export before the feed moves on.
+              Beat the feed.
             </h2>
             <p className="max-w-2xl text-xl leading-8 text-[var(--color-muted)] sm:text-2xl sm:leading-9">
-              The workspace stays pointed at one job: turn a stream URL into a
-              finished clip without losing the context that made it worth
-              clipping.
+              Turn a stream URL into a finished clip without losing the moment.
             </p>
           </div>
 
@@ -225,14 +302,12 @@ export default function HomePage() {
                 SaaS pricing
               </p>
               <h2 className="marketing-display-title mt-4 max-w-5xl font-semibold text-white">
-                No free tier. Pay for live hours, not vague credits.
+                Pay for live hours.
               </h2>
             </div>
             <p className="max-w-2xl text-xl leading-8 text-[var(--color-muted)] sm:text-2xl sm:leading-9">
               Processing hours cover live or VOD analysis. Exports are capped
-              separately because rendering and storage are the expensive parts.
-              Choose a plan to unlock the timeline. Annual plans include
-              roughly two months free through yearly Stripe prices.
+              separately—rendering and storage are the expensive parts.
             </p>
           </div>
 
@@ -322,6 +397,46 @@ export default function HomePage() {
       >
         <div className="mx-auto max-w-[1440px] px-4 py-14 sm:px-6 lg:px-8">
           <SessionStorageList />
+        </div>
+      </section>
+
+      <section
+        id="faq"
+        className="scroll-mt-20 border-b border-[var(--color-card-border)] bg-[#071007]"
+      >
+        <div className="mx-auto max-w-[1440px] px-4 py-16 sm:px-6 lg:px-8 lg:py-24">
+          <div className="grid gap-10 lg:grid-cols-[0.75fr_1.25fr]">
+            <div>
+              <p className="text-xs font-semibold uppercase text-[var(--color-accent)] sm:text-sm">
+                Frequently asked questions
+              </p>
+              <h2 className="marketing-display-title mt-4 font-semibold text-white">
+                Livestream clipping, explained.
+              </h2>
+              <p className="mt-6 max-w-xl text-lg leading-8 text-[var(--color-muted)]">
+                Straight answers about finding stream highlights, creating
+                captioned Shorts, and exporting clips while the moment is fresh.
+              </p>
+            </div>
+            <div className="border-y border-[var(--color-card-border)]">
+              {FAQS.map((item) => (
+                <details
+                  key={item.question}
+                  className="group border-b border-[var(--color-card-border)] last:border-b-0"
+                >
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-6 py-6 text-xl font-semibold text-white marker:content-none sm:text-2xl">
+                    {item.question}
+                    <span className="text-[var(--color-accent)] transition-transform group-open:rotate-45" aria-hidden="true">
+                      +
+                    </span>
+                  </summary>
+                  <p className="max-w-3xl pb-7 pr-10 text-base leading-7 text-[var(--color-muted)] sm:text-lg">
+                    {item.answer}
+                  </p>
+                </details>
+              ))}
+            </div>
+          </div>
         </div>
       </section>
 

@@ -1,6 +1,5 @@
 import { NextRequest } from "next/server";
 import { processVideo } from "@/services/mediaService";
-import { processChatWindows } from "@/services/eventWindowService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 
 export const runtime = "nodejs";
@@ -13,7 +12,6 @@ export async function POST(
   try {
     const { sessionId } = await params;
     const result = await processVideo(sessionId);
-    await processChatWindows(sessionId);
     return jsonResponse({ success: true, ...result });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Processing failed";

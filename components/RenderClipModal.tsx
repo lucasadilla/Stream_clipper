@@ -9,6 +9,7 @@ import { saveClip, renderClip } from "@/lib/clipActions";
 import { triggerDirectFileDownload } from "@/lib/clientDownload";
 import { clipDownloadUrl } from "@/lib/downloadUrls";
 import type { ClipSelection } from "@/components/LiveTimeline";
+import type { CaptionCue } from "@/lib/captionTrack";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
 import {
   formatClipMetadataBlock,
@@ -39,6 +40,7 @@ interface RenderClipModalProps {
   selection: ClipSelection;
   includeCaptions?: boolean;
   captionAppearance?: CaptionAppearance;
+  captionCues?: CaptionCue[];
   onClipCreated?: () => void;
 }
 
@@ -52,6 +54,7 @@ export function RenderClipModal({
   selection,
   includeCaptions = true,
   captionAppearance,
+  captionCues = [],
   onClipCreated,
 }: RenderClipModalProps) {
   const [mounted, setMounted] = useState(false);
@@ -177,6 +180,11 @@ export function RenderClipModal({
         format,
         burnCaptions,
         captionAppearance,
+        captionCues.filter(
+          (cue) =>
+            cue.startTimeSeconds <= selection.end &&
+            cue.endTimeSeconds >= selection.start
+        ),
         (update) => {
           setExportProgress(update.progress);
           setExportStep("rendering");

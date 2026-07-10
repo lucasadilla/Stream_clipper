@@ -16,7 +16,7 @@ import {
   TRANSCRIPTION_SLOW_TICK_MS,
 } from "@/lib/transcriptionConstants";
 import { buildLiveTimelineSegments } from "@/lib/timelineSegments";
-import { TranscriptChat } from "@/components/TranscriptChat";
+import { SidebarPanel } from "@/components/SidebarPanel";
 import { fetchJson } from "@/lib/apiClient";
 import {
   readCaptionsEnabledPreference,
@@ -27,11 +27,6 @@ import {
   writeCaptionAppearancePreference,
   type CaptionAppearance,
 } from "@/lib/captionAppearance";
-import {
-  buildChatHypeMoments,
-  selectHypeMomentsForTimeline,
-  type ChatHypeMoment,
-} from "@/lib/chatHypeTimeline";
 import {
   buildAudioSpikeMarkers,
   selectAudioSpikesForTimeline,
@@ -129,10 +124,10 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const [captionAppearance, setCaptionAppearance] = useState<CaptionAppearance>(
     readCaptionAppearancePreference
   );
-  const [chatHypeMoments, setChatHypeMoments] = useState<ChatHypeMoment[]>([]);
   const [audioSpikes, setAudioSpikes] = useState<AudioSpikeMarker[]>([]);
   const [audioWaveform, setAudioWaveform] = useState<WaveformBucket[]>([]);
   const [captionEdits, setCaptionEdits] = useState<CaptionEditsMap>({});
+  const [assistantOpen, setAssistantOpen] = useState(false);
   const captionSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const playerRef = useRef<StreamPlayerHandle>(null);
   const sourceStarted = useRef(false);
@@ -268,22 +263,12 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
 
   async function loadEvents() {
     try {
-      await Promise.all([
-        fetch(`/api/sessions/${sessionId}/chat/sync-windows`, { method: "POST" }),
-        fetch(`/api/sessions/${sessionId}/audio/sync`, { method: "POST" }),
-      ]).catch(() => {});
+      await fetch(`/api/sessions/${sessionId}/audio/sync`, { method: "POST" }).catch(
+        () => {}
+      );
 
       const { ok, data } = await fetchJson<{
         transcriptChunks?: typeof transcripts;
-        eventWindows?: Array<{
-          id: string;
-          startTimeSeconds: number;
-          endTimeSeconds: number;
-          type: string;
-          summary?: string | null;
-          score: number;
-          rawData?: unknown;
-        }>;
         audioEvents?: Array<{
           id: string;
           startTimeSeconds: number;
@@ -297,11 +282,6 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       if (!ok) return;
 
       const chunks = data.transcriptChunks ?? [];
-      setChatHypeMoments(
-        selectHypeMomentsForTimeline(
-          buildChatHypeMoments(data.eventWindows ?? [])
-        )
-      );
       setAudioSpikes(
         selectAudioSpikesForTimeline(
           buildAudioSpikeMarkers(data.audioEvents ?? [])
@@ -376,8 +356,13 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
     0,
     ...transcripts
       .filter((t) => {
-        const raw = t.rawJson as { whisper?: boolean } | null;
-        return raw?.whisper;
+        const raw = t.rawJson as { whisper?: boolean; cursorOnly?: boolean } | null;
+        return (
+          raw?.whisper &&
+          !raw?.cursorOnly &&
+          t.text !== "[silence]" &&
+          t.text !== "[processing error]"
+        );
       })
       .map((t) => t.endTimeSeconds)
   );
@@ -399,18 +384,24 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       return m?.whisper;
     });
     if (whisper.length === 0) return false;
-    if (
-      whisper.some((c) => {
-        const m = c.rawJson as { words?: unknown[] } | null;
-        return Array.isArray(m?.words) && m!.words!.length > 0;
-      })
-    ) {
-      return false;
-    }
+    // A mixed transcript can contain new word-timed chunks plus older
+    // OpenRouter/estimated chunks. Rebuild if *any* real speech chunk lacks
+    // word timestamps; checking whether any one chunk had words left the rest
+    // permanently approximate.
     return whisper.some(
-      (c) =>
-        (c.rawJson as { estimatedTiming?: boolean } | null)?.estimatedTiming !==
-          false || c.endTimeSeconds - c.startTimeSeconds > 12
+      (c) => {
+        const meta = c.rawJson as {
+          words?: unknown[];
+          estimatedTiming?: boolean;
+          cursorOnly?: boolean;
+        } | null;
+        if (meta?.cursorOnly || c.text === "[silence]") return false;
+        return (
+          meta?.estimatedTiming === true ||
+          !Array.isArray(meta?.words) ||
+          meta.words.length === 0
+        );
+      }
     );
   }
 
@@ -466,7 +457,9 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
             "Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env"
           );
         } else if (data.reason === "too_short") {
-          setTranscriptionError("Recording too short - wait for more audio");
+          setTranscriptionError("Waiting for enough audio to transcribe...");
+        } else if (data.reason === "audio_not_ready") {
+          setTranscriptionError("Buffering capture — transcription will resume shortly");
         } else if (data.reason === "provider_unavailable") {
           const detail = data.error?.trim();
           setTranscriptionError(
@@ -480,9 +473,8 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
           setTranscriptionError(null);
         }
 
-        if (!data.skipped || (data.transcribedThrough ?? 0) > 0) {
-          await loadEvents();
-        }
+        await loadEvents();
+        await loadSession();
       } catch (err) {
         setTranscriptionError(
           err instanceof Error ? err.message : "Transcription request failed"
@@ -589,14 +581,21 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         )
       : 0;
 
-  const streamDuration = coalesceTimelineSeconds([
-    session.videoDurationSeconds,
-    playerDuration,
-    liveElapsedSeconds,
-    recordedSeconds,
-    currentTime,
-    LIVE_SEGMENT_SECONDS,
-  ]);
+  const streamDuration = isLive
+    ? coalesceTimelineSeconds([
+        recordedSeconds,
+        currentTime,
+        playerDuration,
+        LIVE_SEGMENT_SECONDS,
+      ])
+    : coalesceTimelineSeconds([
+        session.videoDurationSeconds,
+        playerDuration,
+        liveElapsedSeconds,
+        recordedSeconds,
+        currentTime,
+        LIVE_SEGMENT_SECONDS,
+      ]);
 
   const liveSegments = buildLiveTimelineSegments(
     transcripts.filter((t) => {
@@ -624,86 +623,120 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         onDelete={handleDeleteSession}
       />
 
-      <div className="flex-1 flex flex-col min-h-0">
-        {/* Video preview - larger */}
-        <div className="shrink-0 px-4 pt-3 pb-2 flex justify-center">
-          <VideoPreview
-            platform={platform}
-            sourceId={session.youtubeVideoId}
-            embed={streamEmbed}
-            playbackVideoUrl={
-              playbackVideoUrl
-                ? `${playbackVideoUrl}${playbackVideoUrl.includes("?") ? "&" : "?"}v=${Math.floor(recordedSeconds / 12)}`
-                : null
-            }
-            streamPageUrl={session.youtubeUrl}
-            recordedSeconds={recordedSeconds}
-            preferLocalVideo={preferLocalVideo}
-            playerRef={playerRef}
-            transcripts={transcripts}
-            captionsEnabled={captionsEnabled}
-            captionEdits={captionEdits}
-            captionAppearance={captionAppearance}
-            onCaptionsEnabledChange={(enabled) => {
-              setCaptionsEnabled(enabled);
-              writeCaptionsEnabledPreference(enabled);
-            }}
-            onCaptionAppearanceChange={(appearance) => {
-              setCaptionAppearance(appearance);
-              writeCaptionAppearancePreference(appearance);
-            }}
-            onTimeUpdate={handlePlayerTimeUpdate}
-            onDurationChange={handlePlayerDurationChange}
-          />
+      <div className="relative flex-1 min-h-0">
+        <div className="flex h-full flex-col min-h-0">
+          {/* Video preview */}
+          <div className="shrink-0 px-4 pt-3 pb-2 flex justify-center">
+            <VideoPreview
+              platform={platform}
+              sourceId={session.youtubeVideoId}
+              embed={streamEmbed}
+              playbackVideoUrl={
+                playbackVideoUrl
+                  ? `${playbackVideoUrl}${playbackVideoUrl.includes("?") ? "&" : "?"}v=${Math.floor(recordedSeconds / 12)}`
+                  : null
+              }
+              streamPageUrl={session.youtubeUrl}
+              recordedSeconds={recordedSeconds}
+              preferLocalVideo={preferLocalVideo}
+              playerRef={playerRef}
+              transcripts={transcripts}
+              captionsEnabled={captionsEnabled}
+              captionEdits={captionEdits}
+              captionAppearance={captionAppearance}
+              onCaptionsEnabledChange={(enabled) => {
+                setCaptionsEnabled(enabled);
+                writeCaptionsEnabledPreference(enabled);
+              }}
+              onCaptionAppearanceChange={(appearance) => {
+                setCaptionAppearance(appearance);
+                writeCaptionAppearancePreference(appearance);
+              }}
+              onTimeUpdate={handlePlayerTimeUpdate}
+              onDurationChange={handlePlayerDurationChange}
+            />
+          </div>
+
+          {/* Timeline — full remaining height */}
+          <div className="flex-1 min-h-[160px] px-4 py-1.5">
+            <LiveTimeline
+              sessionId={sessionId}
+              segments={liveSegments}
+              thumbnails={thumbnails}
+              durationSeconds={streamDuration}
+              recordedSeconds={recordedSeconds}
+              currentTime={currentTime}
+              isLive={isLive}
+              selection={clipSelection}
+              onSelectionChange={setClipSelection}
+              onSeek={seekTo}
+              onPause={pausePlayback}
+              onScrub={scrubTo}
+              onClipCreated={loadEvents}
+              includeCaptions={captionsEnabled}
+              captionChunks={transcripts}
+              captionAppearance={captionAppearance}
+              captionEdits={captionEdits}
+              onCaptionEdit={handleCaptionEdit}
+              audioWaveform={audioWaveform}
+              audioSpikes={audioSpikes}
+              showAudioLane={
+                recordedSeconds > 0 ||
+                streamDuration > LIVE_SEGMENT_SECONDS ||
+                audioSpikes.length > 0 ||
+                audioWaveform.length > 0
+              }
+            />
+          </div>
         </div>
 
-        {/* Timeline */}
-        <div className="flex-1 min-h-[120px] px-4 py-1.5">
-          <LiveTimeline
-            sessionId={sessionId}
-            segments={liveSegments}
-            thumbnails={thumbnails}
-            durationSeconds={streamDuration}
-            recordedSeconds={recordedSeconds}
-            currentTime={currentTime}
-            isLive={isLive}
-            selection={clipSelection}
-            onSelectionChange={setClipSelection}
-            onSeek={seekTo}
-            onPause={pausePlayback}
-            onScrub={scrubTo}
-            onClipCreated={loadEvents}
-            includeCaptions={captionsEnabled}
-            captionChunks={transcripts}
-            captionAppearance={captionAppearance}
-            captionEdits={captionEdits}
-            onCaptionEdit={handleCaptionEdit}
-            chatHypeMoments={chatHypeMoments}
-            showChatHypeTrack={
-              isLive || !!session.activeLiveChatId || chatHypeMoments.length > 0
-            }
-            audioWaveform={audioWaveform}
-            audioSpikes={audioSpikes}
-            showAudioLane={
-              recordedSeconds > 0 ||
-              streamDuration > LIVE_SEGMENT_SECONDS ||
-              audioSpikes.length > 0 ||
-              audioWaveform.length > 0
-            }
-          />
-        </div>
+        {/* Assistant / live chat drawer */}
+        {!assistantOpen && (
+          <button
+            type="button"
+            onClick={() => setAssistantOpen(true)}
+            className="absolute bottom-4 right-4 z-10 flex items-center gap-2 rounded-full border border-[var(--color-card-border)] bg-[#0a0f0a]/95 px-4 py-2.5 text-sm font-medium text-white shadow-lg backdrop-blur-sm transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+            aria-label="Open assistant"
+          >
+            {(transcribingActive || transcriptionBehind) && (
+              <span className="h-2 w-2 shrink-0 rounded-full bg-[var(--color-accent)] animate-pulse" />
+            )}
+            Assistant
+          </button>
+        )}
 
-        {/* Chat under timeline */}
-        <div className="shrink-0 h-[min(28vh,240px)] min-h-[160px]">
-          <TranscriptChat
-            sessionId={sessionId}
-            onSeek={seekFromAssistant}
-            transcribedSeconds={progressTranscribedSeconds}
-            recordedSeconds={progressRecordedSeconds}
-            transcribingActive={transcribingActive}
-            transcriptionError={transcriptionError}
-          />
-        </div>
+        {assistantOpen && (
+          <>
+            <button
+              type="button"
+              aria-label="Close assistant"
+              className="absolute inset-0 z-20 bg-black/50"
+              onClick={() => setAssistantOpen(false)}
+            />
+            <aside className="absolute right-0 top-0 bottom-0 z-30 flex w-[min(100%,380px)] flex-col border-l border-[var(--color-card-border)] bg-[#050705] shadow-2xl">
+              <div className="flex shrink-0 items-center justify-between border-b border-[var(--color-card-border)] bg-[#020302] px-4 py-3">
+                <p className="text-sm font-semibold text-white">Assistant</p>
+                <button
+                  type="button"
+                  onClick={() => setAssistantOpen(false)}
+                  className="rounded-lg px-2 py-1 text-xs text-[var(--color-muted)] transition-colors hover:bg-[#141414] hover:text-white"
+                >
+                  Close
+                </button>
+              </div>
+              <div className="min-h-0 flex-1">
+                <SidebarPanel
+                  sessionId={sessionId}
+                  onSeek={seekFromAssistant}
+                  transcribedSeconds={progressTranscribedSeconds}
+                  recordedSeconds={progressRecordedSeconds}
+                  transcribingActive={transcribingActive}
+                  transcriptionError={transcriptionError}
+                />
+              </div>
+            </aside>
+          </>
+        )}
       </div>
     </div>
   );

@@ -137,7 +137,12 @@ export function captionPreviewStyle(
         ? "center"
         : "flex-end";
 
-  const pad = `${appearance.verticalOffsetPercent}%`;
+  // CSS percentage padding is based on container width, even vertically.
+  // Convert to pixels from frame height so preview and libass use the same
+  // coordinate system and selected position survives export exactly.
+  const pad = `${Math.round(
+    (appearance.verticalOffsetPercent / 100) * containerHeightPx
+  )}px`;
 
   return {
     container: {
@@ -194,16 +199,28 @@ export function hexToAssColor(hex: string): string {
 
 /** FFmpeg `force_style` from user appearance + output format. */
 export function getFfmpegCaptionForceStyle(
-  format: RenderFormat,
-  outputHeight: number,
+  _format: RenderFormat,
+  _outputHeight: number,
   appearance: CaptionAppearance = DEFAULT_CAPTION_APPEARANCE
 ): string {
   const app = normalizeCaptionAppearance(appearance);
-  const baseH = format === "vertical" ? 1920 : 1080;
-  const scale = outputHeight / baseH;
-  const fontSize = Math.max(12, Math.round(app.fontSize * scale));
-  const marginV = Math.round((app.verticalOffsetPercent / 100) * outputHeight);
-  const marginH = Math.round(48 * scale);
+
+  // libass converts SRT into a default 384x288 ASS script and then scales that
+  // coordinate space to the output frame. Appearance sizes are defined at a
+  // 1080p reference. Convert them into ASS units first; passing pixel values
+  // directly makes a 38px editor font render around 140px at 1080p.
+  const ASS_PLAY_RES_X = 384;
+  const ASS_PLAY_RES_Y = 288;
+  const REFERENCE_HEIGHT = 1080;
+  const fontSize = Math.max(
+    1,
+    Math.round((app.fontSize * ASS_PLAY_RES_Y * 10) / REFERENCE_HEIGHT) / 10
+  );
+  const marginV = Math.round(
+    (app.verticalOffsetPercent / 100) * ASS_PLAY_RES_Y
+  );
+  const marginH = Math.round(ASS_PLAY_RES_X * 0.05);
+  const boxPadding = Math.max(0.5, Math.round(fontSize * 1.4) / 10);
 
   return [
     `FontName=${app.fontFamily}`,
@@ -211,8 +228,11 @@ export function getFfmpegCaptionForceStyle(
     "Bold=1",
     `PrimaryColour=${hexToAssColor(app.color)}`,
     "OutlineColour=&H000000",
-    "Outline=2",
-    "BorderStyle=1",
+    // Match the editor's bg-black/50 caption chip. In ASS, BorderStyle=3 uses
+    // BackColour as an opaque-box fill and Outline as its text padding.
+    "BackColour=&H80000000",
+    `Outline=${boxPadding}`,
+    "BorderStyle=3",
     `Alignment=${assAlignment(app.vertical, app.horizontal)}`,
     `MarginV=${marginV}`,
     `MarginL=${marginH}`,
