@@ -10,6 +10,7 @@ import {
   ensureSessionBillingAccess,
   SessionAccessError,
 } from "@/services/sessionAccessService";
+import { getPostHogClient } from "@/lib/posthog-server";
 
 interface ClientCaptionCue {
   startTimeSeconds: number;
@@ -152,6 +153,17 @@ export async function POST(
       .then(({ runWorkerTick }) => runWorkerTick())
       .catch(() => {});
 
+    if (billingAccountId) {
+      getPostHogClient().capture({
+        distinctId: billingAccountId,
+        event: "clip_rendered",
+        properties: {
+          format: format,
+          duration_seconds: clip.endTimeSeconds - clip.startTimeSeconds,
+          include_captions: includeCaptions,
+        },
+      });
+    }
     return jsonResponse({
       jobId,
       status: "queued",

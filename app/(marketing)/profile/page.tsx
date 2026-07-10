@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import posthog from "posthog-js";
 import { fetchJson } from "@/lib/apiClient";
 import { getPricingPlan } from "@/lib/pricing";
 import { cn } from "@/lib/utils";
@@ -70,6 +71,9 @@ export default function ProfilePage() {
           return;
         }
         setAccount(me.data.account);
+        posthog.identify(me.data.account.id, {
+          email: me.data.account.email,
+        });
         setDisplayName(me.data.account.displayName ?? "");
         setEmail(me.data.account.email ?? "");
 
@@ -110,6 +114,7 @@ export default function ProfilePage() {
       setAccount(data.account);
       setDisplayName(data.account.displayName ?? "");
       setEmail(data.account.email ?? "");
+      posthog.capture("profile_updated");
       setMessage("Profile saved");
       router.refresh();
     } catch (err) {
@@ -130,6 +135,7 @@ export default function ProfilePage() {
       if (!ok || !data.url) {
         throw new Error(data.error ?? "Failed to open billing portal");
       }
+      posthog.capture("billing_portal_opened");
       window.location.href = data.url;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to open billing");
@@ -138,6 +144,8 @@ export default function ProfilePage() {
   }
 
   async function handleLogout() {
+    posthog.capture("user_signed_out");
+    posthog.reset();
     await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
     router.push("/login");
     router.refresh();
@@ -167,6 +175,8 @@ export default function ProfilePage() {
         { method: "DELETE" }
       );
       if (!ok) throw new Error(data.error ?? "Failed to delete account");
+      posthog.capture("account_deleted");
+      posthog.reset();
       router.push("/");
       router.refresh();
     } catch (err) {

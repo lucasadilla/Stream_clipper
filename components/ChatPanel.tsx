@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import posthog from "posthog-js";
 import { LIVE_TICK_MS } from "@/lib/timelineConstants";
 
 interface ChatMessage {
@@ -48,6 +49,7 @@ export function ChatPanel({
         throw new Error(data.error ?? "Failed to start");
       }
       setTracking(true);
+      posthog.capture("chat_tracking_started", { session_id: sessionId });
       onChatStarted?.();
       await fetchMessages();
     } catch (err) {

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import posthog from "posthog-js";
 import { fetchJson } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 import type { BillingAccountSummary } from "@/services/billingService";
@@ -18,7 +19,12 @@ export default function LoginPage() {
   useEffect(() => {
     void fetchJson<{ account: BillingAccountSummary | null }>("/api/auth/me").then(
       ({ data }) => {
-        if (data.account) setAccount(data.account);
+        if (data.account) {
+          setAccount(data.account);
+          posthog.identify(data.account.id, {
+            email: data.account.email,
+          });
+        }
       }
     );
   }, []);
@@ -42,6 +48,12 @@ export default function LoginPage() {
       if (!ok || !data.account) {
         throw new Error(data.error ?? "Login failed");
       }
+      posthog.identify(data.account.id, {
+        email: data.account.email,
+      });
+      posthog.capture("user_signed_in", {
+        unlimited_access: data.account.unlimitedAccess ?? false,
+      });
       setAccount(data.account);
       router.push("/#analyze");
       router.refresh();
@@ -53,6 +65,8 @@ export default function LoginPage() {
   }
 
   async function handleLogout() {
+    posthog.capture("user_signed_out");
+    posthog.reset();
     await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
     setAccount(null);
     router.refresh();

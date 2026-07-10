@@ -6,6 +6,7 @@ import { parseStreamUrl } from "@/lib/streamPlatform";
 import { errorResponse, jsonResponse, parseRequestJson } from "@/lib/utils";
 import { canCreateStreamSession } from "@/services/usageService";
 import { getBillingAccountIdFromRequest } from "@/services/billingService";
+import { getPostHogClient } from "@/lib/posthog-server";
 
 const createSessionSchema = z.object({
   streamUrl: z.string().min(1).optional(),
@@ -58,6 +59,16 @@ export async function POST(request: NextRequest) {
     }
 
     const session = await createStreamSession(rawUrl, billingAccountId);
+    if (billingAccountId) {
+      getPostHogClient().capture({
+        distinctId: billingAccountId,
+        event: "session_created",
+        properties: {
+          platform: session.platform,
+          live_status: session.liveStatus,
+        },
+      });
+    }
     return jsonResponse(
       {
         session: {
