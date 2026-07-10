@@ -3,6 +3,8 @@ import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { createManualClip } from "@/services/suggestClipsService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
+import { getBillingAccountIdFromRequest } from "@/services/billingService";
+import { getPostHogClient } from "@/lib/posthog-server";
 
 const clipSchema = z.object({
   title: z.string().min(1),
@@ -26,6 +28,17 @@ export async function POST(
     if (!session) return errorResponse("Session not found", 404);
 
     const clip = await createManualClip(sessionId, data);
+    const billingAccountId = getBillingAccountIdFromRequest(request);
+    if (billingAccountId) {
+      getPostHogClient().capture({
+        distinctId: billingAccountId,
+        event: "manual_clip_created",
+        properties: {
+          session_id: sessionId,
+          duration_seconds: data.endTimeSeconds - data.startTimeSeconds,
+        },
+      });
+    }
     return jsonResponse({ clip }, 201);
   } catch (error) {
     if (error instanceof z.ZodError) {

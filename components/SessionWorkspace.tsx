@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import posthog from "posthog-js";
 import { EditorHeader } from "@/components/layout/EditorHeader";
 import { VideoPreview } from "@/components/VideoPreview";
 import type { StreamPlayerHandle } from "@/types/streamPlayer";
@@ -516,6 +517,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         { method: "DELETE" }
       );
       if (!ok) throw new Error(data.error ?? "Delete failed");
+      posthog.capture("session_deleted", { session_id: sessionId });
       router.push("/");
     } catch (err) {
       alert(err instanceof Error ? err.message : "Delete failed");

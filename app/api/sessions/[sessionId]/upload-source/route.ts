@@ -1,6 +1,8 @@
 import { NextRequest } from "next/server";
 import { saveSourceMedia } from "@/services/mediaService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
+import { getBillingAccountIdFromRequest } from "@/services/billingService";
+import { getPostHogClient } from "@/lib/posthog-server";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -19,6 +21,17 @@ export async function POST(
     }
 
     const sourceMedia = await saveSourceMedia(sessionId, file);
+    const billingAccountId = getBillingAccountIdFromRequest(request);
+    if (billingAccountId) {
+      getPostHogClient().capture({
+        distinctId: billingAccountId,
+        event: "source_video_uploaded",
+        properties: {
+          session_id: sessionId,
+          file_size_bytes: Number(sourceMedia.sizeBytes),
+        },
+      });
+    }
     return jsonResponse({
       sourceMedia: {
         ...sourceMedia,
