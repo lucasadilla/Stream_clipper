@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import posthog from "posthog-js";
 import { formatSeconds, formatDuration } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { clipDownloadUrl } from "@/lib/downloadUrls";
@@ -43,6 +44,10 @@ export function ClipSuggestionCard({
   async function handleRender() {
     setLoading(true);
     setError(null);
+    posthog.capture("clip_suggestion_rendered", {
+      clip_id: clip.id,
+      duration_seconds: duration,
+    });
     try {
       const res = await fetch(`/api/clips/${clip.id}/render`, {
         method: "POST",
@@ -78,6 +83,7 @@ export function ClipSuggestionCard({
 
   async function handleReject() {
     setLoading(true);
+    posthog.capture("clip_suggestion_rejected", { clip_id: clip.id });
     try {
       const res = await fetch(`/api/clips/${clip.id}/reject`, { method: "POST" });
       const data = await res.json();

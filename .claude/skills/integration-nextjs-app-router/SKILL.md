@@ -3,7 +3,7 @@ name: integration-nextjs-app-router
 description: PostHog integration for Next.js App Router applications
 metadata:
   author: PostHog
-  version: 1.28.2
+  version: 1.29.0
 ---
 
 # PostHog integration for Next.js App Router
@@ -54,13 +54,13 @@ The example project shows the target implementation pattern. Consult the documen
 - posthog-js is the JavaScript SDK package name
 - posthog.init() MUST be called before any other PostHog methods (capture, identify, etc.)
 - posthog-js is browser-only — do NOT import it in Node.js or server-side contexts (use posthog-node instead)
-- Autocapture is ON by default with posthog-js (tracks clicks, form submissions, pageviews). Do NOT disable autocapture unless the user explicitly requests it.
+- Autocapture is ON by default with posthog-js (tracks clicks, form submissions, pageviews). Keep autocapture enabled unless the user explicitly asks to turn it off.
 - NEVER send PII in posthog.capture() event properties — no emails, full names, phone numbers, physical addresses, IP addresses, or user-generated content
 - PII belongs in posthog.identify() person properties (email, name, role), NOT in capture() event properties
 - Call posthog.identify(userId, { email, name, role }) on login AND on page refresh if the user is already logged in
 - Call posthog.reset() on logout to unlink future events from the current user
 - For SPAs without a framework router, capture pageviews with posthog.capture($pageview) or use the capture_pageview history_change option in init for History API routing
-- posthog-node is the Node.js server-side SDK package name – do NOT use posthog-js on the server
+- posthog-node is the Node.js server-side SDK package name; posthog-js is browser-only, so use posthog-node on the server instead
 - Include enableExceptionAutocapture: true in the PostHog constructor options
 - Add posthog.capture() calls in route handlers for meaningful user actions – every route that creates, updates, or deletes data should track an event with contextual properties
 - Add posthog.captureException(err, distinctId) in the application's error handler (e.g., Express error middleware, Fastify setErrorHandler, Koa app.on('error'))

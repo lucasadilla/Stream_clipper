@@ -2,6 +2,8 @@ import { NextRequest } from "next/server";
 import { z } from "zod";
 import { findClipFromDescription } from "@/services/findClipService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
+import { getBillingAccountIdFromRequest } from "@/services/billingService";
+import { getPostHogClient } from "@/lib/posthog-server";
 
 const schema = z.object({
   description: z.string().min(3),
@@ -23,6 +25,19 @@ export async function POST(
     const result = await findClipFromDescription(sessionId, description, {
       autoRender,
     });
+
+    const billingAccountId = getBillingAccountIdFromRequest(request);
+    if (billingAccountId) {
+      getPostHogClient().capture({
+        distinctId: billingAccountId,
+        event: "ai_clip_search_completed",
+        properties: {
+          session_id: sessionId,
+          clip_found: !!result.clip,
+          auto_render: autoRender,
+        },
+      });
+    }
 
     return jsonResponse({
       answer: result.answer,
