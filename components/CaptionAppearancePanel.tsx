@@ -1,9 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   CAPTION_FONT_PRESETS,
+  normalizeCaptionAppearance,
+  type CaptionAnimation,
   type CaptionAppearance,
+  type CaptionCapitalization,
   type CaptionHorizontalPosition,
   type CaptionVerticalPosition,
 } from "@/lib/captionAppearance";
@@ -23,6 +26,7 @@ interface CaptionAppearancePanelProps {
   appearance: CaptionAppearance;
   onChange: (appearance: CaptionAppearance) => void;
   disabled?: boolean;
+  hasWordTimings?: boolean;
 }
 
 function PosBtn({
@@ -50,10 +54,19 @@ function PosBtn({
   );
 }
 
+function SectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+      {children}
+    </span>
+  );
+}
+
 export function CaptionAppearancePanel({
   appearance,
   onChange,
   disabled,
+  hasWordTimings = false,
 }: CaptionAppearancePanelProps) {
   const [open, setOpen] = useState(false);
   const [presets, setPresets] = useState<CaptionPreset[]>([]);
@@ -89,7 +102,7 @@ export function CaptionAppearancePanel({
   }
 
   function patch(partial: Partial<CaptionAppearance>) {
-    const next = { ...appearance, ...partial };
+    const next = normalizeCaptionAppearance({ ...appearance, ...partial });
     onChange(next);
     if (activePresetId) {
       const preset = presets.find((p) => p.id === activePresetId);
@@ -101,7 +114,7 @@ export function CaptionAppearancePanel({
   }
 
   function applyPreset(preset: CaptionPreset) {
-    onChange(preset.appearance);
+    onChange(normalizeCaptionAppearance(preset.appearance));
     setActivePresetId(preset.id);
     writeActiveCaptionPresetId(preset.id);
     setSaveError(null);
@@ -229,9 +242,7 @@ export function CaptionAppearancePanel({
 
           <div className="space-y-3 border-t border-[var(--color-card-border)] pt-3">
             <label className="block space-y-1">
-              <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
-                Font
-              </span>
+              <SectionLabel>Font</SectionLabel>
               <select
                 value={
                   CAPTION_FONT_PRESETS.includes(
@@ -264,9 +275,7 @@ export function CaptionAppearancePanel({
             </label>
 
             <label className="block space-y-1">
-              <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
-                Size / {appearance.fontSize}px
-              </span>
+              <SectionLabel>Size / {appearance.fontSize}px</SectionLabel>
               <input
                 type="range"
                 min={12}
@@ -278,9 +287,7 @@ export function CaptionAppearancePanel({
             </label>
 
             <label className="block space-y-1">
-              <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
-                Color
-              </span>
+              <SectionLabel>Color</SectionLabel>
               <div className="flex items-center gap-2">
                 <input
                   type="color"
@@ -299,21 +306,171 @@ export function CaptionAppearancePanel({
             </label>
 
             <div className="space-y-1">
-              <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
-                Position
-              </span>
+              <SectionLabel>Weight / style</SectionLabel>
               <div className="flex flex-wrap gap-1">
-                {(["top", "center", "bottom"] as CaptionVerticalPosition[]).map((v) => (
-                  <PosBtn
-                    key={v}
-                    label={v}
-                    active={appearance.vertical === v}
-                    onClick={() => patch({ vertical: v })}
-                  />
-                ))}
+                <PosBtn
+                  label="Bold"
+                  active={appearance.fontWeight === "bold"}
+                  onClick={() =>
+                    patch({
+                      fontWeight:
+                        appearance.fontWeight === "bold" ? "normal" : "bold",
+                    })
+                  }
+                />
+                <PosBtn
+                  label="Italic"
+                  active={appearance.italic}
+                  onClick={() => patch({ italic: !appearance.italic })}
+                />
+              </div>
+            </div>
+
+            <label className="block space-y-1">
+              <SectionLabel>Capitalization</SectionLabel>
+              <select
+                value={appearance.capitalization}
+                onChange={(e) =>
+                  patch({
+                    capitalization: e.target.value as CaptionCapitalization,
+                  })
+                }
+                className="h-8 w-full rounded-lg border border-[#21301f] bg-[#020302] px-2 text-xs text-white focus:border-[var(--color-accent)] focus:outline-none"
+              >
+                <option value="none">As typed</option>
+                <option value="uppercase">UPPERCASE</option>
+                <option value="lowercase">lowercase</option>
+                <option value="title">Title Case</option>
+              </select>
+            </label>
+
+            <div className="space-y-1">
+              <SectionLabel>Background</SectionLabel>
+              <div className="flex items-center gap-2">
+                <input
+                  type="color"
+                  value={appearance.backgroundColor}
+                  onChange={(e) =>
+                    patch({ backgroundColor: e.target.value.toUpperCase() })
+                  }
+                  className="h-8 w-10 cursor-pointer rounded border border-[#21301f] bg-transparent"
+                />
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={Math.round(appearance.backgroundOpacity * 100)}
+                  onChange={(e) =>
+                    patch({ backgroundOpacity: Number(e.target.value) / 100 })
+                  }
+                  className="w-full accent-[var(--color-accent)]"
+                />
+                <span className="w-8 shrink-0 text-right text-[10px] text-[var(--color-muted)]">
+                  {Math.round(appearance.backgroundOpacity * 100)}%
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <SectionLabel>Outline / {appearance.outlineWidth}</SectionLabel>
+              <div className="flex items-center gap-2">
+                <input
+                  type="color"
+                  value={appearance.outlineColor}
+                  onChange={(e) =>
+                    patch({ outlineColor: e.target.value.toUpperCase() })
+                  }
+                  className="h-8 w-10 cursor-pointer rounded border border-[#21301f] bg-transparent"
+                />
+                <input
+                  type="range"
+                  min={0}
+                  max={8}
+                  step={0.5}
+                  value={appearance.outlineWidth}
+                  onChange={(e) =>
+                    patch({ outlineWidth: Number(e.target.value) })
+                  }
+                  className="w-full accent-[var(--color-accent)]"
+                />
+              </div>
+            </div>
+
+            <label className="block space-y-1">
+              <SectionLabel>Shadow / {appearance.shadow}</SectionLabel>
+              <input
+                type="range"
+                min={0}
+                max={8}
+                step={0.5}
+                value={appearance.shadow}
+                onChange={(e) => patch({ shadow: Number(e.target.value) })}
+                className="w-full accent-[var(--color-accent)]"
+              />
+            </label>
+
+            <div className="space-y-1">
+              <SectionLabel>Karaoke</SectionLabel>
+              <div className="flex items-center gap-2">
+                <PosBtn
+                  label={appearance.karaokeEnabled ? "On" : "Off"}
+                  active={appearance.karaokeEnabled}
+                  onClick={() =>
+                    patch({ karaokeEnabled: !appearance.karaokeEnabled })
+                  }
+                />
+                <input
+                  type="color"
+                  value={appearance.highlightColor}
+                  disabled={!appearance.karaokeEnabled}
+                  onChange={(e) =>
+                    patch({ highlightColor: e.target.value.toUpperCase() })
+                  }
+                  className="h-8 w-10 cursor-pointer rounded border border-[#21301f] bg-transparent disabled:opacity-40"
+                  title="Highlight color"
+                />
+              </div>
+              {!hasWordTimings && (
+                <p className="text-[10px] text-[var(--color-muted)]">
+                  Word timings needed for karaoke highlight
+                </p>
+              )}
+            </div>
+
+            <label className="block space-y-1">
+              <SectionLabel>Animation</SectionLabel>
+              <select
+                value={appearance.animation}
+                onChange={(e) =>
+                  patch({ animation: e.target.value as CaptionAnimation })
+                }
+                className="h-8 w-full rounded-lg border border-[#21301f] bg-[#020302] px-2 text-xs text-white focus:border-[var(--color-accent)] focus:outline-none"
+              >
+                <option value="none">None</option>
+                <option value="fade">Fade</option>
+                <option value="pop">Pop</option>
+                <option value="slideUp">Slide up</option>
+              </select>
+            </label>
+
+            <div className="space-y-1">
+              <SectionLabel>Position</SectionLabel>
+              <div className="flex flex-wrap gap-1">
+                {(["top", "center", "bottom"] as CaptionVerticalPosition[]).map(
+                  (v) => (
+                    <PosBtn
+                      key={v}
+                      label={v}
+                      active={appearance.vertical === v}
+                      onClick={() => patch({ vertical: v })}
+                    />
+                  )
+                )}
               </div>
               <div className="flex flex-wrap gap-1">
-                {(["left", "center", "right"] as CaptionHorizontalPosition[]).map((h) => (
+                {(
+                  ["left", "center", "right"] as CaptionHorizontalPosition[]
+                ).map((h) => (
                   <PosBtn
                     key={h}
                     label={h}
@@ -325,9 +482,9 @@ export function CaptionAppearancePanel({
             </div>
 
             <label className="block space-y-1">
-              <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+              <SectionLabel>
                 Edge offset / {appearance.verticalOffsetPercent}%
-              </span>
+              </SectionLabel>
               <input
                 type="range"
                 min={2}

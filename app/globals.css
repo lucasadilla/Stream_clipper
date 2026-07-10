@@ -165,3 +165,50 @@ body[data-render-modal-open] [data-timeline-playhead] {
 .animate-segment-pop {
   animation: segment-pop 0.55s ease-out;
 }
+
+@keyframes caption-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes caption-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.86);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.06);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes caption-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(0.7em);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.caption-anim-fade {
+  animation: caption-fade 0.22s ease-out;
+}
+
+.caption-anim-pop {
+  animation: caption-pop 0.32s ease-out;
+}
+
+.caption-anim-slide-up {
+  animation: caption-slide-up 0.28s ease-out;
+}

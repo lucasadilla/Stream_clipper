@@ -11,12 +11,16 @@ export interface PlanEntitlements {
   processingHoursLimit: number | null;
   exportsLimit: number | null;
   storageRetentionDays: number | null;
+  /** Soft cap on total SourceMedia bytes; null = unlimited. */
+  storageLimitBytes: number | null;
   maxResolution: MaxExportResolution;
   watermarkEnabled: boolean;
   priorityQueue: boolean;
   seatLimit: number | null;
   streamStartsLimit: number | null;
 }
+
+const GB = 1024 * 1024 * 1024;
 
 export interface PricingPlan {
   id: PlanId;
@@ -60,6 +64,7 @@ export const PRICING_PLANS: PricingPlan[] = [
       processingHoursLimit: 10,
       exportsLimit: 50,
       storageRetentionDays: 14,
+      storageLimitBytes: 5 * GB,
       maxResolution: "1080p",
       watermarkEnabled: false,
       priorityQueue: false,
@@ -71,7 +76,7 @@ export const PRICING_PLANS: PricingPlan[] = [
       "50 watermark-free exports",
       "1080p native and Shorts exports",
       "Transcript search, captions, timeline editing",
-      "14-day storage",
+      "14-day storage · 5 GB",
     ],
   },
   {
@@ -92,6 +97,7 @@ export const PRICING_PLANS: PricingPlan[] = [
       processingHoursLimit: 40,
       exportsLimit: 250,
       storageRetentionDays: 60,
+      storageLimitBytes: 25 * GB,
       maxResolution: "1080p",
       watermarkEnabled: false,
       priorityQueue: true,
@@ -103,7 +109,7 @@ export const PRICING_PLANS: PricingPlan[] = [
       "250 exports",
       "Faster processing priority",
       "Saved caption styles and templates",
-      "60-day storage",
+      "60-day storage · 25 GB",
     ],
   },
   {
@@ -123,6 +129,7 @@ export const PRICING_PLANS: PricingPlan[] = [
       processingHoursLimit: 100,
       exportsLimit: 750,
       storageRetentionDays: 90,
+      storageLimitBytes: 100 * GB,
       maxResolution: "1080p",
       watermarkEnabled: false,
       priorityQueue: true,
@@ -134,7 +141,7 @@ export const PRICING_PLANS: PricingPlan[] = [
       "750 exports",
       "3 seats",
       "Priority queue and support",
-      "Team workspace ready",
+      "90-day storage · 100 GB",
     ],
   },
   {
@@ -150,6 +157,7 @@ export const PRICING_PLANS: PricingPlan[] = [
       processingHoursLimit: null,
       exportsLimit: null,
       storageRetentionDays: null,
+      storageLimitBytes: null,
       maxResolution: "custom",
       watermarkEnabled: false,
       priorityQueue: true,

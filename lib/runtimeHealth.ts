@@ -123,7 +123,11 @@ export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
     issues.push("Whisper provider is not configured.");
   }
   if (!storageWritable) {
-    issues.push(storageError ?? "STORAGE_ROOT is not writable.");
+    issues.push(
+      storageError
+        ? `STORAGE_ROOT is not writable (${storageError}). On Railway, mount a volume at /app/storage and set STORAGE_ROOT=/app/storage.`
+        : "STORAGE_ROOT is not writable. On Railway, mount a volume at /app/storage and set STORAGE_ROOT=/app/storage."
+    );
   }
 
   return {

@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import { renderJobDownloadUrl } from "@/lib/downloadUrls";
 import { triggerFileDownload } from "@/lib/clientDownload";
+import type { RenderJobLogEntry } from "@/lib/renderJobLogs";
 
 interface RenderJob {
   id: string;
@@ -11,6 +12,11 @@ interface RenderJob {
   progress: number;
   outputPath?: string | null;
   errorMessage?: string | null;
+  attempts?: number;
+  maxAttempts?: number;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  logs?: RenderJobLogEntry[] | null;
 }
 
 interface RenderJobStatusProps {
@@ -26,6 +32,7 @@ export function RenderJobStatus({
 }: RenderJobStatusProps) {
   const [job, setJob] = useState<RenderJob | null>(null);
   const [downloading, setDownloading] = useState(false);
+  const [showLogs, setShowLogs] = useState(false);
   const fileUrl = downloadUrl ?? renderJobDownloadUrl(jobId);
 
   useEffect(() => {
@@ -58,7 +65,7 @@ export function RenderJobStatus({
         interval = setInterval(async () => {
           const finished = await poll();
           if (finished) clearInterval(interval);
-        }, 2000);
+        }, 1500);
       }
     });
 
@@ -77,6 +84,9 @@ export function RenderJobStatus({
         ? "text-[var(--color-danger)]"
         : "text-[var(--color-warning)]";
 
+  const logs = Array.isArray(job.logs) ? job.logs : [];
+  const inFlight = job.status === "queued" || job.status === "processing";
+
   async function handleDownload() {
     setDownloading(true);
     try {
@@ -91,14 +101,22 @@ export function RenderJobStatus({
   return (
     <div className="rounded-lg border border-[var(--color-card-border)] bg-[var(--color-background)] p-3 text-xs">
       <div className="flex items-center justify-between mb-2">
-        <span className={cn("font-medium capitalize", statusColor)}>{job.status}</span>
+        <span className={cn("font-medium capitalize", statusColor)}>
+          {job.status}
+          {typeof job.attempts === "number" && job.attempts > 0 && (
+            <span className="ml-1.5 font-normal text-[var(--color-muted)]">
+              · attempt {job.attempts}
+              {job.maxAttempts ? `/${job.maxAttempts}` : ""}
+            </span>
+          )}
+        </span>
         <span>{Math.round(job.progress)}%</span>
       </div>
-      {job.status === "processing" && (
+      {inFlight && (
         <div className="h-1.5 rounded-full bg-[var(--color-card)]">
           <div
             className="h-full rounded-full bg-[var(--color-accent)] transition-all"
-            style={{ width: `${job.progress}%` }}
+            style={{ width: `${Math.max(job.progress, job.status === "queued" ? 4 : 0)}%` }}
           />
         </div>
       )}
@@ -114,6 +132,33 @@ export function RenderJobStatus({
       )}
       {job.status === "failed" && job.errorMessage && (
         <p className="mt-1 text-[var(--color-danger)]">{job.errorMessage}</p>
+      )}
+      {logs.length > 0 && (
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={() => setShowLogs((v) => !v)}
+            className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)] hover:text-white"
+          >
+            {showLogs ? "Hide logs" : "Show logs"}
+          </button>
+          {showLogs && (
+            <ul className="mt-1 max-h-32 space-y-1 overflow-y-auto rounded border border-[var(--color-card-border)] bg-[#050705] p-2 font-mono text-[10px] text-[var(--color-muted)]">
+              {logs.slice(-20).map((entry, i) => (
+                <li key={`${entry.at}-${i}`}>
+                  <span
+                    className={cn(
+                      entry.level === "error" && "text-[var(--color-danger)]",
+                      entry.level === "warn" && "text-[var(--color-warning)]"
+                    )}
+                  >
+                    [{entry.step}] {entry.message}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
     </div>
   );

@@ -6,11 +6,19 @@ import {
 } from "@/lib/captionStyles";
 import { distributeTextAcrossSpan } from "@/lib/transcriptTiming";
 
+export interface CaptionWord {
+  start: number;
+  end: number;
+  word: string;
+}
+
 export interface CaptionCue {
   id: string;
   startTimeSeconds: number;
   endTimeSeconds: number;
   text: string;
+  /** Per-word timings when available (for karaoke preview/export). */
+  words?: CaptionWord[];
 }
 
 export interface TranscriptChunkInput {
@@ -25,6 +33,16 @@ interface WhisperWord {
   start: number;
   end: number;
   word: string;
+}
+
+/** True when any chunk carries usable word-level timestamps. */
+export function transcriptHasWordTimings(
+  chunks: TranscriptChunkInput[]
+): boolean {
+  return chunks.some((chunk) => {
+    const meta = chunkMeta(chunk.rawJson);
+    return Boolean(meta?.words && meta.words.length > 0);
+  });
 }
 
 function chunkMeta(rawJson: unknown): {
@@ -64,6 +82,11 @@ function cuesFromWords(
       startTimeSeconds: lineWords[0]!.start,
       endTimeSeconds: lineWords[lineWords.length - 1]!.end,
       text,
+      words: lineWords.map((w) => ({
+        start: w.start,
+        end: w.end,
+        word: w.word.trim(),
+      })),
     });
     lineWords = [];
     lineLen = 0;

@@ -1,5 +1,5 @@
 import { triggerFileDownload } from "@/lib/clientDownload";
-import { clipDownloadUrl } from "@/lib/downloadUrls";
+import { clipDownloadUrl, renderJobDownloadUrl } from "@/lib/downloadUrls";
 import { formatSeconds } from "@/lib/time";
 import type { RenderFormat } from "@/lib/renderFormat";
 import type { ClipSelection } from "@/components/LiveTimeline";
@@ -31,6 +31,47 @@ export async function saveClip(
   return data.clip as { id: string; title: string };
 }
 
+async function pollRenderJob(
+  jobId: string,
+  onProgress?: (update: RenderProgressUpdate) => void
+): Promise<{ downloadUrl: string }> {
+  const started = Date.now();
+  const timeoutMs = 10 * 60 * 1000;
+
+  while (Date.now() - started < timeoutMs) {
+    const res = await fetch(`/api/render-jobs/${jobId}`);
+    const data = (await res.json()) as {
+      job?: {
+        status: string;
+        progress: number;
+        errorMessage?: string | null;
+        outputPath?: string | null;
+      };
+      error?: string;
+    };
+    if (!res.ok || !data.job) {
+      throw new Error(data.error ?? "Failed to poll render job");
+    }
+
+    onProgress?.({
+      progress: data.job.progress,
+      status: data.job.status,
+      errorMessage: data.job.errorMessage,
+    });
+
+    if (data.job.status === "completed") {
+      return { downloadUrl: renderJobDownloadUrl(jobId) };
+    }
+    if (data.job.status === "failed") {
+      throw new Error(data.job.errorMessage ?? "Render failed");
+    }
+
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+
+  throw new Error("Timed out waiting for render");
+}
+
 export async function renderClip(
   clipId: string,
   format: RenderFormat = "vertical",
@@ -39,7 +80,7 @@ export async function renderClip(
   captionCues?: CaptionCue[],
   onProgress?: (update: RenderProgressUpdate) => void
 ) {
-  onProgress?.({ progress: 20, status: "processing" });
+  onProgress?.({ progress: 5, status: "queued" });
 
   const res = await fetch(`/api/clips/${clipId}/render`, {
     method: "POST",
@@ -54,6 +95,7 @@ export async function renderClip(
   const data = (await res.json()) as {
     jobId?: string;
     downloadUrl?: string;
+    status?: string;
     error?: string;
   };
 
@@ -61,11 +103,14 @@ export async function renderClip(
     throw new Error(data.error ?? "Render failed");
   }
 
-  onProgress?.({ progress: 100, status: "completed" });
+  const jobId = data.jobId!;
+  onProgress?.({ progress: 10, status: data.status ?? "queued" });
+
+  const polled = await pollRenderJob(jobId, onProgress);
 
   return {
-    jobId: data.jobId!,
-    downloadUrl: data.downloadUrl ?? clipDownloadUrl(clipId),
+    jobId,
+    downloadUrl: polled.downloadUrl ?? data.downloadUrl ?? clipDownloadUrl(clipId),
   };
 }
 

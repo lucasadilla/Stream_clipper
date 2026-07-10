@@ -699,6 +699,8 @@ export interface TranscriptionSyncOptions {
   isLive?: boolean;
   budgetSeconds?: number;
   parallel?: number;
+  /** Caller already holds the DB lock under this owner id. */
+  heldLockOwner?: string;
 }
 
 export async function syncTranscription(
@@ -711,11 +713,28 @@ export async function syncTranscription(
   if (activeSyncs.has(streamSessionId)) {
     return { skipped: true, reason: "sync_in_progress" };
   }
+
+  const { claimTranscriptionLock, releaseTranscriptionLock } = await import(
+    "@/services/transcriptionLockService"
+  );
+  const lockOwner =
+    options.heldLockOwner ?? `api-${process.pid}-${streamSessionId.slice(0, 8)}`;
+  const ownsLock = Boolean(options.heldLockOwner);
+  if (!ownsLock) {
+    const claimed = await claimTranscriptionLock(streamSessionId, lockOwner);
+    if (!claimed) {
+      return { skipped: true, reason: "sync_in_progress" };
+    }
+  }
+
   activeSyncs.add(streamSessionId);
   try {
     return await runSyncTranscription(streamSessionId, options);
   } finally {
     activeSyncs.delete(streamSessionId);
+    if (!ownsLock) {
+      await releaseTranscriptionLock(streamSessionId, lockOwner);
+    }
   }
 }
 

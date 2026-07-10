@@ -512,7 +512,7 @@ export interface RenderShortOptions {
 }
 
 function subtitleFilter(
-  srtPath: string,
+  subtitlePath: string,
   format: RenderFormat = "vertical",
   outputHeight = 1080,
   appearance?: CaptionAppearance
@@ -521,12 +521,17 @@ function subtitleFilter(
   // shell. Use an explicitly named option (required by newer FFmpeg builds)
   // and escape characters that are meaningful inside a filter value. Forward
   // slashes also make the same expression work with Windows drive paths.
-  const escapedSrt = srtPath
+  const escapedPath = subtitlePath
     .replace(/\\/g, "/")
     .replace(/:/g, "\\:")
     .replace(/'/g, "\\'");
+  const isAss = /\.ass$/i.test(subtitlePath);
+  if (isAss) {
+    // ASS already encodes style, karaoke, and animation — do not force_style.
+    return `subtitles=filename='${escapedPath}'`;
+  }
   const style = getFfmpegCaptionForceStyle(format, outputHeight, appearance);
-  return `subtitles=filename='${escapedSrt}':force_style='${style}'`;
+  return `subtitles=filename='${escapedPath}':force_style='${style}'`;
 }
 
 let subtitleFilterAvailable: boolean | null = null;

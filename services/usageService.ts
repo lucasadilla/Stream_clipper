@@ -4,12 +4,14 @@ import {
   type PlanEntitlements,
   type PricingPlan,
 } from "@/lib/pricing";
+import { formatBytes } from "@/lib/storage";
 import {
   getBillingAccount,
   hasAppAccess,
   serializeBillingAccount,
   type BillingAccountSummary,
 } from "@/services/billingService";
+import { getAccountStoredMediaBytes } from "@/services/retentionService";
 
 export interface MonthlyUsage {
   periodStart: string;
@@ -54,11 +56,6 @@ function emptyUsage(periodStart: Date, periodEnd: Date): MonthlyUsage {
   };
 }
 
-function numberFromBigInt(value: bigint | number | null | undefined): number {
-  if (typeof value === "bigint") return Number(value);
-  return Number(value ?? 0);
-}
-
 function billingRequiredSnapshot(periodStart: Date, periodEnd: Date): UsageSnapshot {
   return {
     billingAccount: null,
@@ -75,6 +72,7 @@ function unlimitedEntitlements(): PlanEntitlements {
     processingHoursLimit: null,
     exportsLimit: null,
     storageRetentionDays: null,
+    storageLimitBytes: null,
     maxResolution: "custom",
     watermarkEnabled: false,
     priorityQueue: true,
@@ -96,6 +94,13 @@ function isNearLimit(
   if (exportsLimit !== null && usage.renderedExports >= exportsLimit * 0.8) {
     return true;
   }
+  const storageLimit = entitlements.storageLimitBytes;
+  if (
+    storageLimit !== null &&
+    usage.storedMediaBytes >= storageLimit * 0.8
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -113,7 +118,7 @@ export async function getUsageSnapshot(
     ? unlimitedEntitlements()
     : plan.entitlements;
 
-  const [sessions, sourceMedia, renderedExports, transcriptChunks, eventWindows] =
+  const [sessions, sourceMedia, renderedExports, transcriptChunks, eventWindows, storedMediaBytes] =
     await Promise.all([
       prisma.streamSession.findMany({
         where: {
@@ -151,6 +156,7 @@ export async function getUsageSnapshot(
           createdAt: { gte: periodStart, lt: periodEnd },
         },
       }),
+      getAccountStoredMediaBytes(account.id),
     ]);
 
   const sessionSeconds = sessions.reduce((total, session) => {
@@ -160,11 +166,6 @@ export async function getUsageSnapshot(
 
   const mediaSeconds = sourceMedia.reduce(
     (total, media) => total + Math.max(media.durationSeconds ?? 0, 0),
-    0
-  );
-
-  const storedMediaBytes = sourceMedia.reduce(
-    (total, media) => total + numberFromBigInt(media.sizeBytes),
     0
   );
 
@@ -211,6 +212,26 @@ export async function canCreateStreamSession(
       snapshot,
     };
   }
+
+  const storageGate = checkStorageLimit(snapshot);
+  if (!storageGate.allowed) return storageGate;
+
+  return { allowed: true, snapshot };
+}
+
+function checkStorageLimit(snapshot: UsageSnapshot): UsageGateResult {
+  const storageLimit = snapshot.entitlements?.storageLimitBytes ?? null;
+  if (
+    storageLimit !== null &&
+    snapshot.usage.storedMediaBytes >= storageLimit
+  ) {
+    return {
+      allowed: false,
+      status: 402,
+      message: `Storage full (${formatBytes(snapshot.usage.storedMediaBytes)} / ${formatBytes(storageLimit)}). Delete old sessions or upgrade your plan.`,
+      snapshot,
+    };
+  }
   return { allowed: true, snapshot };
 }
 
@@ -220,6 +241,9 @@ export async function canProcessMoreSeconds(
 ): Promise<UsageGateResult> {
   const snapshot = await getUsageSnapshot(billingAccountId);
   if (!snapshot.plan || !snapshot.entitlements) return billingRequiredGate(snapshot);
+
+  const storageGate = checkStorageLimit(snapshot);
+  if (!storageGate.allowed) return storageGate;
 
   const limit = snapshot.entitlements.processingHoursLimit;
   if (limit !== null) {

@@ -42,9 +42,12 @@ export function applyCaptionEdits(
       const end = edit.endTimeSeconds ?? cue.endTimeSeconds;
       const clamped = clampCueRange(start, end, Number.MAX_SAFE_INTEGER);
 
+      const nextText = edit.text ?? cue.text;
       return {
         ...cue,
-        text: edit.text ?? cue.text,
+        text: nextText,
+        // Text edits invalidate word timings for karaoke.
+        words: edit.text !== undefined && edit.text !== cue.text ? undefined : cue.words,
         startTimeSeconds: clamped.startTimeSeconds,
         endTimeSeconds: clamped.endTimeSeconds,
       };

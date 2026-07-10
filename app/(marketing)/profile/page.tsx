@@ -18,6 +18,13 @@ function formatHours(seconds: number): string {
   return `${hours.toFixed(1)}h`;
 }
 
+function formatStorageBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
 function formatLimit(used: string, limit: number | null): string {
   if (limit === null) return `${used} / Unlimited`;
   return `${used} / ${limit}`;
@@ -202,6 +209,12 @@ export default function ProfilePage() {
   const hoursLimit = usage?.entitlements?.processingHoursLimit ?? null;
   const exportsUsed = usage?.usage.renderedExports ?? 0;
   const exportsLimit = usage?.entitlements?.exportsLimit ?? null;
+  const storageUsed = usage?.usage.storedMediaBytes ?? 0;
+  const storageLimit = usage?.entitlements?.storageLimitBytes ?? null;
+  const storageLabel =
+    storageLimit === null
+      ? `${formatStorageBytes(storageUsed)} / Unlimited`
+      : `${formatStorageBytes(storageUsed)} / ${formatStorageBytes(storageLimit)}`;
   const nextInvoice = formatMoney(
     stripeDetails?.nextInvoiceAmountCents ?? null,
     stripeDetails?.currency ?? null
@@ -431,6 +444,12 @@ export default function ProfilePage() {
                 <p className="text-xs uppercase text-white/50">Exports</p>
                 <p className="mt-2 text-xl font-semibold text-white">
                   {formatLimit(String(exportsUsed), exportsLimit)}
+                </p>
+              </div>
+              <div className="border border-[var(--color-card-border)] bg-[#020302] px-4 py-4 sm:col-span-2">
+                <p className="text-xs uppercase text-white/50">Storage</p>
+                <p className="mt-2 text-xl font-semibold text-white">
+                  {storageLabel}
                 </p>
               </div>
             </div>
