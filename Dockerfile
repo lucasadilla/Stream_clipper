@@ -1,4 +1,4 @@
-FROM node:20-bookworm-slim AS base
+FROM node:22-bookworm-slim AS base
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -12,7 +12,8 @@ RUN apt-get update \
     curl \
     python3 \
     python3-pip \
-  && pip3 install --break-system-packages --no-cache-dir yt-dlp \
+  && pip3 install --break-system-packages --no-cache-dir "yt-dlp[default]" \
+  && node --version \
   && yt-dlp --version \
   && ffmpeg -hide_banner -filters 2>&1 | grep -q subtitles \
   && fc-match "Arial" \

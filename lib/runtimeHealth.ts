@@ -16,6 +16,9 @@ export interface RuntimeHealthReport {
   whisperConfigured: boolean;
   storageRoot: string;
   storageWritable: boolean;
+  storagePersistent: boolean;
+  workerEnabled: boolean;
+  ytDlpJsRuntimeCompatible: boolean;
   databaseConfigured: boolean;
   billingConfigured: boolean;
   stripeSecretConfigured: boolean;
@@ -66,6 +69,22 @@ export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
     isFfmpegAvailable(),
     isYtDlpAvailable(),
   ]);
+  const nodeMajor = Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10);
+  const ytDlpJsRuntimeCompatible = nodeMajor >= 22;
+  const workerSetting = process.env.WORKER_ENABLED?.trim().toLowerCase();
+  const workerEnabled = workerSetting
+    ? !["0", "false", "off"].includes(workerSetting)
+    : process.env.NODE_ENV === "production";
+  const onRailway = Boolean(
+    process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_ENVIRONMENT_ID
+  );
+  const volumeMountPath = process.env.RAILWAY_VOLUME_MOUNT_PATH?.trim();
+  const storagePersistent =
+    !onRailway ||
+    Boolean(
+      volumeMountPath &&
+        storageRoot.startsWith(path.resolve(volumeMountPath))
+    );
 
   const stripeMissingEnvVars = [
     "STRIPE_SECRET_KEY",
@@ -116,6 +135,11 @@ export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
         : `yt-dlp not found (tried: ${getYtDlpPathCandidates().join(", ")}). Redeploy with the latest Dockerfile.`
     );
   }
+  if (!ytDlpJsRuntimeCompatible) {
+    issues.push(
+      `Node ${process.versions.node} is too old for current yt-dlp YouTube challenge solving. Deploy the Node 22 Docker image.`
+    );
+  }
   if (!hasAnyAiKey()) {
     issues.push("Set OPENROUTER_API_KEY or OPENAI_API_KEY for transcription.");
   }
@@ -129,6 +153,14 @@ export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
         : "STORAGE_ROOT is not writable. On Railway, mount a volume at /app/storage and set STORAGE_ROOT=/app/storage."
     );
   }
+  if (!storagePersistent) {
+    issues.push(
+      "Railway storage is ephemeral. Mount a Railway volume at /app/storage or source media, transcripts, and timeline frames will disappear after redeploys."
+    );
+  }
+  if (!workerEnabled) {
+    issues.push("Background worker is disabled. Set WORKER_ENABLED=1 on Railway.");
+  }
 
   return {
     ok: issues.length === 0,
@@ -138,6 +170,9 @@ export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
     whisperConfigured: isWhisperAvailable(),
     storageRoot,
     storageWritable,
+    storagePersistent,
+    workerEnabled,
+    ytDlpJsRuntimeCompatible,
     databaseConfigured,
     billingConfigured,
     stripeSecretConfigured,

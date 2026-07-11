@@ -72,9 +72,12 @@ export async function runLivePipeline(streamSessionId: string) {
 
   if (sourceMedia && (sourceMedia.durationSeconds ?? 0) >= 3) {
     const isLive = isLiveStatus(fresh.liveStatus);
-    void capturePriorityThumbs(streamSessionId, { prioritizeTail: isLive }).catch(
-      () => {}
-    );
+    await capturePriorityThumbs(streamSessionId, {
+      prioritizeTail: isLive,
+    }).catch((error) => {
+      results.thumbnailError =
+        error instanceof Error ? error.message : String(error);
+    });
     void syncTimelineThumbnails(streamSessionId, { prioritizeTail: isLive }).catch(
       () => {}
     );

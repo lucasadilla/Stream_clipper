@@ -17,6 +17,7 @@ export { getYtDlpPath } from "@/lib/ytDlp";
 
 let resolvedYtDlpInvocation: YtDlpInvocation | null = null;
 let lastYtDlpProbeError: string | null = null;
+let generatedCookiesPath: string | null = null;
 
 export function getLastYtDlpProbeError(): string | null {
   return lastYtDlpProbeError;
@@ -91,6 +92,28 @@ export function baseYtDlpArgs(): string[] {
   ];
 }
 
+/** Optional Railway egress/auth settings for datacenter-blocked media hosts. */
+export async function getYtDlpDeploymentArgs(): Promise<string[]> {
+  const args: string[] = [];
+  const proxy = process.env.YT_DLP_PROXY?.trim();
+  if (proxy) args.push("--proxy", proxy);
+
+  let cookiesPath = process.env.YT_DLP_COOKIES_PATH?.trim();
+  const cookiesBase64 = process.env.YT_DLP_COOKIES_B64?.trim();
+  if (!cookiesPath && cookiesBase64) {
+    cookiesPath = generatedCookiesPath ?? "/tmp/stream-clipper-ytdlp-cookies.txt";
+    if (!generatedCookiesPath) {
+      await fs.writeFile(cookiesPath, Buffer.from(cookiesBase64, "base64"), {
+        mode: 0o600,
+      });
+      generatedCookiesPath = cookiesPath;
+    }
+  }
+  if (cookiesPath) args.push("--cookies", cookiesPath);
+
+  return args;
+}
+
 export async function runYtDlp(
   extraArgs: string[],
   url: string,
@@ -109,8 +132,10 @@ export async function runYtDlp(
 
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
+      const deploymentArgs = await getYtDlpDeploymentArgs();
       return await runCommand(invocation.command, [
         ...invocation.prefixArgs,
+        ...deploymentArgs,
         ...extraArgs,
         url,
       ]);

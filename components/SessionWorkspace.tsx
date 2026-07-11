@@ -120,6 +120,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [transcriptionError, setTranscriptionError] = useState<string | null>(null);
+  const [sourcePreparationError, setSourcePreparationError] = useState<string | null>(null);
   const [transcribingActive, setTranscribingActive] = useState(false);
   const [captionsEnabled, setCaptionsEnabled] = useState(true);
   const [captionAppearance, setCaptionAppearance] = useState<CaptionAppearance>(
@@ -345,9 +346,28 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   useEffect(() => {
     if (sourceStarted.current) return;
     sourceStarted.current = true;
-    fetch(`/api/sessions/${sessionId}/download-source`, { method: "POST" }).catch(
-      () => {}
-    );
+    void fetchJson<{ error?: string }>(
+      `/api/sessions/${sessionId}/download-source`,
+      { method: "POST" }
+    )
+      .then(({ ok, data }) => {
+        if (!ok) {
+          setSourcePreparationError(
+            data.error
+              ? `Source download failed: ${data.error}`
+              : "Source download failed on the server"
+          );
+          return;
+        }
+        setSourcePreparationError(null);
+      })
+      .catch((error) => {
+        setSourcePreparationError(
+          error instanceof Error
+            ? `Source download failed: ${error.message}`
+            : "Source download failed on the server"
+        );
+      });
   }, [sessionId]);
 
   const isLive =
@@ -733,7 +753,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
                   transcribedSeconds={progressTranscribedSeconds}
                   recordedSeconds={progressRecordedSeconds}
                   transcribingActive={transcribingActive}
-                  transcriptionError={transcriptionError}
+                  transcriptionError={sourcePreparationError ?? transcriptionError}
                 />
               </div>
             </aside>

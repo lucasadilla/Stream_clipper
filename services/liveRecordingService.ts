@@ -16,6 +16,7 @@ import {
 import { syncPreviewMp4 } from "@/services/previewVideoService";
 import {
   baseYtDlpArgs,
+  getYtDlpDeploymentArgs,
   resolveYtDlpInvocation,
 } from "@/services/youtubeDownloadService";
 
@@ -185,6 +186,7 @@ export async function startLiveRecording(streamSessionId: string) {
 
   const args = [
     ...invocation.prefixArgs,
+    ...(await getYtDlpDeploymentArgs()),
     ...baseYtDlpArgs(),
     "--live-from-start",
     "-f",
