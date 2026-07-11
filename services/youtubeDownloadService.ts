@@ -84,6 +84,9 @@ export function networkYtDlpArgs(): string[] {
 export function baseYtDlpArgs(): string[] {
   return [
     ...networkYtDlpArgs(),
+    // Expose growing media files immediately so transcription and timeline
+    // thumbnails do not wait for a multi-hour VOD download to finish.
+    "--no-part",
     "--js-runtimes",
     getYtDlpJsRuntimeArg(),
     "--no-playlist",
@@ -158,19 +161,35 @@ function getYtDlpJsRuntimeArg(): string {
   return `node:${process.execPath}`;
 }
 
-const FORMAT_CHAINS = [
-  "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best[height<=1080]/best",
-  "bestvideo+bestaudio/best",
-  "best",
-] as const;
+function sourceMaxHeight(): number {
+  const configured = Number.parseInt(
+    process.env.SOURCE_MAX_HEIGHT?.trim() ?? "",
+    10
+  );
+  if (Number.isFinite(configured) && configured >= 240) return configured;
+  // Railway only needs a lightweight analysis/editing copy. Final render
+  // segments can still be fetched separately at higher quality.
+  return process.env.NODE_ENV === "production" ? 480 : 1080;
+}
+
+function sourceFormatChains(): string[] {
+  const height = sourceMaxHeight();
+  return [
+    `best[height<=${height}][ext=mp4]/best[height<=${height}]/bestvideo[height<=${height}]+bestaudio`,
+    `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]`,
+    "bestvideo+bestaudio/best",
+    "best",
+  ];
+}
 
 async function runYtDlpWithFormatFallback(
   baseArgs: string[],
-  url: string
+  url: string,
+  formats = sourceFormatChains()
 ): Promise<void> {
   let lastError: Error | null = null;
 
-  for (const format of FORMAT_CHAINS) {
+  for (const format of formats) {
     const args = [...baseArgs];
     const formatIdx = args.indexOf("-f");
     if (formatIdx >= 0) {
@@ -242,7 +261,7 @@ export async function downloadSourceFromYouTube(streamSessionId: string) {
     [
       ...baseYtDlpArgs(),
       "-f",
-      FORMAT_CHAINS[0],
+      sourceFormatChains()[0]!,
       "-o",
       outputPath,
     ],
@@ -330,11 +349,16 @@ export async function downloadClipSegmentFromStream(
       section,
       "--force-keyframes-at-cuts",
       "-f",
-      FORMAT_CHAINS[0],
+      "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
       "-o",
       outputPath,
     ],
-    streamUrl
+    streamUrl,
+    [
+      "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+      "bestvideo+bestaudio/best",
+      "best",
+    ]
   );
 }
 

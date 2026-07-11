@@ -6,6 +6,7 @@ import {
   fileExists,
   findBestSourceFileInDir,
   getUploadDir,
+  resolveStoragePath,
   toRelativeStoragePath,
 } from "@/lib/storage";
 import { toJsonValue } from "@/lib/utils";
@@ -16,7 +17,6 @@ async function sourceMediaFromFoundFile(streamSessionId: string, absolutePath: s
     where: { streamSessionId, filePath: relativePath },
     orderBy: { createdAt: "desc" },
   });
-  if (existing) return existing;
 
   const fileStat = await stat(absolutePath);
   let probe;
@@ -35,6 +35,22 @@ async function sourceMediaFromFoundFile(streamSessionId: string, absolutePath: s
   }
 
   const ext = path.extname(absolutePath).toLowerCase();
+  if (existing) {
+    return prisma.sourceMedia.update({
+      where: { id: existing.id },
+      data: {
+        sizeBytes: BigInt(fileStat.size),
+        durationSeconds: probe.durationSeconds || existing.durationSeconds,
+        width: probe.width || existing.width,
+        height: probe.height || existing.height,
+        fps: probe.fps || existing.fps,
+        codecInfo:
+          Object.keys(probe.raw).length > 0
+            ? toJsonValue(probe.raw)
+            : existing.codecInfo ?? undefined,
+      },
+    });
+  }
   return prisma.sourceMedia.create({
     data: {
       streamSessionId,
@@ -58,7 +74,11 @@ export async function findLocalSourceMedia(streamSessionId: string) {
     orderBy: { createdAt: "desc" },
   });
   if (sourceMedia?.filePath && fileExists(sourceMedia.filePath)) {
-    return sourceMedia;
+    if ((sourceMedia.durationSeconds ?? 0) >= 2) return sourceMedia;
+    return sourceMediaFromFoundFile(
+      streamSessionId,
+      resolveStoragePath(sourceMedia.filePath)
+    );
   }
 
   const found = await findBestSourceFileInDir(getUploadDir(streamSessionId));

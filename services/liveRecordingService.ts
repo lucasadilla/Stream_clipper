@@ -20,8 +20,19 @@ import {
   resolveYtDlpInvocation,
 } from "@/services/youtubeDownloadService";
 
-const LIVE_FORMAT =
-  "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best[height<=1080]/best";
+function liveFormat(): string {
+  const configured = Number.parseInt(
+    process.env.SOURCE_MAX_HEIGHT?.trim() ?? "",
+    10
+  );
+  const height =
+    Number.isFinite(configured) && configured >= 240
+      ? configured
+      : process.env.NODE_ENV === "production"
+        ? 480
+        : 1080;
+  return `best[height<=${height}][ext=mp4]/best[height<=${height}]/bestvideo[height<=${height}]+bestaudio/best`;
+}
 
 const MIN_RECORDED_SECONDS = 3;
 /** Growing live captures below this size are likely still starting up. */
@@ -190,7 +201,7 @@ export async function startLiveRecording(streamSessionId: string) {
     ...baseYtDlpArgs(),
     "--live-from-start",
     "-f",
-    LIVE_FORMAT,
+    liveFormat(),
     "--merge-output-format",
     "mkv",
     "--no-part",
