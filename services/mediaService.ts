@@ -23,7 +23,11 @@ import { resolveSourceRecordedSeconds, canAttemptTranscription } from "@/service
 
 const MIN_SEGMENT_SECONDS = 3;
 
-export async function saveSourceMedia(streamSessionId: string, file: File) {
+export async function saveSourceMedia(
+  streamSessionId: string,
+  file: File,
+  options?: { maxDurationSeconds?: number | null }
+) {
   if (!isAllowedVideoFile(file.name, file.type)) {
     throw new Error("Invalid file type. Accepted: mp4, mov, webm, mkv");
   }
@@ -58,6 +62,15 @@ export async function saveSourceMedia(streamSessionId: string, file: File) {
       audioCodec: null,
       raw: {},
     };
+  }
+
+  if (
+    options?.maxDurationSeconds &&
+    probe.durationSeconds > options.maxDurationSeconds
+  ) {
+    const { unlink } = await import("fs/promises");
+    await unlink(absolutePath).catch(() => {});
+    throw new Error("Creator Beta source videos can be up to 3 hours long.");
   }
 
   await prisma.sourceMedia.deleteMany({ where: { streamSessionId } });

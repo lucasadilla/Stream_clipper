@@ -18,6 +18,9 @@ export interface PlanEntitlements {
   priorityQueue: boolean;
   seatLimit: number | null;
   streamStartsLimit: number | null;
+  uploadsLimit: number | null;
+  maxSourceDurationSeconds: number | null;
+  maxClipDurationSeconds: number | null;
 }
 
 const GB = 1024 * 1024 * 1024;
@@ -70,6 +73,9 @@ export const PRICING_PLANS: PricingPlan[] = [
       priorityQueue: false,
       seatLimit: 1,
       streamStartsLimit: null,
+      uploadsLimit: null,
+      maxSourceDurationSeconds: null,
+      maxClipDurationSeconds: null,
     },
     features: [
       "10 processing hours per month",
@@ -103,6 +109,9 @@ export const PRICING_PLANS: PricingPlan[] = [
       priorityQueue: true,
       seatLimit: 1,
       streamStartsLimit: null,
+      uploadsLimit: null,
+      maxSourceDurationSeconds: null,
+      maxClipDurationSeconds: null,
     },
     features: [
       "40 processing hours per month",
@@ -135,6 +144,9 @@ export const PRICING_PLANS: PricingPlan[] = [
       priorityQueue: true,
       seatLimit: 3,
       streamStartsLimit: null,
+      uploadsLimit: null,
+      maxSourceDurationSeconds: null,
+      maxClipDurationSeconds: null,
     },
     features: [
       "100 processing hours per month",
@@ -163,6 +175,9 @@ export const PRICING_PLANS: PricingPlan[] = [
       priorityQueue: true,
       seatLimit: null,
       streamStartsLimit: null,
+      uploadsLimit: null,
+      maxSourceDurationSeconds: null,
+      maxClipDurationSeconds: null,
     },
     features: [
       "Starts around $299/mo",
@@ -172,6 +187,37 @@ export const PRICING_PLANS: PricingPlan[] = [
     ],
   },
 ];
+
+export const CREATOR_BETA_PLAN: PricingPlan = {
+  id: "creator",
+  name: "Creator Beta",
+  audience: "Invited creators",
+  monthlyPrice: 0,
+  yearlyPrice: 0,
+  priceLabel: "Free during beta",
+  yearlyLabel: "Free during beta",
+  entitlements: {
+    plan: "creator",
+    processingHoursLimit: null,
+    exportsLimit: 25,
+    storageRetentionDays: null,
+    storageLimitBytes: null,
+    maxResolution: "1080p",
+    watermarkEnabled: false,
+    priorityQueue: false,
+    seatLimit: 1,
+    streamStartsLimit: null,
+    uploadsLimit: 10,
+    maxSourceDurationSeconds: 3 * 60 * 60,
+    maxClipDurationSeconds: 60,
+  },
+  features: [
+    "25 rendered clips per month",
+    "10 video uploads per month",
+    "Source videos up to 3 hours",
+    "Rendered clips up to 60 seconds",
+  ],
+};
 
 export const CHECKOUT_PLAN_IDS: CheckoutPlanId[] = ["creator", "pro", "studio"];
 

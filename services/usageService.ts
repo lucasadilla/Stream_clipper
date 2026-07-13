@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import {
+  CREATOR_BETA_PLAN,
   getPricingPlan,
   type PlanEntitlements,
   type PricingPlan,
@@ -8,6 +9,7 @@ import { formatBytes } from "@/lib/storage";
 import {
   getBillingAccount,
   hasAppAccess,
+  isActiveBillingStatus,
   serializeBillingAccount,
   type BillingAccountSummary,
 } from "@/services/billingService";
@@ -17,6 +19,7 @@ export interface MonthlyUsage {
   periodStart: string;
   periodEnd: string;
   streamStarts: number;
+  videoUploads: number;
   processedSeconds: number;
   renderedExports: number;
   aiRequests: number;
@@ -49,6 +52,7 @@ function emptyUsage(periodStart: Date, periodEnd: Date): MonthlyUsage {
     periodStart: periodStart.toISOString(),
     periodEnd: periodEnd.toISOString(),
     streamStarts: 0,
+    videoUploads: 0,
     processedSeconds: 0,
     renderedExports: 0,
     aiRequests: 0,
@@ -78,6 +82,9 @@ function unlimitedEntitlements(): PlanEntitlements {
     priorityQueue: true,
     seatLimit: null,
     streamStartsLimit: null,
+    uploadsLimit: null,
+    maxSourceDurationSeconds: null,
+    maxClipDurationSeconds: null,
   };
 }
 
@@ -113,7 +120,8 @@ export async function getUsageSnapshot(
     return billingRequiredSnapshot(periodStart, periodEnd);
   }
 
-  const plan = getPricingPlan(account.plan);
+  const betaOnly = account.betaAccess && !isActiveBillingStatus(account.status);
+  const plan = betaOnly ? CREATOR_BETA_PLAN : getPricingPlan(account.plan);
   const entitlements = account.unlimitedAccess
     ? unlimitedEntitlements()
     : plan.entitlements;
@@ -180,6 +188,7 @@ export async function getUsageSnapshot(
     periodStart: periodStart.toISOString(),
     periodEnd: periodEnd.toISOString(),
     streamStarts: sessions.length,
+    videoUploads: sessions.length,
     processedSeconds: Math.max(sessionSeconds, mediaSeconds),
     renderedExports: clipExports + platformExports,
     aiRequests: transcriptChunks + eventWindows,
@@ -199,7 +208,7 @@ function billingRequiredGate(snapshot: UsageSnapshot): UsageGateResult {
   return {
     allowed: false,
     status: 402,
-    message: "Choose a paid plan to start clipping. Stream Clipper does not offer a free tier.",
+    message: "Creator Beta access is required right now. Enter your access code to unlock beta features.",
     snapshot,
   };
 }
@@ -210,12 +219,12 @@ export async function canCreateStreamSession(
   const snapshot = await getUsageSnapshot(billingAccountId);
   if (!snapshot.plan || !snapshot.entitlements) return billingRequiredGate(snapshot);
 
-  const limit = snapshot.entitlements.streamStartsLimit;
-  if (limit !== null && snapshot.usage.streamStarts >= limit) {
+  const limit = snapshot.entitlements.uploadsLimit ?? snapshot.entitlements.streamStartsLimit;
+  if (limit !== null && snapshot.usage.videoUploads >= limit) {
     return {
       allowed: false,
       status: 402,
-      message: `Your ${snapshot.plan.name} plan includes ${limit} stream per month. Upgrade for more processing time.`,
+      message: `Creator Beta includes ${limit} video uploads per month. Your limit resets next month.`,
       snapshot,
     };
   }
@@ -269,10 +278,25 @@ export async function canProcessMoreSeconds(
 
 export async function canRenderExport(
   billingAccountId: string | null | undefined,
-  nextExports = 1
+  nextExports = 1,
+  clipDurationSeconds?: number
 ): Promise<UsageGateResult> {
   const snapshot = await getUsageSnapshot(billingAccountId);
   if (!snapshot.plan || !snapshot.entitlements) return billingRequiredGate(snapshot);
+
+  const maxClipDuration = snapshot.entitlements.maxClipDurationSeconds;
+  if (
+    maxClipDuration !== null &&
+    typeof clipDurationSeconds === "number" &&
+    clipDurationSeconds > maxClipDuration
+  ) {
+    return {
+      allowed: false,
+      status: 400,
+      message: `Creator Beta rendered clips can be up to ${maxClipDuration} seconds. Shorten this clip before rendering.`,
+      snapshot,
+    };
+  }
 
   const limit = snapshot.entitlements.exportsLimit;
   if (
@@ -283,6 +307,24 @@ export async function canRenderExport(
       allowed: false,
       status: 402,
       message: `Your ${snapshot.plan.name} plan includes ${limit} exports per month. Upgrade your plan to render more clips.`,
+      snapshot,
+    };
+  }
+  return { allowed: true, snapshot };
+}
+
+export async function canUseSourceDuration(
+  billingAccountId: string | null | undefined,
+  durationSeconds: number
+): Promise<UsageGateResult> {
+  const snapshot = await getUsageSnapshot(billingAccountId);
+  if (!snapshot.plan || !snapshot.entitlements) return billingRequiredGate(snapshot);
+  const limit = snapshot.entitlements.maxSourceDurationSeconds;
+  if (limit !== null && durationSeconds > limit) {
+    return {
+      allowed: false,
+      status: 400,
+      message: "Creator Beta source videos can be up to 3 hours long.",
       snapshot,
     };
   }

@@ -60,7 +60,15 @@ export async function POST(
 
     const billingAccountId = getBillingAccountIdFromRequest(request);
     await ensureSessionBillingAccess(clip.streamSessionId, billingAccountId);
-    const gate = await canRenderExport(billingAccountId, input.platforms.length);
+    const fullClip = await prisma.clipSuggestion.findUnique({
+      where: { id: clipSuggestionId },
+      select: { startTimeSeconds: true, endTimeSeconds: true },
+    });
+    const gate = await canRenderExport(
+      billingAccountId,
+      input.platforms.length,
+      fullClip ? fullClip.endTimeSeconds - fullClip.startTimeSeconds : undefined
+    );
     if (!gate.allowed) {
       return errorResponse(gate.message ?? "Plan limit reached", gate.status ?? 402);
     }

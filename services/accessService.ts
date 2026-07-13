@@ -12,6 +12,7 @@ import {
   type BillingAccountSummary,
 } from "@/services/billingService";
 import { getStripe } from "@/lib/stripe";
+import { isCreatorBetaEnabled } from "@/lib/creatorBeta";
 
 export interface LoginResult {
   account: BillingAccountSummary;
@@ -30,6 +31,24 @@ export async function loginWithEmail(params: {
   const email = normalizeLoginEmail(params.email);
   if (!email || !email.includes("@")) {
     throw new Error("Enter a valid email address");
+  }
+
+  const betaAccount = await prisma.billingAccount.findFirst({
+    where: {
+      email: { equals: email, mode: "insensitive" },
+      betaAccess: true,
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  if (betaAccount && isCreatorBetaEnabled()) {
+    const account = await prisma.billingAccount.update({
+      where: { id: betaAccount.id },
+      data: { lastSignedInAt: new Date() },
+    });
+    return {
+      account: serializeBillingAccount(account),
+      unlimitedAccess: account.unlimitedAccess,
+    };
   }
 
   const allowlisted = isUnlimitedAccessEmail(email);

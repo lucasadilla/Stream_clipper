@@ -113,7 +113,11 @@ export async function POST(
       throw err;
     }
 
-    const usageGate = await canRenderExport(billingAccountId);
+    const usageGate = await canRenderExport(
+      billingAccountId,
+      1,
+      clip.endTimeSeconds - clip.startTimeSeconds
+    );
     if (!usageGate.allowed) {
       return errorResponse(
         usageGate.message ?? "Plan limit reached",

@@ -11,7 +11,6 @@ import type { BillingAccountSummary } from "@/services/billingService";
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
-  const [inviteCode, setInviteCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [account, setAccount] = useState<BillingAccountSummary | null>(null);
@@ -42,7 +41,6 @@ export default function LoginPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email,
-          inviteCode: inviteCode.trim() || undefined,
         }),
       });
       if (!ok || !data.account) {
@@ -91,8 +89,8 @@ export default function LoginPage() {
             Sign in
           </h1>
           <p className="mt-5 text-lg leading-8 text-white/74 sm:text-xl sm:leading-9">
-            Allowlisted emails get unlimited access. Beta testers can use an
-            invite code. Everyone else can subscribe on the pricing page.
+            Return to your paid, team, or Creator Beta account using the email
+            already connected to your access.
           </p>
 
           <div className="mt-8 grid gap-px overflow-hidden border border-[var(--color-card-border)] bg-[var(--color-card-border)] sm:grid-cols-2">
@@ -109,21 +107,21 @@ export default function LoginPage() {
             <div className="bg-[#050805]/92 px-4 py-4">
               <span className="mb-3 block h-1 w-10 bg-[var(--color-accent)]" />
               <p className="text-xs font-semibold uppercase text-white/74">
-                Invite code
+                Creator Beta
               </p>
               <p className="mt-2 text-sm leading-6 text-[var(--color-muted)]">
-                Share a code with collaborators so they can sign in the same way.
+                Private beta codes are unlocked on the dedicated Creator Beta page.
               </p>
             </div>
           </div>
 
           <p className="mt-6 text-sm text-[var(--color-muted)]">
-            Need a paid plan instead?{" "}
+            Have a private Creator Beta code?{" "}
             <Link
-              href="/#pricing"
+              href="/creator-beta"
               className="text-[var(--color-accent)] hover:underline"
             >
-              View pricing
+              Unlock beta access
             </Link>
           </p>
         </div>
@@ -168,7 +166,7 @@ export default function LoginPage() {
                   Credentials
                 </p>
                 <p className="mt-2 text-sm text-[var(--color-muted)]">
-                  Use the email you were approved with.
+                  Use the email connected to your access.
                 </p>
               </div>
 
@@ -182,23 +180,6 @@ export default function LoginPage() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@example.com"
-                  className={cn(
-                    "h-12 w-full border border-[var(--color-card-border)] bg-[#020302]/92 px-4 text-sm text-white",
-                    "placeholder:text-[var(--color-muted)] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]",
-                    "focus:border-[var(--color-accent)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
-                  )}
-                />
-              </label>
-
-              <label className="block space-y-2">
-                <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
-                  Invite code
-                </span>
-                <input
-                  type="text"
-                  value={inviteCode}
-                  onChange={(e) => setInviteCode(e.target.value)}
-                  placeholder="Optional if allowlisted"
                   className={cn(
                     "h-12 w-full border border-[var(--color-card-border)] bg-[#020302]/92 px-4 text-sm text-white",
                     "placeholder:text-[var(--color-muted)] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]",

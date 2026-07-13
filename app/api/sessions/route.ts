@@ -58,7 +58,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const session = await createStreamSession(rawUrl, billingAccountId);
+    const session = await createStreamSession(
+      rawUrl,
+      billingAccountId,
+      usageGate.snapshot.entitlements?.maxSourceDurationSeconds
+    );
     if (billingAccountId) {
       getPostHogClient().capture({
         distinctId: billingAccountId,

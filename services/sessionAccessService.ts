@@ -19,7 +19,7 @@ export async function ensureSessionBillingAccess(
 ) {
   if (!billingAccountId) {
     throw new SessionAccessError(
-      "Sign in or subscribe before using this session.",
+      "Creator Beta access is required right now. Enter your access code to unlock beta features.",
       401
     );
   }
@@ -27,7 +27,7 @@ export async function ensureSessionBillingAccess(
   const account = await getBillingAccount(billingAccountId);
   if (!account || !hasAppAccess(account)) {
     throw new SessionAccessError(
-      "Sign in or choose a paid plan to transcribe and render.",
+      "Creator Beta access is required right now. Enter your access code to unlock beta features.",
       402
     );
   }

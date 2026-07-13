@@ -30,6 +30,7 @@ interface SessionMetadataInput {
   concurrentViewers: number | null;
   activeLiveChatId: string | null;
   metadataJson: Record<string, unknown>;
+  durationSeconds: number | null;
 }
 
 async function resolveSessionMetadata(
@@ -60,6 +61,7 @@ async function resolveSessionMetadata(
       concurrentViewers: metadata.concurrentViewers,
       activeLiveChatId: metadata.activeLiveChatId,
       metadataJson: withStreamEmbed(metadata.raw, parsed.embed),
+      durationSeconds: metadata.durationSeconds,
     };
   }
 
@@ -79,14 +81,23 @@ async function resolveSessionMetadata(
     concurrentViewers: metadata.concurrentViewers,
     activeLiveChatId: null,
     metadataJson: withStreamEmbed(metadata.raw, parsed.embed),
+    durationSeconds: metadata.durationSeconds,
   };
 }
 
 export async function createStreamSession(
   streamUrl: string,
-  billingAccountId?: string | null
+  billingAccountId?: string | null,
+  maxSourceDurationSeconds?: number | null
 ) {
   const meta = await resolveSessionMetadata(streamUrl);
+  if (
+    maxSourceDurationSeconds &&
+    meta.durationSeconds &&
+    meta.durationSeconds > maxSourceDurationSeconds
+  ) {
+    throw new Error("Creator Beta source videos can be up to 3 hours long.");
+  }
 
   const session = await prisma.streamSession.create({
     data: {

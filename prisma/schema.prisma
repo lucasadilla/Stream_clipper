@@ -61,13 +61,16 @@ model BillingAccount {
   plan                 String
   status               String    @default("incomplete")
   unlimitedAccess      Boolean   @default(false)
+  betaAccess           Boolean   @default(false)
+  betaGrantedAt        DateTime?
   currentPeriodEnd     DateTime?
   cancelAtPeriodEnd    Boolean   @default(false)
   lastSignedInAt       DateTime?
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
 
-  streamSessions StreamSession[]
+  streamSessions  StreamSession[]
+  creatorBetaCode CreatorBetaCode? @relation("CreatorBetaCodeRedemption")
 
   @@index([status])
   @@index([plan])
@@ -214,19 +217,21 @@ model SourceMedia {
 }
 
 model ClipSuggestion {
-  id               String   @id @default(cuid())
-  streamSessionId  String
-  title            String
-  startTimeSeconds Float
-  endTimeSeconds   Float
-  reason           String   @db.Text
-  confidence       Float    @default(0.5)
-  suggestedFormat  String   @default("9:16")
-  suggestedLayout  String   @default("center_crop")
-  status           String   @default("suggested")
-  rawAiJson        Json?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  id                  String    @id @default(cuid())
+  streamSessionId     String
+  title               String
+  startTimeSeconds    Float
+  endTimeSeconds      Float
+  reason              String    @db.Text
+  confidence          Float     @default(0.5)
+  suggestedFormat     String    @default("9:16")
+  suggestedLayout     String    @default("center_crop")
+  status              String    @default("suggested")
+  rawAiJson           Json?
+  marketingApproved   Boolean   @default(false)
+  marketingApprovedAt DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
   streamSession       StreamSession        @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
   renderJobs          RenderJob[]
@@ -234,6 +239,25 @@ model ClipSuggestion {
   platformExports     PlatformExport[]
 
   @@index([streamSessionId, status])
+}
+
+model CreatorBetaCode {
+  id              String    @id @default(cuid())
+  name            String
+  codeHash        String    @unique
+  codeHint        String
+  active          Boolean   @default(true)
+  usedByAccountId String?   @unique
+  usedAt          DateTime?
+  expiresAt       DateTime?
+  notes           String?   @db.Text
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  usedByAccount BillingAccount? @relation("CreatorBetaCodeRedemption", fields: [usedByAccountId], references: [id], onDelete: SetNull)
+
+  @@index([active, expiresAt])
+  @@index([createdAt])
 }
 
 model RenderJob {

@@ -1,15 +1,35 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import Link from "next/link";
 import posthog from "posthog-js";
 import { fetchJson } from "@/lib/apiClient";
 import { normalizeUserStreamUrl, parseStreamUrl } from "@/lib/streamPlatform";
 import { cn } from "@/lib/cn";
+import type { BillingAccountSummary } from "@/services/billingService";
 
 export function StreamUrlInput() {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hasAccess, setHasAccess] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    void fetchJson<{ account: BillingAccountSummary | null }>("/api/auth/me").then(
+      ({ data }) => {
+        const account = data.account;
+        setHasAccess(
+          Boolean(
+            account &&
+              (account.unlimitedAccess ||
+                account.betaAccess ||
+                account.status === "active" ||
+                account.status === "trialing")
+          )
+        );
+      }
+    );
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -70,7 +90,7 @@ export function StreamUrlInput() {
         />
         <button
           type="submit"
-          disabled={loading || !url.trim()}
+          disabled={loading || !url.trim() || hasAccess === false}
           className={cn(
             "h-14 px-7 text-sm font-semibold whitespace-nowrap text-black",
             "bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)]",
@@ -82,6 +102,14 @@ export function StreamUrlInput() {
       </div>
       {error && (
         <p className="mt-3 text-sm text-[var(--color-danger)]">{error}</p>
+      )}
+      {hasAccess === false && (
+        <p className="mt-3 text-sm text-[#c1cabd]">
+          Creator Beta access is required right now. Enter your access code to unlock beta features.{" "}
+          <Link href="/creator-beta" className="font-semibold text-[var(--color-accent)] hover:underline">
+            Unlock access
+          </Link>
+        </p>
       )}
     </form>
   );

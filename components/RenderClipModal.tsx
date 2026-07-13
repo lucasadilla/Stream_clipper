@@ -33,6 +33,7 @@ import {
   MAX_CLIP_SECONDS,
   formatMaxClipLabel,
 } from "@/lib/clipConstants";
+import type { BillingAccountSummary } from "@/services/billingService";
 
 interface RenderClipModalProps {
   open: boolean;
@@ -77,15 +78,22 @@ export function RenderClipModal({
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [downloadFilename, setDownloadFilename] = useState("clip.mp4");
   const [downloadDone, setDownloadDone] = useState(false);
+  const [marketingApproved, setMarketingApproved] = useState(false);
+  const [marketingSaving, setMarketingSaving] = useState(false);
+  const [betaAccess, setBetaAccess] = useState(false);
 
   const duration = selection.end - selection.start;
+  const maxClipSeconds = betaAccess ? 60 : MAX_CLIP_SECONDS;
   const canRender =
-    duration >= MIN_CLIP_SECONDS && duration <= MAX_CLIP_SECONDS;
-  const tooLong = duration > MAX_CLIP_SECONDS;
+    duration >= MIN_CLIP_SECONDS && duration <= maxClipSeconds;
+  const tooLong = duration > maxClipSeconds;
   const isExporting = phase === "exporting";
 
   useEffect(() => {
     setMounted(true);
+    void fetchJson<{ account: BillingAccountSummary | null }>("/api/auth/me").then(
+      ({ data }) => setBetaAccess(Boolean(data.account?.betaAccess))
+    );
   }, []);
 
   useEffect(() => {
@@ -106,6 +114,8 @@ export function RenderClipModal({
     setDownloadUrl(null);
     setDownloadFilename("clip.mp4");
     setDownloadDone(false);
+    setMarketingApproved(false);
+    setMarketingSaving(false);
   }, [open, selection.start, selection.end, includeCaptions]);
 
   useEffect(() => {
@@ -237,6 +247,33 @@ export function RenderClipModal({
     );
     setLinkCopied(true);
     window.setTimeout(() => setLinkCopied(false), 2000);
+  }
+
+  async function updateMarketingPermission(approved: boolean) {
+    if (!clipId) return;
+    const previous = marketingApproved;
+    setMarketingApproved(approved);
+    setMarketingSaving(true);
+    setError(null);
+    try {
+      const { ok, data } = await fetchJson<{ error?: string }>(
+        `/api/clips/${clipId}/marketing-permission`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ approved }),
+        }
+      );
+      if (!ok) throw new Error(data.error ?? "Could not save permission");
+      posthog.capture("clip_marketing_permission_updated", { approved });
+    } catch (reason) {
+      setMarketingApproved(previous);
+      setError(
+        reason instanceof Error ? reason.message : "Could not save permission"
+      );
+    } finally {
+      setMarketingSaving(false);
+    }
   }
 
   async function handlePublish(destination: PublishDestination) {
@@ -505,6 +542,28 @@ export function RenderClipModal({
                 </div>
               )}
 
+              {clipId && (
+                <label className="flex cursor-pointer items-start gap-3 border border-[var(--color-card-border)] bg-[#020302] p-3">
+                  <input
+                    type="checkbox"
+                    checked={marketingApproved}
+                    disabled={marketingSaving}
+                    onChange={(event) =>
+                      void updateMarketingPermission(event.target.checked)
+                    }
+                    className="mt-0.5 accent-[var(--color-accent)]"
+                  />
+                  <span>
+                    <span className="block text-xs font-semibold text-white">
+                      Allow this clip to be featured in product demos, landing pages, or social posts.
+                    </span>
+                    <span className="mt-1 block text-[10px] leading-4 text-[var(--color-muted)]">
+                      Optional. This applies only to this clip and can be turned off again.
+                    </span>
+                  </span>
+                </label>
+              )}
+
               <div className="space-y-2">
                 <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
                   Publish
@@ -538,9 +597,15 @@ export function RenderClipModal({
             </div>
           )}
 
-          {tooLong && phase === "configure" && (
+          {tooLong && !betaAccess && phase === "configure" && (
             <p className="text-xs text-[var(--color-danger)]">
               Clips must be {formatMaxClipLabel()} or shorter - shorten the
+              timeline selection.
+            </p>
+          )}
+          {tooLong && betaAccess && phase === "configure" && (
+            <p className="text-xs text-[var(--color-danger)]">
+              Creator Beta clips must be 60 seconds or shorter - shorten the
               timeline selection.
             </p>
           )}

@@ -1,4 +1,5 @@
 import type Stripe from "stripe";
+import { isCreatorBetaEnabled } from "@/lib/creatorBeta";
 import { prisma } from "@/lib/db";
 import {
   BILLING_ACCOUNT_COOKIE,
@@ -23,6 +24,8 @@ export interface BillingAccountSummary {
   plan: PlanId;
   status: string;
   unlimitedAccess: boolean;
+  betaAccess: boolean;
+  betaGrantedAt: string | null;
   canManageBilling: boolean;
   stripeCustomerId: string;
   stripeSubscriptionId: string | null;
@@ -41,9 +44,11 @@ export interface StripeBillingDetails {
 
 export function canManageBillingForAccount(account: {
   unlimitedAccess?: boolean;
+  betaAccess?: boolean;
   stripeCustomerId: string;
 }): boolean {
   if (account.unlimitedAccess) return false;
+  if (account.stripeCustomerId.startsWith("beta_")) return false;
   return !account.stripeCustomerId.startsWith("comp_");
 }
 
@@ -63,9 +68,11 @@ export function isActiveBillingStatus(status: string | null | undefined) {
 export function hasAppAccess(account: {
   status: string;
   unlimitedAccess?: boolean;
+  betaAccess?: boolean;
 } | null | undefined): boolean {
   if (!account) return false;
   if (account.unlimitedAccess) return true;
+  if (account.betaAccess && isCreatorBetaEnabled()) return true;
   return isActiveBillingStatus(account.status);
 }
 
@@ -76,6 +83,8 @@ export function serializeBillingAccount(account: {
   plan: string;
   status: string;
   unlimitedAccess?: boolean;
+  betaAccess?: boolean;
+  betaGrantedAt?: Date | null;
   stripeCustomerId: string;
   stripeSubscriptionId: string | null;
   currentPeriodEnd: Date | null;
@@ -83,6 +92,7 @@ export function serializeBillingAccount(account: {
   lastSignedInAt?: Date | null;
 }): BillingAccountSummary {
   const unlimitedAccess = account.unlimitedAccess ?? false;
+  const betaAccess = account.betaAccess ?? false;
   return {
     id: account.id,
     email: account.email,
@@ -90,8 +100,11 @@ export function serializeBillingAccount(account: {
     plan: getPricingPlan(account.plan).id,
     status: account.status,
     unlimitedAccess,
+    betaAccess,
+    betaGrantedAt: account.betaGrantedAt?.toISOString() ?? null,
     canManageBilling: canManageBillingForAccount({
       unlimitedAccess,
+      betaAccess,
       stripeCustomerId: account.stripeCustomerId,
     }),
     stripeCustomerId: account.stripeCustomerId,

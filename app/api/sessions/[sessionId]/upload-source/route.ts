@@ -3,6 +3,11 @@ import { saveSourceMedia } from "@/services/mediaService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import { getBillingAccountIdFromRequest } from "@/services/billingService";
 import { getPostHogClient } from "@/lib/posthog-server";
+import {
+  ensureSessionBillingAccess,
+  SessionAccessError,
+} from "@/services/sessionAccessService";
+import { getUsageSnapshot } from "@/services/usageService";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -13,6 +18,9 @@ export async function POST(
 ) {
   try {
     const { sessionId } = await params;
+    const billingAccountId = getBillingAccountIdFromRequest(request);
+    await ensureSessionBillingAccess(sessionId, billingAccountId);
+    const usage = await getUsageSnapshot(billingAccountId);
     const formData = await request.formData();
     const file = formData.get("file");
 
@@ -20,8 +28,9 @@ export async function POST(
       return errorResponse("No file provided", 400);
     }
 
-    const sourceMedia = await saveSourceMedia(sessionId, file);
-    const billingAccountId = getBillingAccountIdFromRequest(request);
+    const sourceMedia = await saveSourceMedia(sessionId, file, {
+      maxDurationSeconds: usage.entitlements?.maxSourceDurationSeconds,
+    });
     if (billingAccountId) {
       getPostHogClient().capture({
         distinctId: billingAccountId,
@@ -39,7 +48,10 @@ export async function POST(
       },
     });
   } catch (error) {
+    if (error instanceof SessionAccessError) {
+      return errorResponse(error.message, error.status);
+    }
     const message = error instanceof Error ? error.message : "Upload failed";
-    return errorResponse(message, 500);
+    return errorResponse(message, /3 hours|access is required/i.test(message) ? 400 : 500);
   }
 }
