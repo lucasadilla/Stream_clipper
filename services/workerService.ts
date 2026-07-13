@@ -14,6 +14,12 @@ import {
 } from "@/services/transcriptionLockService";
 import { syncTranscription } from "@/services/transcriptionSyncService";
 import { runRetentionCleanup } from "@/services/retentionService";
+import {
+  claimNextPlatformExport,
+  executePlatformExport,
+  failPlatformExport,
+  reclaimStalePlatformExports,
+} from "@/services/platformExportService";
 
 const WORKER_ID = `worker-${process.pid}-${randomUUID().slice(0, 8)}`;
 
@@ -165,6 +171,18 @@ async function processOneRenderJob(): Promise<boolean> {
   return true;
 }
 
+async function processOnePlatformExport(): Promise<boolean> {
+  const exportId = await claimNextPlatformExport();
+  if (!exportId) return false;
+
+  try {
+    await executePlatformExport(exportId);
+  } catch (error) {
+    await failPlatformExport(exportId, error);
+  }
+  return true;
+}
+
 async function processOneTranscription(): Promise<boolean> {
   const sessionIds = await listSessionsNeedingTranscription(6);
   for (const sessionId of sessionIds) {
@@ -210,17 +228,28 @@ async function processOneTranscription(): Promise<boolean> {
 export interface WorkerTickResult {
   reclaimed: number;
   renders: number;
+  platformExports: number;
   transcriptions: number;
   retentionDeleted: number;
 }
 
 export async function runWorkerTick(): Promise<WorkerTickResult> {
   if (tickInFlight) {
-    return { reclaimed: 0, renders: 0, transcriptions: 0, retentionDeleted: 0 };
+    return {
+      reclaimed: 0,
+      renders: 0,
+      platformExports: 0,
+      transcriptions: 0,
+      retentionDeleted: 0,
+    };
   }
   tickInFlight = true;
   try {
-    const reclaimed = await reclaimStaleRenderJobs();
+    const [staleRenders, stalePlatformExports] = await Promise.all([
+      reclaimStaleRenderJobs(),
+      reclaimStalePlatformExports(),
+    ]);
+    const reclaimed = staleRenders + stalePlatformExports;
     let renders = 0;
     // Process up to a few renders per tick so the loop stays responsive.
     for (let i = 0; i < 2; i++) {
@@ -228,6 +257,10 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
       if (!did) break;
       renders += 1;
     }
+
+    let platformExports = 0;
+    const didPlatformExport = await processOnePlatformExport();
+    if (didPlatformExport) platformExports = 1;
 
     let transcriptions = 0;
     const didTx = await processOneTranscription();
@@ -244,7 +277,13 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
       }
     }
 
-    return { reclaimed, renders, transcriptions, retentionDeleted };
+    return {
+      reclaimed,
+      renders,
+      platformExports,
+      transcriptions,
+      retentionDeleted,
+    };
   } finally {
     tickInFlight = false;
   }

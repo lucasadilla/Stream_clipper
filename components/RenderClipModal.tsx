@@ -483,6 +483,12 @@ export function RenderClipModal({
                     Share link
                   </span>
                   <div className="flex flex-wrap gap-2">
+                    <Link
+                      href={`/clips/${clipId}/export`}
+                      className="bg-[var(--color-accent)] px-3 py-2 text-[10px] font-bold text-black hover:bg-[var(--color-accent-hover)]"
+                    >
+                      Export for every platform
+                    </Link>
                     <SmallBtn
                       label={linkCopied ? "Copied!" : "Copy link"}
                       onClick={() => void copyShareLink()}

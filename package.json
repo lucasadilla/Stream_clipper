@@ -17,6 +17,7 @@
   "dependencies": {
     "@paper-design/shaders-react": "^0.0.77",
     "@prisma/client": "^6.9.0",
+    "archiver": "^8.0.0",
     "clsx": "^2.1.1",
     "motion": "^12.42.2",
     "next": "^15.3.3",
@@ -33,6 +34,7 @@
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.1",
     "@tailwindcss/postcss": "^4.1.10",
+    "@types/archiver": "^8.0.0",
     "@types/node": "^22.15.30",
     "@types/react": "^19.1.6",
     "@types/react-dom": "^19.1.6",

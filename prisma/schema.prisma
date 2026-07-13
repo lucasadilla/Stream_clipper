@@ -11,59 +11,61 @@ datasource db {
 }
 
 model StreamSession {
-  id                 String   @id @default(cuid())
-  billingAccountId   String?
-  platform           String   @default("youtube") // youtube | twitch | kick
-  youtubeVideoId     String
-  youtubeUrl         String
-  title              String?
-  description        String?  @db.Text
-  channelTitle       String?
-  channelId          String?
-  thumbnailUrl       String?
-  liveStatus         String?
-  actualStartTime    DateTime?
-  scheduledStartTime DateTime?
-  concurrentViewers  Int?
-  activeLiveChatId   String?
-  metadataJson       Json?
-  transcribeLockedAt DateTime?
-  transcribeLockedBy String?
-  lastTranscriptionError String? @db.Text
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  id                     String    @id @default(cuid())
+  billingAccountId       String?
+  platform               String    @default("youtube") // youtube | twitch | kick
+  youtubeVideoId         String
+  youtubeUrl             String
+  title                  String?
+  description            String?   @db.Text
+  channelTitle           String?
+  channelId              String?
+  thumbnailUrl           String?
+  liveStatus             String?
+  actualStartTime        DateTime?
+  scheduledStartTime     DateTime?
+  concurrentViewers      Int?
+  activeLiveChatId       String?
+  metadataJson           Json?
+  transcribeLockedAt     DateTime?
+  transcribeLockedBy     String?
+  lastTranscriptionError String?   @db.Text
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
 
-  chatMessages    ChatMessage[]
-  eventWindows    EventWindow[]
-  transcriptChunks TranscriptChunk[]
-  audioEvents     AudioEvent[]
-  visualEvents    VisualEvent[]
-  facecamRegions  FacecamRegion[]
-  sourceMedia     SourceMedia[]
-  clipSuggestions ClipSuggestion[]
-  renderJobs      RenderJob[]
-  chatTracking    ChatTrackingState?
-  liveRecording   LiveRecordingState?
-  billingAccount  BillingAccount? @relation(fields: [billingAccountId], references: [id], onDelete: SetNull)
+  chatMessages        ChatMessage[]
+  eventWindows        EventWindow[]
+  transcriptChunks    TranscriptChunk[]
+  audioEvents         AudioEvent[]
+  visualEvents        VisualEvent[]
+  facecamRegions      FacecamRegion[]
+  sourceMedia         SourceMedia[]
+  clipSuggestions     ClipSuggestion[]
+  renderJobs          RenderJob[]
+  platformExportPacks PlatformExportPack[]
+  platformExports     PlatformExport[]
+  chatTracking        ChatTrackingState?
+  liveRecording       LiveRecordingState?
+  billingAccount      BillingAccount?      @relation(fields: [billingAccountId], references: [id], onDelete: SetNull)
 
   @@index([billingAccountId])
   @@index([youtubeVideoId])
 }
 
 model BillingAccount {
-  id                     String   @id @default(cuid())
-  email                  String?
-  displayName            String?
-  stripeCustomerId       String   @unique
-  stripeSubscriptionId   String?  @unique
-  plan                   String
-  status                 String   @default("incomplete")
-  unlimitedAccess        Boolean  @default(false)
-  currentPeriodEnd       DateTime?
-  cancelAtPeriodEnd      Boolean  @default(false)
-  lastSignedInAt         DateTime?
-  createdAt              DateTime @default(now())
-  updatedAt              DateTime @updatedAt
+  id                   String    @id @default(cuid())
+  email                String?
+  displayName          String?
+  stripeCustomerId     String    @unique
+  stripeSubscriptionId String?   @unique
+  plan                 String
+  status               String    @default("incomplete")
+  unlimitedAccess      Boolean   @default(false)
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean   @default(false)
+  lastSignedInAt       DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 
   streamSessions StreamSession[]
 
@@ -73,22 +75,22 @@ model BillingAccount {
 }
 
 model LiveRecordingState {
-  id              String   @id @default(cuid())
-  streamSessionId String   @unique
-  status          String   @default("idle") // idle | recording | stopped | completed
+  id              String        @id @default(cuid())
+  streamSessionId String        @unique
+  status          String        @default("idle") // idle | recording | stopped | completed
   pid             Int?
   startedAt       DateTime?
   lastSyncedAt    DateTime?
-  recordedSeconds Float    @default(0)
+  recordedSeconds Float         @default(0)
   streamSession   StreamSession @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
 }
 
 model ChatTrackingState {
-  id              String   @id @default(cuid())
-  streamSessionId String   @unique
-  isActive        Boolean  @default(false)
+  id              String        @id @default(cuid())
+  streamSessionId String        @unique
+  isActive        Boolean       @default(false)
   nextPageToken   String?
-  pollingInterval Int      @default(5000)
+  pollingInterval Int           @default(5000)
   lastPolledAt    DateTime?
   startedAt       DateTime?
   streamSession   StreamSession @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
@@ -208,7 +210,7 @@ model SourceMedia {
   createdAt        DateTime @default(now())
 
   streamSession StreamSession @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
-  renderJobs      RenderJob[]
+  renderJobs    RenderJob[]
 }
 
 model ClipSuggestion {
@@ -226,8 +228,10 @@ model ClipSuggestion {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
-  streamSession StreamSession @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
-  renderJobs      RenderJob[]
+  streamSession       StreamSession        @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+  renderJobs          RenderJob[]
+  platformExportPacks PlatformExportPack[]
+  platformExports     PlatformExport[]
 
   @@index([streamSessionId, status])
 }
@@ -254,11 +258,76 @@ model RenderJob {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
-  streamSession  StreamSession   @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
-  clipSuggestion ClipSuggestion? @relation(fields: [clipSuggestionId], references: [id], onDelete: SetNull)
-  sourceMedia    SourceMedia?    @relation(fields: [sourceMediaId], references: [id], onDelete: SetNull)
+  streamSession   StreamSession    @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+  clipSuggestion  ClipSuggestion?  @relation(fields: [clipSuggestionId], references: [id], onDelete: SetNull)
+  sourceMedia     SourceMedia?     @relation(fields: [sourceMediaId], references: [id], onDelete: SetNull)
+  platformExports PlatformExport[]
 
   @@index([streamSessionId, status])
   @@index([status, lockedAt])
   @@index([status, createdAt])
+}
+
+model PlatformExportPack {
+  id               String   @id @default(cuid())
+  clipSuggestionId String
+  streamSessionId  String
+  name             String
+  status           String   @default("queued")
+  errorMessage     String?  @db.Text
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  clipSuggestion ClipSuggestion   @relation(fields: [clipSuggestionId], references: [id], onDelete: Cascade)
+  streamSession  StreamSession    @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+  exports        PlatformExport[]
+
+  @@index([clipSuggestionId, createdAt])
+  @@index([streamSessionId, status])
+}
+
+model PlatformExport {
+  id                 String    @id @default(cuid())
+  exportPackId       String
+  clipSuggestionId   String
+  renderJobId        String?
+  streamSessionId    String
+  platform           String
+  presetName         String
+  status             String    @default("queued")
+  progress           Int       @default(0)
+  outputPath         String?
+  thumbnailPath      String?
+  title              String?
+  caption            String?   @db.Text
+  hashtags           Json      @default("[]")
+  postText           String?   @db.Text
+  description        String?   @db.Text
+  tags               Json?
+  quoteText          String?   @db.Text
+  thumbnailText      String?
+  pinnedComment      String?   @db.Text
+  validationWarnings Json      @default("[]")
+  exportSettings     Json
+  width              Int?
+  height             Int?
+  durationSeconds    Float?
+  fileSizeBytes      BigInt?
+  errorMessage       String?   @db.Text
+  lockedAt           DateTime?
+  lockedBy           String?
+  startedAt          DateTime?
+  completedAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  exportPack     PlatformExportPack @relation(fields: [exportPackId], references: [id], onDelete: Cascade)
+  clipSuggestion ClipSuggestion     @relation(fields: [clipSuggestionId], references: [id], onDelete: Cascade)
+  renderJob      RenderJob?         @relation(fields: [renderJobId], references: [id], onDelete: SetNull)
+  streamSession  StreamSession      @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+
+  @@unique([exportPackId, platform])
+  @@index([status, createdAt])
+  @@index([clipSuggestionId, createdAt])
+  @@index([streamSessionId, status])
 }

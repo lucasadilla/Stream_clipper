@@ -118,7 +118,7 @@ export async function getUsageSnapshot(
     ? unlimitedEntitlements()
     : plan.entitlements;
 
-  const [sessions, sourceMedia, renderedExports, transcriptChunks, eventWindows, storedMediaBytes] =
+  const [sessions, sourceMedia, clipExports, platformExports, transcriptChunks, eventWindows, storedMediaBytes] =
     await Promise.all([
       prisma.streamSession.findMany({
         where: {
@@ -138,6 +138,13 @@ export async function getUsageSnapshot(
         select: { sizeBytes: true, durationSeconds: true },
       }),
       prisma.renderJob.count({
+        where: {
+          streamSession: { billingAccountId: account.id },
+          createdAt: { gte: periodStart, lt: periodEnd },
+          status: "completed",
+        },
+      }),
+      prisma.platformExport.count({
         where: {
           streamSession: { billingAccountId: account.id },
           createdAt: { gte: periodStart, lt: periodEnd },
@@ -174,7 +181,7 @@ export async function getUsageSnapshot(
     periodEnd: periodEnd.toISOString(),
     streamStarts: sessions.length,
     processedSeconds: Math.max(sessionSeconds, mediaSeconds),
-    renderedExports,
+    renderedExports: clipExports + platformExports,
     aiRequests: transcriptChunks + eventWindows,
     storedMediaBytes,
   };
@@ -261,13 +268,17 @@ export async function canProcessMoreSeconds(
 }
 
 export async function canRenderExport(
-  billingAccountId: string | null | undefined
+  billingAccountId: string | null | undefined,
+  nextExports = 1
 ): Promise<UsageGateResult> {
   const snapshot = await getUsageSnapshot(billingAccountId);
   if (!snapshot.plan || !snapshot.entitlements) return billingRequiredGate(snapshot);
 
   const limit = snapshot.entitlements.exportsLimit;
-  if (limit !== null && snapshot.usage.renderedExports >= limit) {
+  if (
+    limit !== null &&
+    snapshot.usage.renderedExports + Math.max(1, nextExports) > limit
+  ) {
     return {
       allowed: false,
       status: 402,
