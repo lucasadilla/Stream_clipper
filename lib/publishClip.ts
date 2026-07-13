@@ -103,7 +103,7 @@ export function destinationHint(
 /** Full block for manual copy when user has not generated AI metadata. */
 export function fallbackUploadBlock(title: string, format: RenderFormat): string {
   const label = format === "vertical" ? "Short" : "clip";
-  return `${title || `My stream ${label}`}\n\nClip exported from Stream Clipper.`;
+  return `${title || `My stream ${label}`}\n\nClip exported from Clipper.`;
 }
 
 export { formatClipMetadataBlock };

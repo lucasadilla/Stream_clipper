@@ -78,7 +78,7 @@ export async function provisionSubscriptionProduct(
 
   if (!product) {
     const created = await stripe.products.create({
-      name: `Stream Clipper ${plan.name}`,
+      name: `Clipper ${plan.name}`,
       description: planDescription(planId),
       tax_code: STRIPE_DIGITAL_TAX_CODE,
       metadata: { plan_id: planId },
@@ -94,6 +94,15 @@ export async function provisionSubscriptionProduct(
         ? created.default_price
         : created.default_price?.id;
   } else {
+    const productName = `Clipper ${plan.name}`;
+    const description = planDescription(planId);
+    if (product.name !== productName || product.description !== description) {
+      product = await stripe.products.update(product.id, {
+        name: productName,
+        description,
+      });
+    }
+
     const prices = await stripe.prices.list({
       product: product.id,
       active: true,

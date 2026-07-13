@@ -103,7 +103,7 @@ async function transcribeViaOpenRouter(
       "Content-Type": "application/json",
       "HTTP-Referer":
         process.env.OPENROUTER_SITE_URL?.trim() || "http://localhost:3000",
-      "X-Title": process.env.OPENROUTER_APP_NAME?.trim() || "Stream Clipper",
+      "X-Title": process.env.OPENROUTER_APP_NAME?.trim() || "Clipper",
     },
     body: JSON.stringify({
       ...baseBody,
@@ -143,7 +143,7 @@ async function transcribeViaOpenRouter(
       "Content-Type": "application/json",
       "HTTP-Referer":
         process.env.OPENROUTER_SITE_URL?.trim() || "http://localhost:3000",
-      "X-Title": process.env.OPENROUTER_APP_NAME?.trim() || "Stream Clipper",
+      "X-Title": process.env.OPENROUTER_APP_NAME?.trim() || "Clipper",
     },
     body: JSON.stringify(baseBody),
   });

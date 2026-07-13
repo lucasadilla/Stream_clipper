@@ -1,13 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
 import { formatDuration, formatSeconds } from "@/lib/time";
 import { clipDownloadUrl } from "@/lib/downloadUrls";
 import { clipShareUrl } from "@/lib/clipShare";
 import { triggerFileDownload } from "@/lib/clientDownload";
 import type { ClipSharePayload } from "@/services/clipShareService";
 import { cn } from "@/lib/cn";
+import { SiteLogo } from "@/components/layout/SiteLogo";
 
 interface ClipShareViewProps {
   clip: ClipSharePayload;
@@ -49,12 +49,7 @@ export function ClipShareView({ clip }: ClipShareViewProps) {
     <div className="editor-shell min-h-screen bg-[var(--color-background)] text-[var(--color-foreground)]">
       <header className="border-b border-[var(--color-card-border)] bg-[#020302]/92 backdrop-blur-sm">
         <div className="mx-auto flex max-w-4xl items-center justify-between gap-3 px-4 py-3">
-          <Link
-            href="/"
-            className="text-sm font-semibold text-[var(--color-foreground)] hover:text-[var(--color-accent)]"
-          >
-            Stream Clipper
-          </Link>
+          <SiteLogo />
           <button
             type="button"
             onClick={() => void copyLink()}

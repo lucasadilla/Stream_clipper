@@ -15,12 +15,12 @@ export const metadata: Metadata = {
     process.env.NEXT_PUBLIC_SITE_URL ?? "https://streamclipper.app"
   ),
   title: {
-    default: "Stream Clipper — AI Stream Clipper & Shorts Generator",
-    template: "%s | Stream Clipper",
+    default: "Clipper — AI Livestream Editor & Shorts Generator",
+    template: "%s | Clipper",
   },
   description:
     "Turn livestreams and VODs into captioned clips and vertical Shorts. Search transcripts, edit on a synchronized timeline, and export fast.",
-  applicationName: "Stream Clipper",
+  applicationName: "Clipper",
   keywords: [
     "AI stream clipper",
     "livestream clip maker",
@@ -32,14 +32,14 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     url: "/",
-    siteName: "Stream Clipper",
-    title: "Stream Clipper — Turn Livestreams into Clips and Shorts",
+    siteName: "Clipper",
+    title: "Clipper — Turn Livestreams into Clips and Shorts",
     description:
       "Find the best moments in livestreams and VODs, add captions, and export 16:9 clips or 9:16 Shorts.",
   },
   twitter: {
     card: "summary_large_image",
-    title: "Stream Clipper — AI Stream Clipper & Shorts Generator",
+    title: "Clipper — AI Livestream Editor & Shorts Generator",
     description:
       "Search transcripts, caption clips, and export livestream highlights fast.",
   },

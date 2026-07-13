@@ -66,7 +66,7 @@ export function SiteFooter() {
         </div>
 
         <div className="mt-10 flex flex-col items-center justify-between gap-3 border-t border-[var(--color-card-border)] pt-6 text-xs text-[var(--color-muted)] sm:flex-row">
-          <p>Copyright {year} Stream Clipper. Built for creators.</p>
+          <p>Copyright {year} Clipper. Built for creators.</p>
           <p>Files stored locally in ./storage on your machine.</p>
         </div>
       </div>

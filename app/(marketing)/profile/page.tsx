@@ -243,7 +243,7 @@ export default function ProfilePage() {
 
       <div className="relative mx-auto max-w-[900px] px-4 py-14 sm:px-6 lg:px-8 lg:py-20">
         <p className="text-xs font-semibold uppercase text-[var(--color-accent)] sm:text-sm">
-          Stream Clipper / account
+          Clipper / account
         </p>
         <h1 className="marketing-display-title mt-4 font-semibold text-white">
           Profile

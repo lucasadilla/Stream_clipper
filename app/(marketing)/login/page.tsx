@@ -83,7 +83,7 @@ export default function LoginPage() {
       <div className="relative mx-auto grid max-w-[1440px] gap-10 px-4 py-14 sm:px-6 lg:grid-cols-[1fr_0.92fr] lg:items-center lg:gap-16 lg:px-8 lg:py-20">
         <div className="max-w-xl">
           <p className="text-xs font-semibold uppercase text-[var(--color-accent)] sm:text-sm">
-            Stream Clipper / account
+            Clipper / account
           </p>
           <h1 className="marketing-display-title mt-4 font-semibold text-white">
             Sign in

@@ -1,4 +1,4 @@
-# Stream Clipper
+# Clipper
 
 AI-powered YouTube livestream clip generator. Paste a stream URL, detect hype moments from chat and media signals, auto-download the video, and render vertical 9:16 Shorts.
 

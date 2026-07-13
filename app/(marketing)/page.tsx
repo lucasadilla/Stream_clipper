@@ -67,22 +67,22 @@ const EXPORTS = [
 
 const FAQS = [
   {
-    question: "What is Stream Clipper?",
+    question: "What is Clipper?",
     answer:
-      "Stream Clipper is an AI-assisted video editor for turning livestreams and VODs into publishable highlights. It combines transcript search, audio signals, captions, and a synchronized timeline in one workspace.",
+      "Clipper is an AI-assisted video editor for turning livestreams and VODs into publishable highlights. It combines transcript search, audio signals, captions, and a synchronized timeline in one workspace.",
   },
   {
-    question: "How does Stream Clipper find the best moments in a stream?",
+    question: "How does Clipper find the best moments in a stream?",
     answer:
       "It helps you locate promising moments using searchable transcripts, timestamps, audio movement, and clip context. You stay in control of the final in and out points before export.",
   },
   {
     question: "Can I create YouTube Shorts from a livestream or VOD?",
     answer:
-      "Yes. Stream Clipper can turn stream moments into vertical 9:16 videos with captions for YouTube Shorts and other short-form platforms. It can also preserve the original 16:9 frame for native highlights.",
+      "Yes. Clipper can turn stream moments into vertical 9:16 videos with captions for YouTube Shorts and other short-form platforms. It can also preserve the original 16:9 frame for native highlights.",
   },
   {
-    question: "Does Stream Clipper support live streams as well as recorded video?",
+    question: "Does Clipper support live streams as well as recorded video?",
     answer:
       "Yes. The workflow is designed for both live streams and VODs, so you can begin finding and cutting moments while a stream is active or work from a completed recording.",
   },
@@ -104,13 +104,13 @@ const structuredData = {
     {
       "@type": "Organization",
       "@id": "https://streamclipper.app/#organization",
-      name: "Stream Clipper",
+      name: "Clipper",
       url: "https://streamclipper.app/",
     },
     {
       "@type": "SoftwareApplication",
       "@id": "https://streamclipper.app/#software",
-      name: "Stream Clipper",
+      name: "Clipper",
       url: "https://streamclipper.app/",
       applicationCategory: "MultimediaApplication",
       operatingSystem: "Web",
@@ -163,7 +163,7 @@ export default function HomePage() {
         >
           <div className="marketing-hero-copy z-10 flex max-w-5xl flex-col justify-center py-10 sm:py-12 lg:py-14">
             <p data-scroll-reveal="hero" className="mb-4 text-xs font-semibold uppercase text-[var(--color-accent)] sm:text-sm">
-              Stream Clipper / live editing system
+              Clipper / live editing system
             </p>
             <h1 data-scroll-reveal="hero" className="marketing-hero-title max-w-5xl text-white">
               <span>Edit while</span>{" "}
@@ -214,7 +214,7 @@ export default function HomePage() {
               </h2>
             </div>
             <p data-scroll-reveal="right" className="max-w-2xl text-xl leading-8 text-[#33412c] sm:text-2xl sm:leading-9">
-              Stream Clipper treats editing like a live operation: capture the
+              Clipper treats editing like a live operation: capture the
               source, find the beat, cut with context, and ship while the moment
               still has heat.
             </p>

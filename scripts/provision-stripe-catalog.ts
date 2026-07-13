@@ -22,7 +22,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log("Provisioning Stream Clipper subscription catalog in Stripe...");
+  console.log("Provisioning Clipper subscription catalog in Stripe...");
   const { plans, envLines } = await provisionSubscriptionCatalog();
 
   for (const plan of plans) {
