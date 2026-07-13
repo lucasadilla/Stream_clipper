@@ -13,6 +13,9 @@ interface RuntimeHealth {
   whisperConfigured?: boolean;
   storageRoot?: string;
   storageWritable?: boolean;
+  storagePersistent?: boolean;
+  workerEnabled?: boolean;
+  ytDlpJsRuntimeCompatible?: boolean;
   databaseConfigured?: boolean;
   billingConfigured?: boolean;
   stripeSecretConfigured?: boolean;
@@ -121,6 +124,10 @@ export default function HealthPage() {
                 <StatusPill ok={Boolean(health.ffmpeg)} label="FFmpeg" />
                 <StatusPill ok={Boolean(health.ytDlp)} label="yt-dlp" />
                 <StatusPill
+                  ok={Boolean(health.ytDlpJsRuntimeCompatible)}
+                  label="yt-dlp JavaScript runtime"
+                />
+                <StatusPill
                   ok={Boolean(health.aiConfigured)}
                   label="AI API key"
                 />
@@ -131,6 +138,14 @@ export default function HealthPage() {
                 <StatusPill
                   ok={Boolean(health.storageWritable)}
                   label="Writable storage"
+                />
+                <StatusPill
+                  ok={Boolean(health.storagePersistent)}
+                  label="Persistent storage"
+                />
+                <StatusPill
+                  ok={Boolean(health.workerEnabled)}
+                  label="Background worker"
                 />
               </div>
 

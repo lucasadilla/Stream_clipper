@@ -6,6 +6,7 @@ const FOOTER_LINKS = {
     { href: "/#features", label: "System" },
     { href: "/#how-it-works", label: "Workflow" },
     { href: "/#pricing", label: "Pricing" },
+    { href: "/#faq", label: "FAQ" },
     { href: "/#analyze", label: "Open timeline" },
   ],
   Editor: [

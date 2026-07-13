@@ -1,7 +1,5 @@
 import { prisma } from "@/lib/db";
 import { syncLiveRecording } from "@/services/liveRecordingService";
-import { pollChatMessages } from "@/services/chatIngestionService";
-import { processChatWindows } from "@/services/eventWindowService";
 import { syncTimelineThumbnails, capturePriorityThumbs } from "@/services/timelineThumbnailService";
 import { refreshSessionLiveMetadata } from "@/services/youtubeService";
 
@@ -14,21 +12,15 @@ function isLiveStatus(liveStatus: string | null | undefined): boolean {
 }
 
 /**
- * One live tick: sync recording, poll chat, score windows, suggest clips, incremental analysis.
+ * One live tick: sync recording, thumbnails, and metadata.
  * Called from the client every ~15s while a stream session is active.
  */
 export async function runLivePipeline(streamSessionId: string) {
-  const session = await prisma.streamSession.findUnique({
-    where: { id: streamSessionId },
-    include: { chatTracking: true, liveRecording: true },
-  });
-  if (!session) throw new Error("Session not found");
-
   const results: Record<string, unknown> = {};
 
   const fresh = await prisma.streamSession.findUnique({
     where: { id: streamSessionId },
-    include: { chatTracking: true, liveRecording: true },
+    include: { liveRecording: true },
   });
   if (!fresh) throw new Error("Session not found");
 
@@ -72,33 +64,7 @@ export async function runLivePipeline(streamSessionId: string) {
     results.recording = await syncLiveRecording(streamSessionId);
   }
 
-  // Poll chat if tracking is on
-  if (fresh.chatTracking?.isActive && fresh.activeLiveChatId) {
-    try {
-      results.chat = await pollChatMessages(streamSessionId);
-      results.chatWindows = await processChatWindows(streamSessionId);
-    } catch (e) {
-      results.chatError = e instanceof Error ? e.message : String(e);
-    }
-  } else if (fresh.activeLiveChatId && isLiveStatus(fresh.liveStatus)) {
-    // Auto-start chat on first live tick
-    try {
-      const { startChatTracking } = await import(
-        "@/services/chatIngestionService"
-      );
-      results.chat = await startChatTracking(streamSessionId);
-      results.chatWindows = await processChatWindows(streamSessionId);
-    } catch {
-      // chat may not be available yet
-    }
-  }
-
-  // Auto-suggest clips removed from UI — skip to reduce API load
-  // if (isLiveStatus(session.liveStatus) || session.liveStatus === "post_live") {
-  //   results.suggestions = await autoSuggestClips(streamSessionId, 3);
-  // }
-
-  // Recording + chat only — transcription runs on /transcribe (avoids 2min+ live-tick hangs)
+  // Recording only — transcription runs on /transcribe (avoids 2min+ live-tick hangs)
   const sourceMedia = await prisma.sourceMedia.findFirst({
     where: { streamSessionId },
     orderBy: { createdAt: "desc" },
@@ -106,9 +72,12 @@ export async function runLivePipeline(streamSessionId: string) {
 
   if (sourceMedia && (sourceMedia.durationSeconds ?? 0) >= 3) {
     const isLive = isLiveStatus(fresh.liveStatus);
-    void capturePriorityThumbs(streamSessionId, { prioritizeTail: isLive }).catch(
-      () => {}
-    );
+    await capturePriorityThumbs(streamSessionId, {
+      prioritizeTail: isLive,
+    }).catch((error) => {
+      results.thumbnailError =
+        error instanceof Error ? error.message : String(error);
+    });
     void syncTimelineThumbnails(streamSessionId, { prioritizeTail: isLive }).catch(
       () => {}
     );

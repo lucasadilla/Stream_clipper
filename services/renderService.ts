@@ -1,11 +1,12 @@
 import path from "path";
 import fs from "fs/promises";
-import { existsSync } from "fs";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { renderShort as ffmpegRender, isFfmpegAvailable, formatFfmpegProcessError } from "@/lib/ffmpeg";
 import { generateSrt } from "@/lib/time";
 import { formatCaptionTextForBurn } from "@/lib/captionStyles";
-import { buildCaptionTrack } from "@/lib/captionTrack";
+import { generateAss } from "@/lib/captionAss";
+import { buildCaptionTrack, type CaptionWord } from "@/lib/captionTrack";
 import { applyCaptionEdits } from "@/lib/captionEdits";
 import {
   getRendersDir,
@@ -17,8 +18,16 @@ import { getTranscriptChunksForRange } from "@/services/transcriptService";
 import { ensureClipSourceForRender } from "@/services/clipSourceService";
 import type { RenderFormat } from "@/lib/renderFormat";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
-import { DEFAULT_CAPTION_APPEARANCE } from "@/lib/captionAppearance";
+import {
+  DEFAULT_CAPTION_APPEARANCE,
+  normalizeCaptionAppearance,
+} from "@/lib/captionAppearance";
 import { readCaptionEdits } from "@/services/captionEditService";
+import {
+  appendRenderJobLog,
+  makeRenderJobLogEntry,
+  parseRenderJobLogs,
+} from "@/lib/renderJobLogs";
 
 export interface RenderShortParams {
   streamSessionId: string;
@@ -30,13 +39,57 @@ export interface RenderShortParams {
   layout?: "center_crop" | "facecam_overlay" | "facecam_top_gameplay_bottom" | "gameplay_full";
   includeCaptions?: boolean;
   captionAppearance?: CaptionAppearance;
+  captionCues?: Array<{
+    startTimeSeconds: number;
+    endTimeSeconds: number;
+    text: string;
+    words?: CaptionWord[];
+  }>;
 }
 
-async function updateJobProgress(jobId: string, progress: number) {
+export function parseRenderJobParams(value: unknown): RenderShortParams | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  if (
+    typeof raw.streamSessionId !== "string" ||
+    typeof raw.startTimeSeconds !== "number" ||
+    typeof raw.endTimeSeconds !== "number"
+  ) {
+    return null;
+  }
+  return {
+    streamSessionId: raw.streamSessionId,
+    sourceMediaId:
+      typeof raw.sourceMediaId === "string" ? raw.sourceMediaId : undefined,
+    clipSuggestionId:
+      typeof raw.clipSuggestionId === "string" ? raw.clipSuggestionId : undefined,
+    startTimeSeconds: raw.startTimeSeconds,
+    endTimeSeconds: raw.endTimeSeconds,
+    format: raw.format === "native" ? "native" : "vertical",
+    layout:
+      raw.layout === "facecam_overlay" ||
+      raw.layout === "facecam_top_gameplay_bottom" ||
+      raw.layout === "gameplay_full"
+        ? raw.layout
+        : "center_crop",
+    includeCaptions: Boolean(raw.includeCaptions),
+    captionAppearance: normalizeCaptionAppearance(
+      raw.captionAppearance as Partial<CaptionAppearance> | undefined
+    ),
+    captionCues: Array.isArray(raw.captionCues)
+      ? (raw.captionCues as RenderShortParams["captionCues"])
+      : undefined,
+  };
+}
+
+async function updateJobProgress(jobId: string, progress: number, step?: string) {
   await prisma.renderJob.update({
     where: { id: jobId },
     data: { progress: Math.min(100, Math.max(0, Math.round(progress))) },
   });
+  if (step) {
+    await appendRenderJobLog(jobId, step, `Progress ${Math.round(progress)}%`);
+  }
 }
 
 /** Runs ffmpeg encode + writes output. Updates job progress along the way. */
@@ -54,7 +107,10 @@ export async function executeRenderJob(
     layout = "center_crop",
     includeCaptions = true,
     captionAppearance = DEFAULT_CAPTION_APPEARANCE,
+    captionCues: clientCaptionCues,
   } = params;
+
+  const appearance = normalizeCaptionAppearance(captionAppearance);
 
   const ffmpegOk = await isFfmpegAvailable();
   if (!ffmpegOk) {
@@ -69,7 +125,7 @@ export async function executeRenderJob(
   });
   if (!session) throw new Error("Session not found");
 
-  await updateJobProgress(jobId, 12);
+  await updateJobProgress(jobId, 12, "prepare_source");
 
   const clipSource = await ensureClipSourceForRender(
     streamSessionId,
@@ -78,7 +134,7 @@ export async function executeRenderJob(
     sourceMediaId
   );
 
-  await updateJobProgress(jobId, 25);
+  await updateJobProgress(jobId, 25, "source_ready");
 
   const renderSource = await prisma.sourceMedia.findUnique({
     where: { id: clipSource.sourceMediaId },
@@ -97,42 +153,108 @@ export async function executeRenderJob(
   const relativeOutput = toRelativeStoragePath(outputPath);
 
   const inputPath = resolveStoragePath(renderSource.filePath);
-  let srtPath: string | undefined;
-  const outputHeight = format === "vertical" ? 1920 : 1080;
+  let subtitlePath: string | undefined;
+  const outputHeight =
+    format === "vertical"
+      ? Math.max(720, Number.parseInt(process.env.RENDER_VERTICAL_HEIGHT || "1920", 10) || 1920)
+      : 1080;
+  const outputWidth =
+    format === "vertical" ? Math.round((outputHeight * 9) / 16) : 1920;
 
   if (includeCaptions) {
-    await updateJobProgress(jobId, 35);
-    const chunks = await getTranscriptChunksForRange(
-      streamSessionId,
-      startTimeSeconds,
-      endTimeSeconds
+    await updateJobProgress(jobId, 35, "captions");
+    const clientCues = (clientCaptionCues ?? []).filter(
+      (cue) =>
+        cue.startTimeSeconds <= endTimeSeconds &&
+        cue.endTimeSeconds >= startTimeSeconds
     );
-    if (chunks.length > 0) {
+    const chunks = clientCues.length
+      ? []
+      : await getTranscriptChunksForRange(
+          streamSessionId,
+          startTimeSeconds,
+          endTimeSeconds
+        );
+    if (clientCues.length > 0 || chunks.length > 0) {
       const captionEdits = await readCaptionEdits(streamSessionId);
-      const captionLines = applyCaptionEdits(
-        buildCaptionTrack(
-          chunks
-            .filter((c) => c.text.trim().length > 0)
-            .map((c) => ({
-              id: c.id ?? `chunk-${c.startTimeSeconds}`,
-              startTimeSeconds: c.startTimeSeconds,
-              endTimeSeconds: c.endTimeSeconds,
-              text: c.text,
-              rawJson: c.rawJson,
-            })),
-          format
-        ),
-        captionEdits
-      );
-      const srtContent = generateSrt(
-        captionLines.map((c) => ({
+      const captionLines = clientCues.length
+        ? clientCues.map((cue, index) => ({
+            ...cue,
+            id: `client-${index}`,
+            words: cue.words,
+          }))
+        : applyCaptionEdits(
+            buildCaptionTrack(
+              chunks
+                .filter((c) => c.text.trim().length > 0)
+                .map((c) => ({
+                  id: c.id ?? `chunk-${c.startTimeSeconds}`,
+                  startTimeSeconds: c.startTimeSeconds,
+                  endTimeSeconds: c.endTimeSeconds,
+                  text: c.text,
+                  rawJson: c.rawJson,
+                })),
+              format
+            ),
+            captionEdits
+          );
+
+      const shiftedCues = captionLines
+        .map((c) => ({
           startTimeSeconds: Math.max(0, c.startTimeSeconds - startTimeSeconds),
-          endTimeSeconds: c.endTimeSeconds - startTimeSeconds,
+          endTimeSeconds: Math.min(
+            endTimeSeconds - startTimeSeconds,
+            c.endTimeSeconds - startTimeSeconds
+          ),
           text: formatCaptionTextForBurn(c.text, format),
+          words: c.words
+            ?.map((w) => ({
+              start: Math.max(0, w.start - startTimeSeconds),
+              end: Math.min(
+                endTimeSeconds - startTimeSeconds,
+                w.end - startTimeSeconds
+              ),
+              word: w.word,
+            }))
+            .filter((w) => w.end > w.start && w.word.trim().length > 0),
         }))
+        .filter((cue) => cue.endTimeSeconds > cue.startTimeSeconds);
+
+      if (shiftedCues.length === 0) {
+        throw new Error("Captions are enabled, but no caption cues overlap this clip.");
+      }
+
+      try {
+        const assContent = generateAss({
+          cues: shiftedCues,
+          appearance,
+          width: outputWidth,
+          height: outputHeight,
+        });
+        if (!assContent.trim()) {
+          throw new Error("Empty ASS");
+        }
+        subtitlePath = path.join(rendersDir, `clip-${clipId}.ass`);
+        await fs.writeFile(subtitlePath, assContent, "utf8");
+      } catch {
+        const srtContent = generateSrt(
+          shiftedCues.map((c) => ({
+            startTimeSeconds: c.startTimeSeconds,
+            endTimeSeconds: c.endTimeSeconds,
+            text: c.text,
+          }))
+        );
+        if (!srtContent.trim()) {
+          throw new Error("Captions are enabled, but no caption cues overlap this clip.");
+        }
+        subtitlePath = path.join(rendersDir, `clip-${clipId}.srt`);
+        await fs.writeFile(subtitlePath, srtContent);
+      }
+    } else {
+      throw new Error(
+        "Captions are enabled, but transcription has not reached this clip yet. " +
+          "Wait until captions appear in the selected timeline range, then render again."
       );
-      srtPath = path.join(rendersDir, `clip-${clipId}.srt`);
-      await fs.writeFile(srtPath, srtContent);
     }
   }
 
@@ -144,6 +266,9 @@ export async function executeRenderJob(
         })
       : null;
 
+  await appendRenderJobLog(jobId, "ffmpeg", "Encoding clip");
+  await updateJobProgress(jobId, 55);
+
   await ffmpegRender({
     inputPath,
     outputPath,
@@ -151,10 +276,10 @@ export async function executeRenderJob(
     endTimeSeconds: renderEnd,
     format,
     layout,
-    srtPath,
+    srtPath: subtitlePath,
     subtitleFormat: format,
     outputHeight,
-    captionAppearance,
+    captionAppearance: appearance,
     facecamRegion: facecam
       ? {
           x: facecam.x,
@@ -165,12 +290,26 @@ export async function executeRenderJob(
       : undefined,
   });
 
+  const existing = await prisma.renderJob.findUnique({
+    where: { id: jobId },
+    select: { logs: true },
+  });
+  const logs = [
+    ...parseRenderJobLogs(existing?.logs),
+    makeRenderJobLogEntry("completed", "Render finished"),
+  ];
+
   await prisma.renderJob.update({
     where: { id: jobId },
     data: {
       status: "completed",
       progress: 100,
       outputPath: relativeOutput,
+      completedAt: new Date(),
+      lockedAt: null,
+      lockedBy: null,
+      errorMessage: null,
+      logs: logs as unknown as Prisma.InputJsonValue,
     },
   });
 
@@ -184,36 +323,73 @@ export async function executeRenderJob(
   return { outputPath: relativeOutput };
 }
 
-/** Create job row and return id (work continues via executeRenderJob). */
+/** Create a queued job row; worker executes later. */
 export async function createRenderJobRecord(params: {
   streamSessionId: string;
   clipSuggestionId?: string;
   sourceMediaId?: string;
   layout?: string;
   includeCaptions?: boolean;
+  renderParams: RenderShortParams;
+  maxAttempts?: number;
 }) {
   const job = await prisma.renderJob.create({
     data: {
       streamSessionId: params.streamSessionId,
       clipSuggestionId: params.clipSuggestionId,
       sourceMediaId: params.sourceMediaId,
-      status: "processing",
-      progress: 5,
+      status: "queued",
+      progress: 0,
       layout: params.layout ?? "center_crop",
       includeCaptions: params.includeCaptions ?? false,
+      params: params.renderParams as unknown as Prisma.InputJsonValue,
+      maxAttempts: params.maxAttempts ?? 3,
+      logs: [
+        makeRenderJobLogEntry("queued", "Render job queued"),
+      ] as unknown as Prisma.InputJsonValue,
     },
   });
   return job.id;
 }
 
 export async function failRenderJob(jobId: string, message: string) {
+  await appendRenderJobLog(jobId, "failed", message, "error");
   await prisma.renderJob.update({
     where: { id: jobId },
-    data: { status: "failed", errorMessage: message, progress: 0 },
+    data: {
+      status: "failed",
+      errorMessage: message.slice(0, 4000),
+      progress: 0,
+      completedAt: new Date(),
+      lockedAt: null,
+      lockedBy: null,
+    },
   });
 }
 
-/** Synchronous render (used by tests or direct calls). */
+export async function waitForRenderJob(
+  jobId: string,
+  options: { timeoutMs?: number; pollMs?: number } = {}
+): Promise<{ outputPath: string }> {
+  const timeoutMs = options.timeoutMs ?? 10 * 60 * 1000;
+  const pollMs = options.pollMs ?? 1500;
+  const started = Date.now();
+
+  while (Date.now() - started < timeoutMs) {
+    const job = await prisma.renderJob.findUnique({ where: { id: jobId } });
+    if (!job) throw new Error("Render job not found");
+    if (job.status === "completed" && job.outputPath) {
+      return { outputPath: job.outputPath };
+    }
+    if (job.status === "failed") {
+      throw new Error(job.errorMessage ?? "Render failed");
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  throw new Error("Timed out waiting for render job");
+}
+
+/** Enqueue a render and wait for the background worker to finish. */
 export async function renderShort(params: RenderShortParams) {
   const jobId = await createRenderJobRecord({
     streamSessionId: params.streamSessionId,
@@ -221,14 +397,21 @@ export async function renderShort(params: RenderShortParams) {
     sourceMediaId: params.sourceMediaId,
     layout: params.layout,
     includeCaptions: params.includeCaptions,
+    renderParams: params,
   });
 
   try {
-    const result = await executeRenderJob(jobId, params);
+    // Kick the in-process worker if present; otherwise poll until another tick runs.
+    const { runWorkerTick } = await import("@/services/workerService");
+    void runWorkerTick().catch(() => {});
+    const result = await waitForRenderJob(jobId);
     return { jobId, outputPath: result.outputPath };
   } catch (error) {
     const message = formatFfmpegProcessError(error);
-    await failRenderJob(jobId, message);
+    const job = await prisma.renderJob.findUnique({ where: { id: jobId } });
+    if (job && job.status !== "failed" && job.status !== "completed") {
+      await failRenderJob(jobId, message);
+    }
     throw new Error(message);
   }
 }

@@ -277,7 +277,7 @@ export function ParticleEditingHero() {
   return (
     <div
       ref={mountRef}
-      className="absolute inset-0 h-full w-full opacity-95"
+      className="marketing-particle-field absolute inset-0 h-full w-full opacity-95"
       aria-hidden="true"
     />
   );

@@ -1,7 +1,7 @@
 import path from "path";
 import { existsSync } from "fs";
 import { prisma } from "@/lib/db";
-import { hasVideoStream, probeMedia } from "@/lib/ffmpeg";
+import { getFfmpegPath, hasVideoStream, probeMedia, runCommand } from "@/lib/ffmpeg";
 import { toJsonValue } from "@/lib/utils";
 import { MIN_CLIP_SECONDS } from "@/lib/clipConstants";
 import {
@@ -11,6 +11,7 @@ import {
   resolveStoragePath,
   fileExists,
   findBestSourceFileInDir,
+  listSourceCandidateFiles,
 } from "@/lib/storage";
 import {
   downloadClipSegmentFromStream,
@@ -31,6 +32,98 @@ function formatYtDlpTime(seconds: number): string {
 
 function isSegmentFile(name: string): boolean {
   return /^segment-\d+-\d+\.mp4$/i.test(name);
+}
+
+/**
+ * Live yt-dlp captures are separate growing video/audio files until the stream
+ * ends. Build a small, finalized MP4 for the requested range so rendering never
+ * depends on an unfinished preview.mp4 (which has no moov atom yet).
+ */
+async function createMuxedLiveSegment(
+  streamSessionId: string,
+  startTimeSeconds: number,
+  endTimeSeconds: number
+): Promise<{ path: string; duration: number } | null> {
+  const candidates = await listSourceCandidateFiles(
+    getUploadDir(streamSessionId)
+  );
+  let videoPath: string | null = null;
+  let audioPath: string | null = null;
+
+  for (const candidate of candidates) {
+    try {
+      const media = await probeMedia(candidate);
+      if (!videoPath && media.videoCodec) videoPath = candidate;
+      if (!audioPath && media.audioCodec) audioPath = candidate;
+      if (videoPath && audioPath) break;
+    } catch {
+      // Ignore incomplete candidates and continue looking for readable tracks.
+    }
+  }
+
+  if (!videoPath || !audioPath || videoPath === audioPath) return null;
+
+  const segmentStart = Math.floor(Math.max(0, startTimeSeconds));
+  const segmentEnd = Math.ceil(endTimeSeconds);
+  const duration = segmentEnd - segmentStart;
+  if (duration < MIN_CLIP_SECONDS) return null;
+
+  const uploadDir = getUploadDir(streamSessionId);
+  await ensureDir(uploadDir);
+  const name = `segment-${segmentStart}-${segmentEnd}.mp4`;
+  const outputPath = path.join(uploadDir, name);
+
+  if (existsSync(outputPath)) {
+    try {
+      const probe = await probeMedia(outputPath);
+      if (probe.videoCodec && probe.durationSeconds >= MIN_CLIP_SECONDS) {
+        return { path: outputPath, duration: probe.durationSeconds };
+      }
+    } catch {
+      // Replace stale/partial segment atomically below.
+    }
+  }
+
+  const tempPath = `${outputPath}.${process.pid}-${Date.now()}.tmp.mp4`;
+  const fs = await import("fs/promises");
+  try {
+    await runCommand(getFfmpegPath(), [
+      "-y",
+      "-nostdin",
+      "-loglevel",
+      "error",
+      "-ss",
+      String(segmentStart),
+      "-i",
+      videoPath,
+      "-ss",
+      String(segmentStart),
+      "-i",
+      audioPath,
+      "-t",
+      String(duration),
+      "-map",
+      "0:v:0",
+      "-map",
+      "1:a:0",
+      "-c",
+      "copy",
+      "-avoid_negative_ts",
+      "make_zero",
+      "-movflags",
+      "+faststart",
+      tempPath,
+    ]);
+
+    const probe = await probeMedia(tempPath);
+    if (!probe.videoCodec || probe.durationSeconds < MIN_CLIP_SECONDS) {
+      throw new Error("Captured video range is not readable yet");
+    }
+    await fs.rename(tempPath, outputPath);
+    return { path: outputPath, duration: probe.durationSeconds };
+  } finally {
+    await fs.unlink(tempPath).catch(() => {});
+  }
 }
 
 /** Best known duration: local video, live buffer, transcripts, or chat timestamps. */
@@ -191,30 +284,58 @@ export async function ensureClipSourceForRender(
     orderBy: { createdAt: "desc" },
   });
 
-  // 1. preview.mp4 — browser-playable, fast seek for render
-  const previewPath = getPreviewMp4Path(streamSessionId);
-  if (existsSync(previewPath)) {
-    const duration = await resolveFileDurationSeconds(
-      previewPath,
-      liveRecordedSeconds,
-      true,
-      endTimeSeconds
-    );
-    const previewMedia = await ensureSourceMediaRow(streamSessionId, previewPath, {
-      originalFilename: "preview.mp4",
-      durationSeconds: duration,
-      isLiveRecording: true,
+  // 1. A finalized clip muxed from live split video/audio tracks. This is the
+  // safest source while the main recording and preview are still growing.
+  const muxed = await createMuxedLiveSegment(
+    streamSessionId,
+    startTimeSeconds,
+    endTimeSeconds
+  ).catch((error) => {
+    console.warn("[render] Could not prepare split live capture:", error);
+    return null;
+  });
+  if (muxed) {
+    const muxedMedia = await ensureSourceMediaRow(streamSessionId, muxed.path, {
+      originalFilename: path.basename(muxed.path),
+      durationSeconds: muxed.duration,
+      isLiveRecording: false,
     });
-    const local = localClipFromSource({
-      sourceMediaId: previewMedia.id,
-      startTimeSeconds,
-      endTimeSeconds,
-      availableDuration: duration,
-    });
-    if (local) return local;
+    return {
+      sourceMediaId: muxedMedia.id,
+      renderStart: startTimeSeconds - Math.floor(startTimeSeconds),
+      renderEnd: Math.min(
+        endTimeSeconds - Math.floor(startTimeSeconds),
+        muxed.duration
+      ),
+    };
   }
 
-  // 2. Main on-disk recording (source.mkv / source.mp4)
+  // 2. preview.mp4 — only use it after a successful structural probe. File
+  // existence/size is insufficient because MP4 writes its moov atom at EOF.
+  const previewPath = getPreviewMp4Path(streamSessionId);
+  if (existsSync(previewPath)) {
+    try {
+      const previewProbe = await probeMedia(previewPath);
+      if (previewProbe.videoCodec && previewProbe.durationSeconds >= MIN_CLIP_SECONDS) {
+        const previewMedia = await ensureSourceMediaRow(streamSessionId, previewPath, {
+          originalFilename: "preview.mp4",
+          durationSeconds: previewProbe.durationSeconds,
+          isLiveRecording: true,
+        });
+        const local = localClipFromSource({
+          sourceMediaId: previewMedia.id,
+          startTimeSeconds,
+          endTimeSeconds,
+          availableDuration: previewProbe.durationSeconds,
+        });
+        if (local) return local;
+      }
+    } catch {
+      // Unfinalized live preview; continue to other sources.
+    }
+  }
+
+  // 3. Main on-disk recording (source.mkv / source.mp4)
   const mainAbsolute = await findBestSourceFileInDir(uploadDir);
   if (mainAbsolute && existsSync(mainAbsolute)) {
     const mainName = path.basename(mainAbsolute);

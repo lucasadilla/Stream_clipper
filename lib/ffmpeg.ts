@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import { existsSync } from "fs";
 import path from "path";
 import type { RenderFormat } from "@/lib/renderFormat";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
@@ -22,11 +23,31 @@ function configuredExecutablePath(envName: string, fallback: string): string {
 }
 
 export function getFfmpegPath(): string {
-  return configuredExecutablePath("FFMPEG_PATH", "ffmpeg");
+  const configured = configuredExecutablePath("FFMPEG_PATH", "");
+  if (configured) return configured;
+
+  // The standard Homebrew FFmpeg formula omits libass. Prefer ffmpeg-full when
+  // installed so burned captions work locally without per-machine .env edits.
+  if (process.platform === "darwin") {
+    for (const candidate of [
+      "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
+      "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
+    ]) {
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return "ffmpeg";
 }
 
 export function getFfprobePath(): string {
-  return configuredExecutablePath("FFPROBE_PATH", "ffprobe");
+  const configured = configuredExecutablePath("FFPROBE_PATH", "");
+  if (configured) return configured;
+  const ffmpegPath = getFfmpegPath();
+  if (path.basename(ffmpegPath) === "ffmpeg" && ffmpegPath !== "ffmpeg") {
+    const sibling = path.join(path.dirname(ffmpegPath), "ffprobe");
+    if (existsSync(sibling)) return sibling;
+  }
+  return "ffprobe";
 }
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
@@ -184,6 +205,45 @@ export async function probeMedia(filePath: string): Promise<MediaProbeResult> {
   };
 }
 
+/**
+ * Best-effort duration for partial / growing captures where format.duration is N/A.
+ */
+export async function probeMediaDurationBestEffort(
+  filePath: string
+): Promise<number> {
+  const basic = await probeMedia(filePath);
+  if (basic.durationSeconds >= 3) return basic.durationSeconds;
+
+  try {
+    const { stdout } = await runCommand(getFfprobePath(), [
+      "-v",
+      "error",
+      "-probesize",
+      "100M",
+      "-analyzeduration",
+      "100M",
+      "-show_entries",
+      "format=duration:stream=duration",
+      "-of",
+      "json",
+      filePath,
+    ]);
+    if (!stdout.trim()) return basic.durationSeconds;
+
+    const data = JSON.parse(stdout) as {
+      format?: { duration?: string };
+      streams?: Array<{ duration?: string }>;
+    };
+    const formatDur = parseFloat(data.format?.duration ?? "0") || 0;
+    const streamDurs = (data.streams ?? []).map(
+      (s) => parseFloat(s.duration ?? "0") || 0
+    );
+    return Math.max(basic.durationSeconds, formatDur, ...streamDurs, 0);
+  } catch {
+    return basic.durationSeconds;
+  }
+}
+
 /** Fast check whether a media file contains an audio stream (limited probe for growing files). */
 export async function hasAudioStream(filePath: string): Promise<boolean> {
   try {
@@ -291,59 +351,40 @@ export async function extractAudioSegment(
 export async function analyzeAudioVolume(
   inputPath: string
 ): Promise<Array<{ timeSeconds: number; volumeDb: number }>> {
-  // Use ffmpeg to output per-frame volume via astats
-  const { stderr } = await runCommand(getFfmpegPath(), [
+  // Resample into one-second frames before running astats. Printing metadata
+  // for every encoded audio frame creates enormous output for long streams and
+  // can exhaust a small Railway container's memory.
+  const { stdout, stderr } = await runCommand(getFfmpegPath(), [
+    "-hide_banner",
+    "-nostats",
     "-i",
     inputPath,
+    "-map",
+    "0:a:0",
+    "-vn",
     "-af",
-    "astats=metadata=1:reset=1,ametadata=print:file=-",
+    "aresample=8000,asetnsamples=n=8000:p=1,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
     "-f",
     "null",
     "-",
   ]);
 
   const samples: Array<{ timeSeconds: number; volumeDb: number }> = [];
-  const lines = stderr.split("\n");
+  // ametadata's file=- output is stdout on current FFmpeg builds. Include
+  // stderr as well for compatibility with builds that route filter logs there.
+  const lines = `${stdout}\n${stderr}`.split("\n");
   let currentTime = 0;
 
   for (const line of lines) {
     const timeMatch = line.match(/pts_time:([0-9.]+)/);
     if (timeMatch) currentTime = parseFloat(timeMatch[1]);
 
-    const rmsMatch = line.match(/RMS level dB: (-?[0-9.]+|inf)/);
+    const rmsMatch = line.match(
+      /lavfi\.astats\.Overall\.RMS_level=(-?[0-9.]+|-?inf)/i
+    );
     if (rmsMatch) {
-      const db = rmsMatch[1] === "inf" ? -60 : parseFloat(rmsMatch[1]);
+      const db = /inf/i.test(rmsMatch[1]) ? -60 : parseFloat(rmsMatch[1]);
       samples.push({ timeSeconds: currentTime, volumeDb: db });
-    }
-  }
-
-  // Fallback: sample every 2 seconds with volumedetect on segments
-  if (samples.length === 0) {
-    const probe = await probeMedia(inputPath);
-    const duration = probe.durationSeconds;
-    for (let t = 0; t < duration; t += 2) {
-      try {
-        const { stderr: segErr } = await runCommand(getFfmpegPath(), [
-          "-ss",
-          String(t),
-          "-t",
-          "2",
-          "-i",
-          inputPath,
-          "-af",
-          "volumedetect",
-          "-f",
-          "null",
-          "-",
-        ]);
-        const meanMatch = segErr.match(/mean_volume: (-?[0-9.]+) dB/);
-        samples.push({
-          timeSeconds: t,
-          volumeDb: meanMatch ? parseFloat(meanMatch[1]) : -30,
-        });
-      } catch {
-        samples.push({ timeSeconds: t, volumeDb: -30 });
-      }
     }
   }
 
@@ -476,14 +517,50 @@ export interface RenderShortOptions {
 }
 
 function subtitleFilter(
-  srtPath: string,
+  subtitlePath: string,
   format: RenderFormat = "vertical",
   outputHeight = 1080,
   appearance?: CaptionAppearance
 ): string {
-  const escapedSrt = srtPath.replace(/\\/g, "/").replace(/:/g, "\\:");
+  // libavfilter parses this string itself even though spawn() does not use a
+  // shell. Use an explicitly named option (required by newer FFmpeg builds)
+  // and escape characters that are meaningful inside a filter value. Forward
+  // slashes also make the same expression work with Windows drive paths.
+  const escapedPath = subtitlePath
+    .replace(/\\/g, "/")
+    .replace(/:/g, "\\:")
+    .replace(/'/g, "\\'");
+  const isAss = /\.ass$/i.test(subtitlePath);
+  if (isAss) {
+    // ASS already encodes style, karaoke, and animation — do not force_style.
+    return `subtitles=filename='${escapedPath}'`;
+  }
   const style = getFfmpegCaptionForceStyle(format, outputHeight, appearance);
-  return `subtitles='${escapedSrt}':force_style='${style}'`;
+  return `subtitles=filename='${escapedPath}':force_style='${style}'`;
+}
+
+let subtitleFilterAvailable: boolean | null = null;
+
+async function hasSubtitleFilter(): Promise<boolean> {
+  if (subtitleFilterAvailable !== null) return subtitleFilterAvailable;
+  try {
+    const { stdout, stderr } = await runCommand(getFfmpegPath(), [
+      "-hide_banner",
+      "-filters",
+    ]);
+    subtitleFilterAvailable = /\bsubtitles\b/.test(`${stdout}\n${stderr}`);
+  } catch {
+    subtitleFilterAvailable = false;
+  }
+  return subtitleFilterAvailable;
+}
+
+function captionRendererUnavailableError(): Error {
+  return new Error(
+    "Burned captions were requested, but this FFmpeg build does not include the " +
+      "subtitles (libass) filter. Install an FFmpeg build with libass support. " +
+      "The Railway Docker image includes and verifies this capability."
+  );
 }
 
 function renderPreset(): string {
@@ -642,7 +719,12 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
     const encodeInput = await maybeDownscaleSourceForMemory(tempCut, memcapPath);
     if (encodeInput !== tempCut) tempFiles.push(encodeInput);
 
+    const captionsSupported = srtPath ? await hasSubtitleFilter() : false;
+
     if (format === "native" && srtPath) {
+      if (!captionsSupported) {
+        throw captionRendererUnavailableError();
+      }
       await encodeWithFilters({
         inputPath: encodeInput,
         outputPath,
@@ -662,6 +744,9 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
         vf = `scale=${width}:${height}:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=${width}:${height}`;
     }
 
+    if (srtPath && !captionsSupported) {
+      throw captionRendererUnavailableError();
+    }
     if (srtPath) {
       vf += `,${subtitleFilter(srtPath, subtitleFormat, height, captionAppearance)}`;
     }

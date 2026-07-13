@@ -21,6 +21,7 @@ interface SessionRow {
 
 export function SessionStorageList() {
   const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [signedIn, setSignedIn] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const router = useRouter();
@@ -28,10 +29,14 @@ export function SessionStorageList() {
   async function load() {
     setLoading(true);
     try {
-      const { ok, data } = await fetchJson<{ sessions?: SessionRow[] }>(
-        "/api/sessions?limit=20"
-      );
-      if (ok) setSessions(data.sessions ?? []);
+      const { ok, data } = await fetchJson<{
+        sessions?: SessionRow[];
+        signedIn?: boolean;
+      }>("/api/sessions?limit=20");
+      if (ok) {
+        setSessions(data.sessions ?? []);
+        setSignedIn(data.signedIn ?? false);
+      }
     } finally {
       setLoading(false);
     }
@@ -84,9 +89,18 @@ export function SessionStorageList() {
   if (sessions.length === 0) {
     return (
       <div className="w-full max-w-2xl mx-auto text-center py-6">
-        <h2 className="text-lg font-semibold mb-2">Recent sessions</h2>
+        <h2 className="text-lg font-semibold mb-2">Your sessions</h2>
         <p className="text-sm text-[var(--color-muted)]">
-          No sessions yet — analyze a stream above to get started.
+          {signedIn === false ? (
+            <>
+              <Link href="/login" className="text-[var(--color-accent)] hover:underline">
+                Sign in
+              </Link>{" "}
+              to see sessions tied to your account.
+            </>
+          ) : (
+            "No sessions yet — analyze a stream above to get started."
+          )}
         </p>
       </div>
     );
@@ -101,7 +115,7 @@ export function SessionStorageList() {
     <div className="w-full max-w-2xl mx-auto">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-sm font-semibold text-[var(--color-muted)]">
-          Recent sessions
+          Your sessions
         </h2>
         <span className="text-xs text-[var(--color-muted)]">
           {totalLabel} on disk

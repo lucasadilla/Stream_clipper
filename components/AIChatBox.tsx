@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import posthog from "posthog-js";
 import { cn } from "@/lib/utils";
 
 interface AIChatBoxProps {
@@ -43,6 +44,7 @@ export function AIChatBox({ sessionId, onClipSuggestions }: AIChatBoxProps) {
     setMessages((m) => [...m, { role: "user", content: text }]);
     setInput("");
     setLoading(true);
+    posthog.capture("ai_chat_message_sent", { session_id: sessionId });
 
     try {
       const res = await fetch(`/api/sessions/${sessionId}/ask`, {
@@ -55,6 +57,10 @@ export function AIChatBox({ sessionId, onClipSuggestions }: AIChatBoxProps) {
 
       setMessages((m) => [...m, { role: "assistant", content: data.answer }]);
       if (data.clipSuggestions?.length) {
+        posthog.capture("ai_clip_suggestions_received", {
+          session_id: sessionId,
+          clip_count: data.clipSuggestions.length,
+        });
         onClipSuggestions?.(data.clipSuggestions);
       }
     } catch (err) {

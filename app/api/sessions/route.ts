@@ -6,6 +6,7 @@ import { parseStreamUrl } from "@/lib/streamPlatform";
 import { errorResponse, jsonResponse, parseRequestJson } from "@/lib/utils";
 import { canCreateStreamSession } from "@/services/usageService";
 import { getBillingAccountIdFromRequest } from "@/services/billingService";
+import { getPostHogClient } from "@/lib/posthog-server";
 
 const createSessionSchema = z.object({
   streamUrl: z.string().min(1).optional(),
@@ -14,12 +15,17 @@ const createSessionSchema = z.object({
 
 export async function GET(request: NextRequest) {
   try {
+    const billingAccountId = getBillingAccountIdFromRequest(request);
+    if (!billingAccountId) {
+      return jsonResponse({ sessions: [], signedIn: false });
+    }
+
     const limit = Math.min(
       50,
       parseInt(request.nextUrl.searchParams.get("limit") ?? "20", 10) || 20
     );
-    const sessions = await listSessionsWithStorage(limit);
-    return jsonResponse({ sessions });
+    const sessions = await listSessionsWithStorage(limit, billingAccountId);
+    return jsonResponse({ sessions, signedIn: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to list sessions";
     return errorResponse(message, 500);
@@ -53,6 +59,16 @@ export async function POST(request: NextRequest) {
     }
 
     const session = await createStreamSession(rawUrl, billingAccountId);
+    if (billingAccountId) {
+      getPostHogClient().capture({
+        distinctId: billingAccountId,
+        event: "session_created",
+        properties: {
+          platform: session.platform,
+          live_status: session.liveStatus,
+        },
+      });
+    }
     return jsonResponse(
       {
         session: {

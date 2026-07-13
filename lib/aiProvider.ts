@@ -35,23 +35,45 @@ export function getOpenAiWhisperModel(): string {
   return process.env.OPENAI_WHISPER_MODEL?.trim() || "whisper-1";
 }
 
+/** Higher-accuracy text pass; Whisper remains the timing/alignment pass. */
+export function getOpenAiTranscriptionQualityModel(): string | null {
+  const configured = process.env.OPENAI_TRANSCRIPTION_QUALITY_MODEL?.trim();
+  if (configured && /^(off|none|false|0)$/i.test(configured)) return null;
+  return configured || "gpt-4o-transcribe";
+}
+
+export function getTranscriptionLanguage(): string | undefined {
+  const language = process.env.TRANSCRIPTION_LANGUAGE?.trim();
+  if (language && /^(auto|detect)$/i.test(language)) return undefined;
+  return language || "en";
+}
+
 export function getOpenRouterWhisperModel(): string {
+  // Prefer a Whisper model that supports verbose_json word/segment clocks.
+  // turbo is faster but some OpenRouter routes only return plain text.
   return (
-    process.env.OPENROUTER_WHISPER_MODEL?.trim() || "openai/whisper-large-v3-turbo"
+    process.env.OPENROUTER_WHISPER_MODEL?.trim() || "openai/whisper-large-v3"
   );
 }
 
 export type WhisperProvider = "openai" | "openrouter";
 
-/** Use OpenRouter for STT when key is set unless WHISPER_PROVIDER=openai. */
+/**
+ * Prefer direct OpenAI when available because it exposes verbose word-level
+ * timestamps. OpenRouter is retained as a resilient text-only fallback.
+ */
 export function shouldUseOpenRouterForWhisper(): boolean {
   const pref = process.env.WHISPER_PROVIDER?.trim().toLowerCase();
   if (pref === "openai") return false;
   if (pref === "openrouter") return isOpenRouterEnabled();
-  return isOpenRouterEnabled();
+  return isOpenRouterEnabled() && !process.env.OPENAI_API_KEY?.trim();
 }
 
-/** Preferred Whisper backends in order (primary first, then fallbacks). */
+/**
+ * Preferred Whisper backends in order (primary first, then fallbacks).
+ * Default: OpenRouter when configured (stable for most dev setups), then direct
+ * OpenAI for verbose word timestamps. Set WHISPER_PROVIDER=openai to force direct OpenAI.
+ */
 export function getWhisperProviderOrder(): WhisperProvider[] {
   const pref = process.env.WHISPER_PROVIDER?.trim().toLowerCase();
   const hasOpenRouter = isOpenRouterEnabled();
@@ -65,9 +87,8 @@ export function getWhisperProviderOrder(): WhisperProvider[] {
   }
 
   const order: WhisperProvider[] = [];
-  if (shouldUseOpenRouterForWhisper() && hasOpenRouter) order.push("openrouter");
+  if (hasOpenRouter) order.push("openrouter");
   if (hasOpenAi) order.push("openai");
-  if (order.length === 0 && hasOpenRouter) order.push("openrouter");
   return order;
 }
 

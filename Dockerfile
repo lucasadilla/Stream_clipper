@@ -1,14 +1,22 @@
-FROM node:20-bookworm-slim AS base
+FROM node:22-bookworm-slim AS base
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ffmpeg \
+    fontconfig \
+    fonts-dejavu-core \
+    fonts-freefont-ttf \
+    fonts-liberation \
+    fonts-roboto \
     ca-certificates \
     curl \
     python3 \
     python3-pip \
-  && pip3 install --break-system-packages --no-cache-dir yt-dlp \
+  && pip3 install --break-system-packages --no-cache-dir "yt-dlp[default]" \
+  && node --version \
   && yt-dlp --version \
+  && ffmpeg -hide_banner -filters 2>&1 | grep -q subtitles \
+  && fc-match "Arial" \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -31,6 +39,7 @@ ENV FFPROBE_PATH=ffprobe
 ENV YT_DLP_PATH=yt-dlp
 ENV FFMPEG_LOW_MEMORY=1
 ENV FFMPEG_THREADS=1
+ENV WORKER_ENABLED=1
 ENV NODE_OPTIONS=--max-old-space-size=384
 
 RUN mkdir -p /app/storage

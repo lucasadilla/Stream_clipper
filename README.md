@@ -154,7 +154,7 @@ Checkout sessions are created with `managed_payments.enabled=true` using Stripe 
 
 1. Connect the GitHub repo to Railway.
 2. Railway will use the repo `Dockerfile` (ffmpeg + yt-dlp are installed in the image).
-3. Add a **volume** mounted at `/app/storage`.
+3. Add a **persistent volume** mounted at `/app/storage` (source videos + renders survive redeploys).
 4. Set env vars in Railway (at minimum):
    - `DATABASE_URL`, `DIRECT_URL`
    - `STORAGE_ROOT=/app/storage`
@@ -162,8 +162,12 @@ Checkout sessions are created with `managed_payments.enabled=true` using Stripe 
    - `OPENROUTER_API_KEY` or `OPENAI_API_KEY`
    - `YOUTUBE_API_KEY`
    - Stripe keys and real `price_...` IDs for every `STRIPE_PRICE_*` var
+   - Optional: `WORKER_ENABLED=1`, `WORKER_SECRET=...` (background renders/transcription/retention)
 5. Do not copy local Windows paths like `C:\...\ffmpeg.exe` into Railway. The Docker image already installs Linux `ffmpeg`, `ffprobe`, and `yt-dlp`; use the bare command names above.
 6. Redeploy, then verify **`/health`** or **`/api/health`** shows database, Stripe billing, FFmpeg, yt-dlp, AI, Whisper, and storage as ready.
+7. Optional cron: `POST /api/worker/tick` with `Authorization: Bearer $WORKER_SECRET` every minute (the in-process poller also runs when `WORKER_ENABLED` is on).
+
+**Reliability notes:** Render jobs are queued in Postgres and processed by the same Next.js worker (survives request timeouts). Stale `processing` jobs are reclaimed after `WORKER_STALE_MS`. Plan `storageRetentionDays` is enforced by the worker; storage byte caps block new sessions when full. Live yt-dlp capture is still in-process and may need a re-attach after a deploy restart.
 
 If Railway can load the page but transcription/rendering do nothing, check `/health` first. Missing Stripe config blocks the paid app gates; missing FFmpeg/yt-dlp blocks media download, audio extraction, thumbnails, and renders.
 

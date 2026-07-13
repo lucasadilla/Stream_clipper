@@ -5,13 +5,16 @@ import type { StreamPlayerHandle } from "@/types/streamPlayer";
 import {
   buildCaptionTrack,
   lookupCueAtTime,
+  type CaptionCue,
   type TranscriptChunkInput,
 } from "@/lib/captionTrack";
 import { applyCaptionEdits, type CaptionEditsMap } from "@/lib/captionEdits";
 import {
+  applyCaptionCapitalization,
   captionPreviewStyle,
   type CaptionAppearance,
 } from "@/lib/captionAppearance";
+import { cn } from "@/lib/utils";
 import type { RefObject } from "react";
 
 interface CaptionTrackLayerProps {
@@ -21,6 +24,19 @@ interface CaptionTrackLayerProps {
   captionEdits?: CaptionEditsMap;
   appearance: CaptionAppearance;
   showVerticalSafeArea?: boolean;
+}
+
+function animationClass(animation: CaptionAppearance["animation"]): string {
+  switch (animation) {
+    case "fade":
+      return "caption-anim-fade";
+    case "pop":
+      return "caption-anim-pop";
+    case "slideUp":
+      return "caption-anim-slide-up";
+    default:
+      return "";
+  }
 }
 
 export function CaptionTrackLayer({
@@ -40,7 +56,8 @@ export function CaptionTrackLayer({
     return applyCaptionEdits(built, captionEdits);
   }, [chunks, captionEdits, showVerticalSafeArea]);
 
-  const [activeText, setActiveText] = useState<string | null>(null);
+  const [activeCue, setActiveCue] = useState<CaptionCue | null>(null);
+  const [playhead, setPlayhead] = useState(0);
   const [containerHeight, setContainerHeight] = useState(400);
   const activeIdRef = useRef<string | null>(null);
 
@@ -62,7 +79,7 @@ export function CaptionTrackLayer({
   useEffect(() => {
     if (!enabled) {
       activeIdRef.current = null;
-      setActiveText(null);
+      setActiveCue(null);
       return;
     }
 
@@ -81,7 +98,10 @@ export function CaptionTrackLayer({
         const nextId = cue?.id ?? null;
         if (nextId !== activeIdRef.current) {
           activeIdRef.current = nextId;
-          setActiveText(cue?.text ?? null);
+          setActiveCue(cue);
+        }
+        if (appearance.karaokeEnabled) {
+          setPlayhead(t);
         }
       }
       raf = requestAnimationFrame(tick);
@@ -89,9 +109,18 @@ export function CaptionTrackLayer({
 
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [enabled, track, playerRef]);
+  }, [enabled, track, playerRef, appearance.karaokeEnabled]);
 
   if (!enabled) return null;
+
+  const useKaraoke =
+    appearance.karaokeEnabled &&
+    activeCue?.words &&
+    activeCue.words.length > 0;
+
+  const displayText = activeCue
+    ? applyCaptionCapitalization(activeCue.text, appearance.capitalization)
+    : null;
 
   return (
     <div
@@ -106,12 +135,42 @@ export function CaptionTrackLayer({
       )}
 
       <div style={previewStyles.container}>
-        {activeText && (
+        {activeCue && displayText && (
           <p
+            key={activeCue.id}
             style={previewStyles.text}
-            className="px-2 py-1 rounded-md bg-black/50 whitespace-pre-line line-clamp-2"
+            className={cn(
+              "whitespace-pre-line line-clamp-2",
+              animationClass(appearance.animation)
+            )}
           >
-            {activeText}
+            {useKaraoke
+              ? activeCue.words!.map((word, index) => {
+                  const active =
+                    playhead >= word.start && playhead < word.end;
+                  const past = playhead >= word.end;
+                  const label = applyCaptionCapitalization(
+                    word.word,
+                    appearance.capitalization
+                  );
+                  return (
+                    <span key={`${activeCue.id}-${index}`}>
+                      <span
+                        style={{
+                          color:
+                            active || past
+                              ? appearance.highlightColor
+                              : appearance.color,
+                          transition: "color 60ms linear",
+                        }}
+                      >
+                        {label}
+                      </span>
+                      {index < activeCue.words!.length - 1 ? " " : ""}
+                    </span>
+                  );
+                })
+              : displayText}
           </p>
         )}
       </div>

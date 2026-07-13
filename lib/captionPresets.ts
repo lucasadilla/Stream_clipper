@@ -32,6 +32,14 @@ export const BUILT_IN_CAPTION_PRESETS: CaptionPreset[] = [
       vertical: "bottom",
       horizontal: "center",
       verticalOffsetPercent: 14,
+      backgroundColor: "#000000",
+      backgroundOpacity: 0.55,
+      outlineWidth: 0,
+      shadow: 3,
+      fontWeight: "bold",
+      capitalization: "uppercase",
+      karaokeEnabled: false,
+      animation: "pop",
     }),
   },
   {
@@ -45,6 +53,13 @@ export const BUILT_IN_CAPTION_PRESETS: CaptionPreset[] = [
       vertical: "bottom",
       horizontal: "center",
       verticalOffsetPercent: 8,
+      backgroundOpacity: 0,
+      outlineWidth: 2,
+      outlineColor: "#000000",
+      shadow: 1,
+      fontWeight: "normal",
+      karaokeEnabled: false,
+      animation: "fade",
     }),
   },
   {
@@ -58,6 +73,14 @@ export const BUILT_IN_CAPTION_PRESETS: CaptionPreset[] = [
       vertical: "bottom",
       horizontal: "center",
       verticalOffsetPercent: 12,
+      backgroundColor: "#000000",
+      backgroundOpacity: 0.45,
+      outlineWidth: 0,
+      shadow: 4,
+      fontWeight: "bold",
+      karaokeEnabled: false,
+      highlightColor: "#FFFFFF",
+      animation: "pop",
     }),
   },
   {
@@ -71,6 +94,13 @@ export const BUILT_IN_CAPTION_PRESETS: CaptionPreset[] = [
       vertical: "bottom",
       horizontal: "center",
       verticalOffsetPercent: 6,
+      backgroundColor: "#000000",
+      backgroundOpacity: 0.65,
+      outlineWidth: 0,
+      shadow: 0,
+      fontWeight: "normal",
+      karaokeEnabled: false,
+      animation: "none",
     }),
   },
   {
@@ -84,6 +114,13 @@ export const BUILT_IN_CAPTION_PRESETS: CaptionPreset[] = [
       vertical: "top",
       horizontal: "center",
       verticalOffsetPercent: 10,
+      backgroundColor: "#000000",
+      backgroundOpacity: 0.5,
+      outlineWidth: 0,
+      shadow: 2,
+      fontWeight: "bold",
+      karaokeEnabled: false,
+      animation: "slideUp",
     }),
   },
   {
@@ -93,10 +130,19 @@ export const BUILT_IN_CAPTION_PRESETS: CaptionPreset[] = [
     appearance: normalizeCaptionAppearance({
       fontFamily: "Impact",
       fontSize: 34,
-      color: "#FF4D9A",
+      color: "#FFFFFF",
       vertical: "bottom",
       horizontal: "center",
       verticalOffsetPercent: 13,
+      backgroundColor: "#000000",
+      backgroundOpacity: 0.4,
+      outlineWidth: 0,
+      shadow: 3,
+      fontWeight: "bold",
+      capitalization: "uppercase",
+      karaokeEnabled: true,
+      highlightColor: "#FF4D9A",
+      animation: "none",
     }),
   },
 ];
@@ -185,13 +231,24 @@ export function appearanceMatchesPreset(
   preset: CaptionPreset
 ): boolean {
   const a = normalizeCaptionAppearance(appearance);
-  const b = preset.appearance;
+  const b = normalizeCaptionAppearance(preset.appearance);
   return (
     a.fontFamily === b.fontFamily &&
     a.fontSize === b.fontSize &&
     a.color === b.color &&
     a.vertical === b.vertical &&
     a.horizontal === b.horizontal &&
-    a.verticalOffsetPercent === b.verticalOffsetPercent
+    a.verticalOffsetPercent === b.verticalOffsetPercent &&
+    a.backgroundColor === b.backgroundColor &&
+    a.backgroundOpacity === b.backgroundOpacity &&
+    a.outlineWidth === b.outlineWidth &&
+    a.outlineColor === b.outlineColor &&
+    a.shadow === b.shadow &&
+    a.fontWeight === b.fontWeight &&
+    a.italic === b.italic &&
+    a.capitalization === b.capitalization &&
+    a.karaokeEnabled === b.karaokeEnabled &&
+    a.highlightColor === b.highlightColor &&
+    a.animation === b.animation
   );
 }

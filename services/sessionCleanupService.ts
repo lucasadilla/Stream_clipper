@@ -80,8 +80,14 @@ export async function getSessionStorageInfo(
   };
 }
 
-export async function listSessionsWithStorage(limit = 20): Promise<SessionStorageInfo[]> {
+export async function listSessionsWithStorage(
+  limit = 20,
+  billingAccountId?: string | null
+): Promise<SessionStorageInfo[]> {
+  if (!billingAccountId) return [];
+
   const sessions = await prisma.streamSession.findMany({
+    where: { billingAccountId },
     orderBy: { createdAt: "desc" },
     take: limit,
     select: {

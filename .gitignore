@@ -23,6 +23,7 @@
 /storage/uploads/**
 /storage/frames/**
 /storage/renders/**
+/storage/audio/**
 !storage/uploads/.gitkeep
 !storage/frames/.gitkeep
 !storage/renders/.gitkeep
@@ -52,3 +53,4 @@ prisma/*.db-journal
 
 # Vercel
 .vercel
+.env.local

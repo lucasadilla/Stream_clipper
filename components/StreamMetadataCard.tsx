@@ -54,9 +54,6 @@ export function StreamMetadataCard({ session }: StreamMetadataCardProps) {
               value={new Date(session.scheduledStartTime).toLocaleString()}
             />
           )}
-          {session.activeLiveChatId && (
-            <Row label="Live chat" value="Available" highlight />
-          )}
         </div>
 
         {session.description && (

@@ -1,13 +1,8 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
-import {
-  createRenderJobRecord,
-  executeRenderJob,
-  failRenderJob,
-} from "@/services/renderService";
+import { createRenderJobRecord } from "@/services/renderService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import { parseRenderFormat } from "@/lib/renderFormat";
-import { formatFfmpegProcessError } from "@/lib/ffmpeg";
 import { normalizeCaptionAppearance, type CaptionAppearance } from "@/lib/captionAppearance";
 import { canRenderExport } from "@/services/usageService";
 import { getBillingAccountIdFromRequest } from "@/services/billingService";
@@ -15,9 +10,76 @@ import {
   ensureSessionBillingAccess,
   SessionAccessError,
 } from "@/services/sessionAccessService";
+import { getPostHogClient } from "@/lib/posthog-server";
+
+interface ClientCaptionCue {
+  startTimeSeconds: number;
+  endTimeSeconds: number;
+  text: string;
+  words?: Array<{ start: number; end: number; word: string }>;
+}
+
+function parseCaptionWords(
+  value: unknown
+): Array<{ start: number; end: number; word: string }> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const words = value
+    .slice(0, 200)
+    .flatMap((word) => {
+      if (!word || typeof word !== "object") return [];
+      const raw = word as Record<string, unknown>;
+      const start = raw.start;
+      const end = raw.end;
+      const text = typeof raw.word === "string" ? raw.word.trim() : "";
+      if (
+        typeof start !== "number" ||
+        !Number.isFinite(start) ||
+        typeof end !== "number" ||
+        !Number.isFinite(end) ||
+        end <= start ||
+        !text
+      ) {
+        return [];
+      }
+      return [{ start, end, word: text.slice(0, 80) }];
+    });
+  return words.length > 0 ? words : undefined;
+}
+
+function parseCaptionCues(value: unknown): ClientCaptionCue[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value
+    .slice(0, 500)
+    .flatMap((cue) => {
+      if (!cue || typeof cue !== "object") return [];
+      const raw = cue as Record<string, unknown>;
+      const start = raw.startTimeSeconds;
+      const end = raw.endTimeSeconds;
+      const text = typeof raw.text === "string" ? raw.text.trim() : "";
+      if (
+        typeof start !== "number" ||
+        !Number.isFinite(start) ||
+        typeof end !== "number" ||
+        !Number.isFinite(end) ||
+        end <= start ||
+        !text
+      ) {
+        return [];
+      }
+      const words = parseCaptionWords(raw.words);
+      return [
+        {
+          startTimeSeconds: start,
+          endTimeSeconds: end,
+          text: text.slice(0, 1000),
+          ...(words ? { words } : {}),
+        },
+      ];
+    });
+}
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+export const maxDuration = 60;
 
 export async function POST(
   request: NextRequest,
@@ -27,6 +89,9 @@ export async function POST(
     const { clipSuggestionId } = await params;
     const body = await request.json().catch(() => ({}));
     const includeCaptions = (body as { includeCaptions?: boolean }).includeCaptions ?? false;
+    const captionCues = parseCaptionCues(
+      (body as { captionCues?: unknown }).captionCues
+    );
     const format = parseRenderFormat((body as { format?: unknown }).format);
     const captionAppearance = normalizeCaptionAppearance(
       (body as { captionAppearance?: Partial<CaptionAppearance> }).captionAppearance
@@ -61,14 +126,6 @@ export async function POST(
       orderBy: { createdAt: "desc" },
     });
 
-    const jobId = await createRenderJobRecord({
-      streamSessionId: clip.streamSessionId,
-      clipSuggestionId: clip.id,
-      sourceMediaId: sourceMedia?.id,
-      layout: clip.suggestedLayout,
-      includeCaptions,
-    });
-
     const renderParams = {
       streamSessionId: clip.streamSessionId,
       sourceMediaId: sourceMedia?.id,
@@ -79,19 +136,37 @@ export async function POST(
       layout: clip.suggestedLayout as "center_crop",
       includeCaptions,
       captionAppearance,
+      captionCues,
     };
 
-    try {
-      await executeRenderJob(jobId, renderParams);
-    } catch (error) {
-      const message = formatFfmpegProcessError(error);
-      await failRenderJob(jobId, message);
-      return errorResponse(message, 500);
-    }
+    const jobId = await createRenderJobRecord({
+      streamSessionId: clip.streamSessionId,
+      clipSuggestionId: clip.id,
+      sourceMediaId: sourceMedia?.id,
+      layout: clip.suggestedLayout,
+      includeCaptions,
+      renderParams,
+    });
 
+    // Nudge the in-process worker without blocking the HTTP response.
+    void import("@/services/workerService")
+      .then(({ runWorkerTick }) => runWorkerTick())
+      .catch(() => {});
+
+    if (billingAccountId) {
+      getPostHogClient().capture({
+        distinctId: billingAccountId,
+        event: "clip_rendered",
+        properties: {
+          format: format,
+          duration_seconds: clip.endTimeSeconds - clip.startTimeSeconds,
+          include_captions: includeCaptions,
+        },
+      });
+    }
     return jsonResponse({
       jobId,
-      status: "completed",
+      status: "queued",
       downloadUrl: `/api/render-jobs/${jobId}/download`,
     });
   } catch (error) {

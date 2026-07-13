@@ -9,7 +9,11 @@ import {
   TRANSCRIPTION_CHUNK_SECONDS,
   TRANSCRIPTION_PARALLEL,
 } from "@/lib/transcriptionConstants";
-import { extractAudioSegment, hasAudioStream } from "@/lib/ffmpeg";
+import {
+  extractAudioSegment,
+  hasAudioStream,
+  probeMediaDurationBestEffort,
+} from "@/lib/ffmpeg";
 import {
   EMBED_TRANSCRIPT_CHUNKS,
 } from "@/lib/aiCostConstants";
@@ -23,13 +27,14 @@ import {
   listSourceCandidateFiles,
   toRelativeStoragePath,
 } from "@/lib/storage";
-import type { TranscriptSegment } from "@/services/transcriptService";
+import type { TranscriptSegmentWithMeta } from "@/services/whisperTranscription";
 import {
   isProviderUnavailableError,
   isWhisperAvailable,
   transcribeWhisperAudio,
 } from "@/services/whisperTranscription";
 import { ensureLocalSourceMedia } from "@/services/sourceMediaRepairService";
+import { resolveSourceRecordedSeconds, canAttemptTranscription } from "@/services/liveRecordingService";
 
 const MIN_SEGMENT_SECONDS = 3;
 /** Give a failing range this many tries before permanently skipping it. */
@@ -299,7 +304,7 @@ export async function getTranscriptionBacklog(streamSessionId: string) {
     orderBy: { createdAt: "desc" },
     select: { durationSeconds: true, filePath: true },
   });
-  const recordedSeconds = sourceMedia?.durationSeconds ?? 0;
+  const recordedSeconds = await resolveSourceRecordedSeconds(streamSessionId);
   const transcribedThrough = await getLastTranscribedEnd(streamSessionId);
   const fileReady = sourceMedia
     ? existsSync(resolveStoragePath(sourceMedia.filePath)) ||
@@ -410,12 +415,109 @@ export async function persistTranscriptSegments(
 async function transcribeAudioRange(
   streamSessionId: string,
   audioPath: string,
+  audioStartSeconds: number,
   startSeconds: number,
   endSeconds: number
 ) {
-  let segments: TranscriptSegment[];
+  let segments: TranscriptSegmentWithMeta[];
   try {
-    segments = await transcribeWhisperAudio(audioPath, startSeconds);
+    const [session, previous] = await Promise.all([
+      prisma.streamSession.findUnique({
+        where: { id: streamSessionId },
+        select: { title: true, channelTitle: true },
+      }),
+      prisma.transcriptChunk.findFirst({
+        where: {
+          streamSessionId,
+          endTimeSeconds: { lte: startSeconds },
+        },
+        orderBy: { endTimeSeconds: "desc" },
+        select: { text: true },
+      }),
+    ]);
+    const context = [
+      session?.title ? `Stream title: ${session.title}.` : "",
+      session?.channelTitle ? `Speaker/channel: ${session.channelTitle}.` : "",
+      previous?.text ? `Previous transcript: ${previous.text}` : "",
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .slice(-800);
+
+    const rawSegments = await transcribeWhisperAudio(audioPath, audioStartSeconds, {
+      prompt: context || undefined,
+    });
+
+    // Boundary context prevents clipped words at each 45s seam. Persist only
+    // words whose midpoint belongs to this core range so adjacent chunks never
+    // duplicate captions.
+    const clipped: TranscriptSegmentWithMeta[] = [];
+    for (const segment of rawSegments) {
+      const words = segment.words?.filter((word) => {
+        const midpoint = (word.start + word.end) / 2;
+        return midpoint >= startSeconds && midpoint < endSeconds;
+      });
+      if (words && words.length > 0) {
+        clipped.push({
+          ...segment,
+          startTimeSeconds: words[0]!.start,
+          endTimeSeconds: words[words.length - 1]!.end,
+          text: words.map((word) => word.word.trim()).join(" "),
+          words,
+          estimatedTiming: false,
+        });
+        continue;
+      }
+      if (segment.words && segment.words.length > 0) continue;
+      if (
+        segment.endTimeSeconds <= startSeconds ||
+        segment.startTimeSeconds >= endSeconds
+      ) {
+        continue;
+      }
+
+      // Text-only STT has no real clocks — pin to the core range (not the
+      // padded WAV) so captions don't drift into the context overlap.
+      if (segment.estimatedTiming) {
+        clipped.push({
+          ...segment,
+          startTimeSeconds: startSeconds,
+          endTimeSeconds: endSeconds,
+          estimatedTiming: true,
+          words: undefined,
+        });
+        continue;
+      }
+
+      clipped.push({
+        ...segment,
+        startTimeSeconds: Math.max(startSeconds, segment.startTimeSeconds),
+        endTimeSeconds: Math.min(endSeconds, segment.endTimeSeconds),
+        estimatedTiming: false,
+      });
+    }
+
+    // Collapse multiple estimated slices from one WAV into one redistributed span.
+    const estimated = clipped.filter((s) => s.estimatedTiming);
+    if (estimated.length > 0 && estimated.length === clipped.length) {
+      const text = estimated
+        .map((s) => s.text.trim())
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+      segments = text
+        ? [
+            {
+              startTimeSeconds: startSeconds,
+              endTimeSeconds: endSeconds,
+              text,
+              estimatedTiming: true,
+            },
+          ]
+        : [];
+    } else {
+      segments = clipped;
+    }
   } catch (err) {
     console.error("[transcribe] whisper failed:", err);
     // Quota/network outages: leave the range uncovered so it retries cleanly
@@ -454,10 +556,15 @@ async function transcribeAudioRange(
 }
 
 interface PreparedChunk {
+  /** Requested coverage range (without overlap). */
   start: number;
   end: number;
+  /** Actual WAV start; may include boundary context before `start`. */
+  audioStart: number;
   audioPath: string;
 }
+
+const TRANSCRIPTION_CONTEXT_SECONDS = 1.25;
 
 /**
  * Extract audio for a contiguous span with ONE seek into the source (seeking a
@@ -472,20 +579,28 @@ async function prepareGroupAudio(
 ): Promise<{ chunks: PreparedChunk[]; notReady: boolean }> {
   const groupStart = group[0]!.start;
   const groupEnd = group[group.length - 1]!.end;
+  const extractionStart = Math.max(
+    0,
+    groupStart - TRANSCRIPTION_CONTEXT_SECONDS
+  );
+  const extractionEnd = Math.min(
+    recordedSeconds,
+    groupEnd + TRANSCRIPTION_CONTEXT_SECONDS
+  );
 
   const audioDir = path.join(path.dirname(inputPath), "audio");
   await ensureDir(audioDir);
   const groupWav = path.join(
     audioDir,
-    `span-${Math.floor(groupStart)}-${Math.floor(groupEnd)}.wav`
+    `span-${Math.floor(extractionStart)}-${Math.floor(extractionEnd)}.wav`
   );
 
   try {
     await extractAudioSegment(
       inputPath,
       groupWav,
-      groupStart,
-      groupEnd - groupStart,
+      extractionStart,
+      extractionEnd - extractionStart,
       { accurateSeek: true }
     );
   } catch (err) {
@@ -508,8 +623,7 @@ async function prepareGroupAudio(
   let notReady = false;
 
   for (const r of group) {
-    const relStart = r.start - groupStart;
-    const relEnd = r.end - groupStart;
+    const relEnd = r.end - extractionStart;
     if (relEnd > availableSeconds + 1) {
       if (r.end >= recordedSeconds - 180) {
         notReady = true;
@@ -519,15 +633,32 @@ async function prepareGroupAudio(
       continue;
     }
 
+    const contextStart = Math.max(
+      extractionStart,
+      r.start - TRANSCRIPTION_CONTEXT_SECONDS
+    );
+    const contextEnd = Math.min(
+      extractionEnd,
+      r.end + TRANSCRIPTION_CONTEXT_SECONDS
+    );
     const chunkWav = path.join(
       audioDir,
       `segment-${Math.floor(r.start)}-${Math.floor(r.end)}.wav`
     );
     try {
-      await extractAudioSegment(groupWav, chunkWav, relStart, relEnd - relStart, {
-        accurateSeek: true,
+      await extractAudioSegment(
+        groupWav,
+        chunkWav,
+        contextStart - extractionStart,
+        contextEnd - contextStart,
+        { accurateSeek: true }
+      );
+      chunks.push({
+        start: r.start,
+        end: r.end,
+        audioStart: contextStart,
+        audioPath: chunkWav,
       });
-      chunks.push({ start: r.start, end: r.end, audioPath: chunkWav });
     } catch (err) {
       console.error("[transcribe] wav split failed:", err);
       await markRangeProcessed(streamSessionId, r.start, r.end, "error");
@@ -568,6 +699,8 @@ export interface TranscriptionSyncOptions {
   isLive?: boolean;
   budgetSeconds?: number;
   parallel?: number;
+  /** Caller already holds the DB lock under this owner id. */
+  heldLockOwner?: string;
 }
 
 export async function syncTranscription(
@@ -580,11 +713,28 @@ export async function syncTranscription(
   if (activeSyncs.has(streamSessionId)) {
     return { skipped: true, reason: "sync_in_progress" };
   }
+
+  const { claimTranscriptionLock, releaseTranscriptionLock } = await import(
+    "@/services/transcriptionLockService"
+  );
+  const lockOwner =
+    options.heldLockOwner ?? `api-${process.pid}-${streamSessionId.slice(0, 8)}`;
+  const ownsLock = Boolean(options.heldLockOwner);
+  if (!ownsLock) {
+    const claimed = await claimTranscriptionLock(streamSessionId, lockOwner);
+    if (!claimed) {
+      return { skipped: true, reason: "sync_in_progress" };
+    }
+  }
+
   activeSyncs.add(streamSessionId);
   try {
     return await runSyncTranscription(streamSessionId, options);
   } finally {
     activeSyncs.delete(streamSessionId);
+    if (!ownsLock) {
+      await releaseTranscriptionLock(streamSessionId, lockOwner);
+    }
   }
 }
 
@@ -610,10 +760,24 @@ async function runSyncTranscription(
     return { skipped: true, reason: "no_file", recordedSeconds: 0 };
   }
 
-  const recorded = sourceMedia.durationSeconds ?? 0;
-  if (recorded < MIN_SEGMENT_SECONDS) {
+  const recorded = await resolveSourceRecordedSeconds(streamSessionId);
+  if (!(await canAttemptTranscription(streamSessionId))) {
     return { skipped: true, reason: "too_short", recordedSeconds: recorded };
   }
+
+  // A growing capture's byte-size estimate can run far ahead of the duration
+  // FFmpeg can currently decode (especially split DASH audio in Matroska).
+  // Scheduling against that estimate creates a 45s range even when, for
+  // example, only 20s is readable; prepareGroupAudio then rejects the whole
+  // range and every poll returns audio_not_ready. Clamp work to the readable
+  // audio frontier so the initial partial chunk is transcribed immediately.
+  const readableSeconds = await probeMediaDurationBestEffort(inputPath).catch(
+    () => 0
+  );
+  const availableSeconds =
+    readableSeconds >= MIN_SEGMENT_SECONDS
+      ? Math.min(recorded, readableSeconds)
+      : recorded;
 
   const placeholdersRemoved = await removePlaceholderChunks(streamSessionId);
   const isLive = options.isLive ?? false;
@@ -624,7 +788,7 @@ async function runSyncTranscription(
 
   const coverage = await getTranscriptionCoverage(streamSessionId);
   const fromSeconds = coverage.frontier;
-  const ranges = buildGapRanges(coverage, recorded, budgetSeconds);
+  const ranges = buildGapRanges(coverage, availableSeconds, budgetSeconds);
 
   if (ranges.length === 0) {
     return {
@@ -644,12 +808,26 @@ async function runSyncTranscription(
   // for exactly ONE seek: process only the first contiguous gap group. The
   // steady polling loop works through remaining gaps on subsequent calls.
   const group = groupContiguousRanges(ranges)[0]!;
-  const { chunks } = await prepareGroupAudio(
+  const { chunks, notReady } = await prepareGroupAudio(
     streamSessionId,
     inputPath,
     group,
-    recorded
+    availableSeconds
   );
+
+  if (chunks.length === 0) {
+    return {
+      skipped: true,
+      reason: notReady
+        ? "audio_not_ready"
+        : ranges.length > 0
+          ? "silent"
+          : "already_processed",
+      transcribedThrough: fromSeconds,
+      recordedSeconds: recorded,
+      placeholdersRemoved,
+    };
+  }
 
   let providerError: string | null = null;
 
@@ -657,7 +835,13 @@ async function runSyncTranscription(
     const wave = chunks.slice(i, i + parallel);
     const results = await Promise.all(
       wave.map((c) =>
-        transcribeAudioRange(streamSessionId, c.audioPath, c.start, c.end)
+        transcribeAudioRange(
+          streamSessionId,
+          c.audioPath,
+          c.audioStart,
+          c.start,
+          c.end
+        )
       )
     );
 

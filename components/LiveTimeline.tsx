@@ -10,14 +10,10 @@ import { applyCaptionEdits, clampCueRange, type CaptionEditsMap } from "@/lib/ca
 import { CaptionTimelineTrack, type CaptionDragMode } from "@/components/CaptionTimelineTrack";
 import { CaptionCueEditor } from "@/components/CaptionCueEditor";
 import { RenderClipModal } from "@/components/RenderClipModal";
+import { MIN_CLIP_SECONDS, MAX_CLIP_SECONDS } from "@/lib/clipConstants";
 import { cn } from "@/lib/utils";
 import type { LiveTimelineSegment } from "@/lib/timelineSegments";
 import type { TimelineThumbnail } from "@/services/timelineThumbnailService";
-import {
-  formatHypeTooltip,
-  type ChatHypeMoment,
-  type HypeIntensity,
-} from "@/lib/chatHypeTimeline";
 import {
   formatAudioSpikeTooltip,
   waveformHasSignal,
@@ -66,8 +62,6 @@ interface LiveTimelineProps {
       endTimeSeconds: number;
     }>
   ) => void;
-  chatHypeMoments?: ChatHypeMoment[];
-  showChatHypeTrack?: boolean;
   audioWaveform?: WaveformBucket[];
   audioSpikes?: AudioSpikeMarker[];
   showAudioLane?: boolean;
@@ -75,10 +69,8 @@ interface LiveTimelineProps {
 
 const VIDEO_TRACK_H = "min(22vh,100px)";
 const AUDIO_TRACK_H = "min(14vh,72px)";
-const HYPE_TRACK_H = "min(12vh,64px)";
 const CAPTION_TRACK_H = "min(10vh,56px)";
 
-import { MIN_CLIP_SECONDS, MAX_CLIP_SECONDS } from "@/lib/clipConstants";
 const TRACK_LABEL_W = 52;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 32;
@@ -134,25 +126,6 @@ function clampSelection(
     }
   }
   return { start: s, end: e };
-}
-
-function hypeBarClass(intensity: HypeIntensity, isActive: boolean): string {
-  if (isActive) {
-    if (intensity === "high") {
-      return "border-[#95FF00] bg-[#95FF00]/40 text-[#f0ffe0] z-[4]";
-    }
-    if (intensity === "medium") {
-      return "border-orange-400 bg-orange-500/35 text-orange-50 z-[4]";
-    }
-    return "border-orange-500/70 bg-orange-600/25 text-orange-100 z-[4]";
-  }
-  if (intensity === "high") {
-    return "border-[#95FF00]/60 bg-[#95FF00]/20 text-[#d4ffb8] hover:bg-[#95FF00]/30";
-  }
-  if (intensity === "medium") {
-    return "border-orange-500/50 bg-orange-600/20 text-orange-200/90 hover:bg-orange-600/30";
-  }
-  return "border-orange-700/40 bg-orange-800/15 text-orange-300/70 hover:bg-orange-800/25";
 }
 
 function audioSpikeBarClass(
@@ -214,8 +187,6 @@ export function LiveTimeline({
   captionAppearance,
   captionEdits = {},
   onCaptionEdit,
-  chatHypeMoments = [],
-  showChatHypeTrack = false,
   audioWaveform = [],
   audioSpikes = [],
   showAudioLane = false,
@@ -279,18 +250,10 @@ export function LiveTimeline({
   );
 
   const showCaptionTrack = captionCues.length > 0;
-  const showHypeTrack = showChatHypeTrack || chatHypeMoments.length > 0;
   const showAudioTrack =
     showAudioLane ||
     waveformHasSignal(audioWaveform) ||
     audioSpikes.length > 0;
-
-  function handleHypeClick(moment: ChatHypeMoment) {
-    const start = moment.startTimeSeconds;
-    const end = Math.max(moment.endTimeSeconds, start + MIN_CLIP_SECONDS);
-    onSeek(start);
-    onSelectionChange(clampSelection(start, end, maxTime));
-  }
 
   function handleAudioSpikeClick(marker: AudioSpikeMarker) {
     const start = marker.startTimeSeconds;
@@ -677,16 +640,6 @@ export function LiveTimeline({
     [audioSpikes, visibleTimeRange.start, visibleTimeRange.end]
   );
 
-  const visibleChatHypeMoments = useMemo(
-    () =>
-      chatHypeMoments.filter(
-        (moment) =>
-          moment.endTimeSeconds >= visibleTimeRange.start &&
-          moment.startTimeSeconds <= visibleTimeRange.end
-      ),
-    [chatHypeMoments, visibleTimeRange.start, visibleTimeRange.end]
-  );
-
   const visibleCaptionCues = useMemo(
     () =>
       sampleTimelineItems(
@@ -752,15 +705,6 @@ export function LiveTimeline({
           <span className="text-[var(--color-accent)]">{formatSeconds(selection.end)}</span>
           <span className="text-[#71806d] ml-2">({formatDuration(selection.end - selection.start)})</span>
         </div>
-
-        {chatHypeMoments.length > 0 && (
-          <span
-            className="text-[10px] font-medium uppercase text-[#ffb84d] tabular-nums"
-            title="Chat hype moments on timeline"
-          >
-            Hype {chatHypeMoments.length}
-          </span>
-        )}
 
         {audioSpikes.length > 0 && (
           <span
@@ -854,14 +798,6 @@ export function LiveTimeline({
                 <span className="text-[10px] font-semibold text-[var(--color-accent)]">A1</span>
               </div>
             )}
-            {showHypeTrack && (
-              <div
-                className="flex items-center justify-center border-b border-[var(--color-card-border)] text-[#ffb84d] [&>span]:hidden"
-                style={{ height: HYPE_TRACK_H }}
-              >
-                <strong className="text-[9px] font-semibold uppercase">Hot</strong>
-              </div>
-            )}
             {showCaptionTrack && (
               <div
                 className="flex items-center justify-center border-b border-[var(--color-card-border)]"
@@ -947,8 +883,29 @@ export function LiveTimeline({
                   : visibleSegments.map((seg) => (
                       <div
                         key={seg.id}
+                        title={seg.label}
                         className={cn(
                           "absolute top-0 bottom-0 border-r border-[#21301f] bg-[#081008]",
+                          seg.isNew && "ring-1 ring-inset ring-[var(--color-success)]"
+                        )}
+                        style={{
+                          left: `${pct(seg.startTimeSeconds, maxTime)}%`,
+                          width: `${Math.max(
+                            pct(seg.endTimeSeconds - seg.startTimeSeconds, maxTime),
+                            0.4
+                          )}%`,
+                        }}
+                      />
+                    ))}
+                {thumbnails.length > 0 &&
+                  visibleSegments
+                    .filter((seg) => !seg.id.startsWith("synthetic-"))
+                    .map((seg) => (
+                      <div
+                        key={`tx-${seg.id}`}
+                        title={seg.label}
+                        className={cn(
+                          "absolute top-0 bottom-0 border-r border-white/15",
                           seg.isNew && "ring-1 ring-inset ring-[var(--color-success)]"
                         )}
                         style={{
@@ -976,7 +933,7 @@ export function LiveTimeline({
 
               {/* Active clip selection. */}
               <div
-                className="absolute top-0 bottom-0 z-[5] border-2 border-[var(--color-accent)] bg-[var(--color-accent)]/14 shadow-[0_0_22px_rgba(149,255,0,0.12)]"
+                className="absolute top-0 bottom-0 z-[5] border-2 border-[var(--color-accent)]"
                 style={{
                   left: `${selStartPct}%`,
                   width: `${Math.max(selWidthPct, 0.2)}%`,
@@ -1023,7 +980,7 @@ export function LiveTimeline({
                   />
                 ))}
 
-                {!waveformHasSignal(audioWaveform) && audioSpikes.length === 0 && (
+                {audioWaveform.length === 0 && audioSpikes.length === 0 && (
                   <div className="absolute inset-0 flex items-center justify-center text-[9px] text-[var(--color-accent)]/35 pointer-events-none">
                     {isLive ? "Analyzing audio levels..." : "No audio spikes yet"}
                   </div>
@@ -1057,55 +1014,6 @@ export function LiveTimeline({
                     />
                   );
                 })}
-              </div>
-            )}
-
-            {/* Chat hype track */}
-            {showHypeTrack && (
-              <div
-                className="relative bg-[#120b04] border-b border-[var(--color-card-border)] shrink-0 overflow-hidden"
-                style={{ height: HYPE_TRACK_H }}
-              >
-                {chatHypeMoments.length === 0 ? (
-                  <div className="absolute inset-0 flex items-center justify-center text-[9px] text-[#ffb84d]/50 pointer-events-none">
-                    {isLive ? "Watching chat for hype..." : "No hype moments yet"}
-                  </div>
-                ) : (
-                  visibleChatHypeMoments.map((moment) => {
-                    const isActive =
-                      currentTime >= moment.startTimeSeconds &&
-                      currentTime < moment.endTimeSeconds;
-                    return (
-                      <button
-                        key={moment.id}
-                        type="button"
-                        title={formatHypeTooltip(moment)}
-                        onClick={() => handleHypeClick(moment)}
-                        className={cn(
-                          "absolute top-1 bottom-1 rounded-sm border text-left overflow-hidden",
-                          "px-1 py-0.5 text-[9px] leading-tight truncate cursor-pointer text-[#ffddb0]",
-                          hypeBarClass(moment.intensity, isActive)
-                        )}
-                        style={{
-                          left: `${pct(moment.startTimeSeconds, maxTime)}%`,
-                          width: `${Math.max(
-                            pct(
-                              moment.endTimeSeconds - moment.startTimeSeconds,
-                              maxTime
-                            ),
-                            0.5
-                          )}%`,
-                        }}
-                      >
-                        {moment.intensity === "high"
-                          ? "hot"
-                          : moment.clipItCount > 0
-                            ? "clip"
-                            : "hype"}
-                      </button>
-                    );
-                  })
-                )}
               </div>
             )}
 
@@ -1144,6 +1052,7 @@ export function LiveTimeline({
       selection={selection}
       includeCaptions={includeCaptions}
       captionAppearance={captionAppearance}
+      captionCues={captionCues}
       onClipCreated={onClipCreated}
     />
     </>

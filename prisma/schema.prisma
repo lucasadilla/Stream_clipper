@@ -27,6 +27,9 @@ model StreamSession {
   concurrentViewers  Int?
   activeLiveChatId   String?
   metadataJson       Json?
+  transcribeLockedAt DateTime?
+  transcribeLockedBy String?
+  lastTranscriptionError String? @db.Text
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
@@ -50,6 +53,7 @@ model StreamSession {
 model BillingAccount {
   id                     String   @id @default(cuid())
   email                  String?
+  displayName            String?
   stripeCustomerId       String   @unique
   stripeSubscriptionId   String?  @unique
   plan                   String
@@ -57,6 +61,7 @@ model BillingAccount {
   unlimitedAccess        Boolean  @default(false)
   currentPeriodEnd       DateTime?
   cancelAtPeriodEnd      Boolean  @default(false)
+  lastSignedInAt         DateTime?
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 
@@ -228,22 +233,32 @@ model ClipSuggestion {
 }
 
 model RenderJob {
-  id               String   @id @default(cuid())
+  id               String    @id @default(cuid())
   streamSessionId  String
   clipSuggestionId String?
   sourceMediaId    String?
-  status           String   @default("queued")
-  progress         Float    @default(0)
+  status           String    @default("queued")
+  progress         Float     @default(0)
   outputPath       String?
-  errorMessage     String?  @db.Text
-  layout           String   @default("center_crop")
-  includeCaptions  Boolean  @default(true)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  errorMessage     String?   @db.Text
+  layout           String    @default("center_crop")
+  includeCaptions  Boolean   @default(true)
+  params           Json?
+  attempts         Int       @default(0)
+  maxAttempts      Int       @default(3)
+  lockedAt         DateTime?
+  lockedBy         String?
+  startedAt        DateTime?
+  completedAt      DateTime?
+  logs             Json?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   streamSession  StreamSession   @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
   clipSuggestion ClipSuggestion? @relation(fields: [clipSuggestionId], references: [id], onDelete: SetNull)
   sourceMedia    SourceMedia?    @relation(fields: [sourceMediaId], references: [id], onDelete: SetNull)
 
   @@index([streamSessionId, status])
+  @@index([status, lockedAt])
+  @@index([status, createdAt])
 }

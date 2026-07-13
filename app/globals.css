@@ -47,6 +47,179 @@ body {
 
 .marketing-home {
   background: #020302;
+  --page-scroll-progress: 0;
+  --hero-scroll-progress: 0;
+  --hero-art-x: 0;
+  --hero-art-y: 0;
+  --hero-art-scale: 1;
+  --hero-art-opacity: 0.95;
+  --hero-copy-y: 0;
+  --hero-copy-opacity: 1;
+}
+
+.marketing-scroll-meter {
+  display: none;
+}
+
+.marketing-warp-section {
+  --scroll-warp-top: 1px;
+  --scroll-warp-height: 0px;
+  --scroll-warp-top-x: 0px;
+  --scroll-warp-top-skew: 0deg;
+  --scroll-warp-top-scale: 1;
+  position: relative;
+}
+
+.marketing-warp-section.is-warp-active {
+  z-index: 1;
+}
+
+.marketing-warp-section::before {
+  content: "";
+  position: absolute;
+  top: var(--scroll-warp-top);
+  left: -8%;
+  z-index: 0;
+  width: 116%;
+  height: var(--scroll-warp-height);
+  border-radius: 50% 50% 0 0 / 100% 100% 0 0;
+  background: inherit;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate3d(var(--scroll-warp-top-x), 0, 0)
+    skewX(var(--scroll-warp-top-skew))
+    scaleX(var(--scroll-warp-top-scale));
+  transform-origin: 50% 100%;
+  will-change: transform, height;
+}
+
+.marketing-warp-section.is-warp-active::before {
+  opacity: 1;
+}
+
+.marketing-particle-field,
+.marketing-hero-copy {
+  will-change: transform, opacity;
+}
+
+.marketing-particle-field {
+  transform: translate3d(var(--hero-art-x), var(--hero-art-y), 0)
+    scale(var(--hero-art-scale));
+  opacity: var(--hero-art-opacity);
+}
+
+.marketing-hero-copy {
+  transform: translate3d(0, var(--hero-copy-y), 0);
+  opacity: var(--hero-copy-opacity);
+}
+
+.marketing-hero-title > span {
+  display: inline-block;
+}
+
+.scroll-motion-ready [data-scroll-reveal] {
+  opacity: 0;
+  transform: translate3d(0, 3.5rem, 0);
+  transition:
+    opacity 800ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 950ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform, opacity;
+}
+
+.scroll-motion-ready [data-scroll-reveal="left"] {
+  transform: translate3d(-3.5rem, 0, 0);
+}
+
+.scroll-motion-ready [data-scroll-reveal="right"] {
+  transform: translate3d(3.5rem, 0, 0);
+}
+
+.scroll-motion-ready [data-scroll-reveal="card"] {
+  transform: translate3d(0, 4.5rem, 0) scale(0.965);
+}
+
+.scroll-motion-ready [data-scroll-reveal].is-scroll-visible {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+.scroll-motion-ready [data-scroll-reveal="hero"]:nth-child(2) {
+  transition-delay: 80ms;
+}
+
+.scroll-motion-ready [data-scroll-reveal="hero"]:nth-child(3) {
+  transition-delay: 150ms;
+}
+
+.scroll-motion-ready [data-scroll-reveal="hero"]:nth-child(4) {
+  transition-delay: 220ms;
+}
+
+.scroll-motion-ready [data-scroll-reveal="hero"]:nth-child(5) {
+  transition-delay: 290ms;
+}
+
+[data-scroll-reveal="process"]:nth-child(2),
+[data-scroll-reveal="card"]:nth-child(2) {
+  transition-delay: 90ms;
+}
+
+[data-scroll-reveal="process"]:nth-child(3),
+[data-scroll-reveal="card"]:nth-child(3) {
+  transition-delay: 180ms;
+}
+
+[data-scroll-reveal="process"]:nth-child(4),
+[data-scroll-reveal="card"]:nth-child(4) {
+  transition-delay: 270ms;
+}
+
+@media (min-width: 1024px) {
+  .marketing-sticky-heading {
+    position: sticky;
+    top: 7.5rem;
+    align-self: start;
+  }
+
+  .marketing-scroll-meter {
+    position: fixed;
+    top: 6rem;
+    right: 1.1rem;
+    z-index: 40;
+    display: block;
+    width: 2px;
+    height: calc(100vh - 8rem);
+    overflow: hidden;
+    background: rgba(149, 255, 0, 0.12);
+    pointer-events: none;
+  }
+
+  .marketing-scroll-meter > span {
+    display: block;
+    width: 100%;
+    height: 100%;
+    background: var(--color-accent);
+    transform: scaleY(var(--page-scroll-progress));
+    transform-origin: top;
+  }
+
+  [data-scroll-progress] {
+    transform: translate3d(0, var(--section-scroll-parallax, 0), 0);
+    will-change: transform;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .marketing-particle-field,
+  .marketing-hero-copy,
+  .marketing-warp-section,
+  [data-scroll-progress],
+  .scroll-motion-ready [data-scroll-reveal] {
+    opacity: 1 !important;
+    transform: none !important;
+    transition: none !important;
+    filter: none !important;
+  }
 }
 
 .marketing-hero-title {
@@ -164,4 +337,51 @@ body[data-render-modal-open] [data-timeline-playhead] {
 
 .animate-segment-pop {
   animation: segment-pop 0.55s ease-out;
+}
+
+@keyframes caption-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes caption-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.86);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.06);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes caption-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(0.7em);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.caption-anim-fade {
+  animation: caption-fade 0.22s ease-out;
+}
+
+.caption-anim-pop {
+  animation: caption-pop 0.32s ease-out;
+}
+
+.caption-anim-slide-up {
+  animation: caption-slide-up 0.28s ease-out;
 }

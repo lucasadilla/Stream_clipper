@@ -7,9 +7,11 @@ import {
   normalizeLoginEmail,
 } from "@/lib/accessConfig";
 import {
+  canManageBillingForAccount,
   serializeBillingAccount,
   type BillingAccountSummary,
 } from "@/services/billingService";
+import { getStripe } from "@/lib/stripe";
 
 export interface LoginResult {
   account: BillingAccountSummary;
@@ -59,12 +61,14 @@ export async function loginWithEmail(params: {
       plan: "studio",
       status: "active",
       unlimitedAccess: true,
+      lastSignedInAt: new Date(),
     },
     update: {
       email,
       plan: "studio",
       status: "active",
       unlimitedAccess: true,
+      lastSignedInAt: new Date(),
     },
   });
 
@@ -82,4 +86,72 @@ export async function getLoggedInAccount(
     where: { id: billingAccountId },
   });
   return account ? serializeBillingAccount(account) : null;
+}
+
+const DISPLAY_NAME_MAX = 80;
+
+export async function updateProfile(
+  billingAccountId: string | null | undefined,
+  patch: { displayName?: unknown; email?: unknown }
+): Promise<BillingAccountSummary> {
+  if (!billingAccountId) {
+    throw new Error("Sign in to update your profile");
+  }
+
+  const existing = await prisma.billingAccount.findUnique({
+    where: { id: billingAccountId },
+  });
+  if (!existing) throw new Error("Account not found");
+
+  const data: { displayName?: string | null; email?: string } = {};
+
+  if ("displayName" in patch) {
+    if (typeof patch.displayName !== "string" && patch.displayName !== null) {
+      throw new Error("Display name must be a string");
+    }
+    const trimmed =
+      typeof patch.displayName === "string"
+        ? patch.displayName.trim().slice(0, DISPLAY_NAME_MAX)
+        : "";
+    data.displayName = trimmed.length > 0 ? trimmed : null;
+  }
+
+  if ("email" in patch) {
+    if (typeof patch.email !== "string") {
+      throw new Error("Enter a valid email address");
+    }
+    const email = normalizeLoginEmail(patch.email);
+    if (!email || !email.includes("@")) {
+      throw new Error("Enter a valid email address");
+    }
+    data.email = email;
+
+    if (
+      canManageBillingForAccount(existing) &&
+      email !== (existing.email ?? "").toLowerCase()
+    ) {
+      try {
+        await getStripe().customers.update(existing.stripeCustomerId, {
+          email,
+        });
+      } catch (err) {
+        console.warn("[profile] failed to sync email to Stripe:", err);
+      }
+    }
+  }
+
+  const account = await prisma.billingAccount.update({
+    where: { id: billingAccountId },
+    data,
+  });
+
+  return serializeBillingAccount(account);
+}
+
+/** @deprecated Use updateProfile */
+export async function updateDisplayName(
+  billingAccountId: string | null | undefined,
+  displayName: unknown
+): Promise<BillingAccountSummary> {
+  return updateProfile(billingAccountId, { displayName });
 }

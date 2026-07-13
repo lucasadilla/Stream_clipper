@@ -288,14 +288,18 @@ export async function getTimelineThumbnails(
 
   if (needsMore && sourceMedia && fileExists(sourceMedia.filePath)) {
     const prioritizeTail = options?.isLive ?? false;
-    void capturePriorityThumbs(streamSessionId, { prioritizeTail }).catch(
-      () => {}
+    // Await the small priority grab so Railway cannot finish the request before
+    // any image exists. The larger strip remains asynchronous.
+    await capturePriorityThumbs(streamSessionId, { prioritizeTail }).catch(
+      (error) =>
+        console.warn("[thumbnails] priority capture failed:", error)
     );
     if (!activeExtractions.has(streamSessionId)) {
       void syncTimelineThumbnails(streamSessionId, { prioritizeTail }).catch(
-        () => {}
+        (error) => console.error("[thumbnails] strip extraction failed:", error)
       );
     }
+    return listThumbnailsFromDisk(streamSessionId, framesDir);
   }
 
   return existing;

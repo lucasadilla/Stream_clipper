@@ -6,11 +6,19 @@ import {
 } from "@/lib/captionStyles";
 import { distributeTextAcrossSpan } from "@/lib/transcriptTiming";
 
+export interface CaptionWord {
+  start: number;
+  end: number;
+  word: string;
+}
+
 export interface CaptionCue {
   id: string;
   startTimeSeconds: number;
   endTimeSeconds: number;
   text: string;
+  /** Per-word timings when available (for karaoke preview/export). */
+  words?: CaptionWord[];
 }
 
 export interface TranscriptChunkInput {
@@ -25,6 +33,16 @@ interface WhisperWord {
   start: number;
   end: number;
   word: string;
+}
+
+/** True when any chunk carries usable word-level timestamps. */
+export function transcriptHasWordTimings(
+  chunks: TranscriptChunkInput[]
+): boolean {
+  return chunks.some((chunk) => {
+    const meta = chunkMeta(chunk.rawJson);
+    return Boolean(meta?.words && meta.words.length > 0);
+  });
 }
 
 function chunkMeta(rawJson: unknown): {
@@ -48,6 +66,9 @@ function cuesFromWords(
   const cues: CaptionCue[] = [];
   let lineWords: WhisperWord[] = [];
   let lineLen = 0;
+  const MAX_CUE_SECONDS = 2.8;
+  const MAX_SILENCE_GAP_SECONDS = 0.55;
+  const MAX_WORDS_PER_CUE = 8;
 
   const flush = () => {
     if (lineWords.length === 0) return;
@@ -61,6 +82,11 @@ function cuesFromWords(
       startTimeSeconds: lineWords[0]!.start,
       endTimeSeconds: lineWords[lineWords.length - 1]!.end,
       text,
+      words: lineWords.map((w) => ({
+        start: w.start,
+        end: w.end,
+        word: w.word.trim(),
+      })),
     });
     lineWords = [];
     lineLen = 0;
@@ -69,6 +95,24 @@ function cuesFromWords(
   for (const word of words) {
     const piece = word.word.trim();
     if (!piece) continue;
+    const previous = lineWords[lineWords.length - 1];
+    const cueStart = lineWords[0]?.start ?? word.start;
+    const crossesPause = previous
+      ? word.start - previous.end >= MAX_SILENCE_GAP_SECONDS
+      : false;
+    const tooLong = word.end - cueStart > MAX_CUE_SECONDS;
+    const sentenceEnded = previous
+      ? /[.!?]["')\]]?$/.test(previous.word.trim())
+      : false;
+    if (
+      lineWords.length > 0 &&
+      (crossesPause ||
+        tooLong ||
+        sentenceEnded ||
+        lineWords.length >= MAX_WORDS_PER_CUE)
+    ) {
+      flush();
+    }
     const addLen = lineLen > 0 ? piece.length + 1 : piece.length;
     if (lineLen + addLen > maxChars && lineWords.length > 0) {
       flush();
@@ -92,8 +136,6 @@ export function buildCaptionTrack(
     if (!isValidCaptionText(chunk.text)) continue;
 
     const meta = chunkMeta(chunk.rawJson);
-    const span = chunk.endTimeSeconds - chunk.startTimeSeconds;
-
     if (meta?.words && meta.words.length > 0) {
       cues.push(...cuesFromWords(meta.words, chunk.id, maxChars));
       continue;

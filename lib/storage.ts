@@ -3,7 +3,13 @@ import { existsSync, createReadStream } from "fs";
 import { readFile as readFileFs, stat as statFs } from "fs/promises";
 import { hasVideoStream } from "@/lib/ffmpeg";
 
-const STORAGE_ROOT = process.env.STORAGE_ROOT ?? "./storage";
+// Railway injects this variable only when a volume is genuinely attached.
+// Prefer it so any configured mount path is used instead of accidentally
+// writing to the Docker image's ephemeral /app/storage directory.
+const STORAGE_ROOT =
+  process.env.RAILWAY_VOLUME_MOUNT_PATH?.trim() ||
+  process.env.STORAGE_ROOT ||
+  "./storage";
 const confirmedVideoSourceByDir = new Map<string, string>();
 
 export function getStorageRoot(): string {

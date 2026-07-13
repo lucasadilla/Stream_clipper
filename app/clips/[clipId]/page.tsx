@@ -13,14 +13,15 @@ export async function generateMetadata({
   const { clipId } = await params;
   const clip = await getClipSharePayload(clipId);
   if (!clip) {
-    return { title: "Clip not found — Stream Clipper" };
+    return { title: "Clip not found", robots: { index: false, follow: false } };
   }
 
   const description = clip.reason.slice(0, 160);
 
   return {
-    title: `${clip.title} — Stream Clipper`,
+    title: clip.title,
     description,
+    alternates: { canonical: `/clips/${clipId}` },
     openGraph: {
       title: clip.title,
       description,

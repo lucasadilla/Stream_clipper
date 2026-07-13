@@ -5,11 +5,14 @@ import { CaptionTrackLayer } from "@/components/CaptionTrackLayer";
 import { StreamPlayer, type StreamPlayerHandle } from "@/components/StreamPlayer";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
 import type { CaptionEditsMap } from "@/lib/captionEdits";
-import type { TranscriptChunkInput } from "@/lib/captionTrack";
+import {
+  transcriptHasWordTimings,
+  type TranscriptChunkInput,
+} from "@/lib/captionTrack";
 import type { StreamEmbedInfo, StreamPlatform } from "@/lib/streamPlatform";
 import { platformLabel } from "@/lib/streamPlatform";
 import { cn } from "@/lib/utils";
-import type { RefObject } from "react";
+import { useMemo, type RefObject } from "react";
 
 interface VideoPreviewProps {
   platform: StreamPlatform;
@@ -48,6 +51,11 @@ export function VideoPreview({
   onTimeUpdate,
   onDurationChange,
 }: VideoPreviewProps) {
+  const hasWordTimings = useMemo(
+    () => transcriptHasWordTimings(transcripts),
+    [transcripts]
+  );
+
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-2.5">
       <div className="flex items-center justify-between gap-3 px-1">
@@ -60,6 +68,7 @@ export function VideoPreview({
             appearance={captionAppearance}
             onChange={onCaptionAppearanceChange}
             disabled={!captionsEnabled}
+            hasWordTimings={hasWordTimings}
           />
           <button
             type="button"
