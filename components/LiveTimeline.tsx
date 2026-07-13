@@ -905,7 +905,7 @@ export function LiveTimeline({
                         key={`tx-${seg.id}`}
                         title={seg.label}
                         className={cn(
-                          "absolute top-0 bottom-0 border-r border-[var(--color-accent)]/45 bg-[var(--color-accent)]/18",
+                          "absolute top-0 bottom-0 border-r border-white/15",
                           seg.isNew && "ring-1 ring-inset ring-[var(--color-success)]"
                         )}
                         style={{
@@ -933,7 +933,7 @@ export function LiveTimeline({
 
               {/* Active clip selection. */}
               <div
-                className="absolute top-0 bottom-0 z-[5] border-2 border-[var(--color-accent)] bg-[var(--color-accent)]/14 shadow-[0_0_22px_rgba(149,255,0,0.12)]"
+                className="absolute top-0 bottom-0 z-[5] border-2 border-[var(--color-accent)]"
                 style={{
                   left: `${selStartPct}%`,
                   width: `${Math.max(selWidthPct, 0.2)}%`,
@@ -980,7 +980,7 @@ export function LiveTimeline({
                   />
                 ))}
 
-                {!waveformHasSignal(audioWaveform) && audioSpikes.length === 0 && (
+                {audioWaveform.length === 0 && audioSpikes.length === 0 && (
                   <div className="absolute inset-0 flex items-center justify-center text-[9px] text-[var(--color-accent)]/35 pointer-events-none">
                     {isLive ? "Analyzing audio levels..." : "No audio spikes yet"}
                   </div>

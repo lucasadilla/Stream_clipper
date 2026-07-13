@@ -3,6 +3,7 @@ import { ParticleEditingHero } from "@/components/ParticleEditingHero";
 import { SessionStorageList } from "@/components/SessionStorageList";
 import { StreamUrlInput } from "@/components/YouTubeUrlInput";
 import { BillingPlanButton } from "@/components/BillingPlanButton";
+import { MarketingScrollMotion } from "@/components/MarketingScrollMotion";
 import { PRICING_PLANS } from "@/lib/pricing";
 
 export const metadata: Metadata = {
@@ -134,6 +135,7 @@ const structuredData = {
 export default function HomePage() {
   return (
     <div className="marketing-shell marketing-home overflow-hidden bg-[#020302]">
+      <MarketingScrollMotion />
       <script
         type="application/ld+json"
         dangerouslySetInnerHTML={{
@@ -141,6 +143,7 @@ export default function HomePage() {
         }}
       />
       <section
+        data-scroll-hero
         className="relative isolate overflow-hidden border-b border-[var(--color-card-border)] bg-[#020302]"
         style={{ minHeight: "calc(86svh - 3.5rem)" }}
       >
@@ -154,24 +157,25 @@ export default function HomePage() {
           className="relative mx-auto grid max-w-[1440px] px-4 sm:px-6 lg:grid-cols-[1.15fr_0.85fr] lg:px-8"
           style={{ minHeight: "calc(86svh - 3.5rem)" }}
         >
-          <div className="z-10 flex max-w-5xl flex-col justify-center py-10 sm:py-12 lg:py-14">
-            <p className="mb-4 text-xs font-semibold uppercase text-[var(--color-accent)] sm:text-sm">
+          <div className="marketing-hero-copy z-10 flex max-w-5xl flex-col justify-center py-10 sm:py-12 lg:py-14">
+            <p data-scroll-reveal="hero" className="mb-4 text-xs font-semibold uppercase text-[var(--color-accent)] sm:text-sm">
               Stream Clipper / live editing system
             </p>
-            <h1 className="marketing-hero-title max-w-5xl font-semibold text-white">
-              Edit while it happens
+            <h1 data-scroll-reveal="hero" className="marketing-hero-title max-w-5xl font-semibold text-white">
+              <span>Edit while</span>{" "}
+              <span>it happens</span>
             </h1>
-            <p className="mt-5 max-w-2xl text-lg leading-8 text-white/74 sm:text-2xl sm:leading-9">
+            <p data-scroll-reveal="hero" className="mt-5 max-w-2xl text-lg leading-8 text-white/74 sm:text-2xl sm:leading-9">
               Cut the moment while the stream is still moving. Search the
               transcript, lock the cut, caption the clip, and export before
               everyone else starts looking.
             </p>
 
-            <div id="analyze" className="mt-7 max-w-2xl scroll-mt-24">
+            <div id="analyze" data-scroll-reveal="hero" className="mt-7 max-w-2xl scroll-mt-24">
               <StreamUrlInput />
             </div>
 
-            <div className="hero-signal-strip mt-6 grid max-w-2xl grid-cols-1 gap-px overflow-hidden border border-[var(--color-card-border)] bg-[var(--color-card-border)] sm:grid-cols-3">
+            <div data-scroll-reveal="hero" className="hero-signal-strip mt-6 grid max-w-2xl grid-cols-1 gap-px overflow-hidden border border-[var(--color-card-border)] bg-[var(--color-card-border)] sm:grid-cols-3">
               {HERO_SIGNALS.map((signal) => (
                 <div
                   key={signal}
@@ -193,8 +197,8 @@ export default function HomePage() {
         className="scroll-mt-20 border-b border-[#c9d4c1] bg-[#edf5e8] text-[#071006]"
       >
         <div className="mx-auto max-w-[1440px] px-4 py-16 sm:px-6 lg:px-8 lg:py-24">
-          <div className="grid gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:items-end">
-            <div>
+          <div data-scroll-progress className="grid gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:items-end">
+            <div data-scroll-reveal="left">
               <p className="text-xs font-semibold uppercase text-[#3f6f08] sm:text-sm">
                 Built for live momentum
               </p>
@@ -202,7 +206,7 @@ export default function HomePage() {
                 The stream does not wait.
               </h2>
             </div>
-            <p className="max-w-2xl text-xl leading-8 text-[#33412c] sm:text-2xl sm:leading-9">
+            <p data-scroll-reveal="right" className="max-w-2xl text-xl leading-8 text-[#33412c] sm:text-2xl sm:leading-9">
               Stream Clipper treats editing like a live operation: capture the
               source, find the beat, cut with context, and ship while the moment
               still has heat.
@@ -213,6 +217,7 @@ export default function HomePage() {
             {PROCESS.map((item) => (
               <div
                 key={item.step}
+                data-scroll-reveal="process"
                 className="grid gap-5 border-b border-[#bfccb7] py-7 last:border-b-0 sm:grid-cols-[5rem_0.55fr_1fr] sm:items-center lg:py-9"
               >
                 <span className="font-mono text-sm text-[#4d780d]">{item.step}</span>
@@ -230,8 +235,8 @@ export default function HomePage() {
 
       <section className="border-b border-[var(--color-card-border)] bg-[#030503]">
         <div className="mx-auto max-w-[1440px] px-4 py-16 sm:px-6 lg:px-8 lg:py-24">
-          <div className="grid gap-12 lg:grid-cols-[0.85fr_1.15fr]">
-            <div>
+          <div data-scroll-progress className="grid gap-12 lg:grid-cols-[0.85fr_1.15fr]">
+            <div data-scroll-reveal="left" className="marketing-sticky-heading">
               <p className="text-xs font-semibold uppercase text-[var(--color-accent)] sm:text-sm">
                 Command surface
               </p>
@@ -244,6 +249,7 @@ export default function HomePage() {
               {SIGNALS.map((signal) => (
                 <div
                   key={signal.label}
+                  data-scroll-reveal="right"
                   className="grid gap-4 border-b border-[var(--color-card-border)] py-7 last:border-b-0 sm:grid-cols-[0.42fr_1fr] sm:items-start"
                 >
                   <h3 className="text-3xl font-semibold text-white sm:text-4xl">
@@ -264,18 +270,18 @@ export default function HomePage() {
         className="scroll-mt-20 border-b border-[var(--color-card-border)] bg-[#071007]"
       >
         <div className="mx-auto max-w-[1440px] px-4 py-16 sm:px-6 lg:px-8 lg:py-24">
-          <div className="grid gap-10 lg:grid-cols-[1fr_1fr] lg:items-end">
-            <h2 className="marketing-display-title max-w-5xl font-semibold text-white">
+          <div data-scroll-progress className="grid gap-10 lg:grid-cols-[1fr_1fr] lg:items-end">
+            <h2 data-scroll-reveal="left" className="marketing-display-title max-w-5xl font-semibold text-white">
               Beat the feed.
             </h2>
-            <p className="max-w-2xl text-xl leading-8 text-[var(--color-muted)] sm:text-2xl sm:leading-9">
+            <p data-scroll-reveal="right" className="max-w-2xl text-xl leading-8 text-[var(--color-muted)] sm:text-2xl sm:leading-9">
               Turn a stream URL into a finished clip without losing the moment.
             </p>
           </div>
 
           <div className="mt-14 grid gap-px overflow-hidden border border-[var(--color-card-border)] bg-[var(--color-card-border)] lg:grid-cols-2">
             {EXPORTS.map((item) => (
-              <div key={item.title} className="bg-[#0a0f0a] p-6 sm:p-8 lg:p-10">
+              <div key={item.title} data-scroll-reveal="card" className="bg-[#0a0f0a] p-6 sm:p-8 lg:p-10">
                 <p className="text-xs font-semibold uppercase text-[var(--color-accent)]">
                   Format
                 </p>
@@ -296,8 +302,8 @@ export default function HomePage() {
         className="scroll-mt-20 border-b border-[var(--color-card-border)] bg-[#020302]"
       >
         <div className="mx-auto max-w-[1440px] px-4 py-16 sm:px-6 lg:px-8 lg:py-24">
-          <div className="grid gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:items-end">
-            <div>
+          <div data-scroll-progress className="grid gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:items-end">
+            <div data-scroll-reveal="left">
               <p className="text-xs font-semibold uppercase text-[var(--color-accent)] sm:text-sm">
                 SaaS pricing
               </p>
@@ -305,7 +311,7 @@ export default function HomePage() {
                 Pay for live hours.
               </h2>
             </div>
-            <p className="max-w-2xl text-xl leading-8 text-[var(--color-muted)] sm:text-2xl sm:leading-9">
+            <p data-scroll-reveal="right" className="max-w-2xl text-xl leading-8 text-[var(--color-muted)] sm:text-2xl sm:leading-9">
               Processing hours cover live or VOD analysis. Exports are capped
               separately—rendering and storage are the expensive parts.
             </p>
@@ -315,6 +321,7 @@ export default function HomePage() {
             {PRICING_PLANS.map((plan) => (
               <div
                 key={plan.id}
+                data-scroll-reveal="card"
                 className="flex min-h-[28rem] flex-col bg-[#050805] p-5 sm:p-6"
               >
                 <div className="flex items-start justify-between gap-3">
@@ -363,7 +370,7 @@ export default function HomePage() {
             ))}
           </div>
 
-          <div className="mt-8 border border-[var(--color-card-border)] bg-[#071007] p-6 sm:p-8">
+          <div data-scroll-reveal="card" className="mt-8 border border-[var(--color-card-border)] bg-[#071007] p-6 sm:p-8">
             <p className="text-xs font-semibold uppercase text-[var(--color-accent)]">
               Need more capacity?
             </p>
@@ -393,7 +400,7 @@ export default function HomePage() {
       >
         <div className="mx-auto max-w-[1440px] px-4 py-16 sm:px-6 lg:px-8 lg:py-24">
           <div className="grid gap-10 lg:grid-cols-[0.75fr_1.25fr]">
-            <div>
+            <div data-scroll-reveal="left" className="marketing-sticky-heading">
               <p className="text-xs font-semibold uppercase text-[var(--color-accent)] sm:text-sm">
                 Frequently asked questions
               </p>
@@ -409,6 +416,7 @@ export default function HomePage() {
               {FAQS.map((item) => (
                 <details
                   key={item.question}
+                  data-scroll-reveal="right"
                   className="group border-b border-[var(--color-card-border)] last:border-b-0"
                 >
                   <summary className="flex cursor-pointer list-none items-center justify-between gap-6 py-6 text-xl font-semibold text-white marker:content-none sm:text-2xl">
@@ -428,8 +436,8 @@ export default function HomePage() {
       </section>
 
       <section className="bg-[#edf5e8] text-[#071006]">
-        <div className="mx-auto grid max-w-[1440px] gap-9 px-4 py-16 sm:px-6 lg:grid-cols-[1.1fr_0.9fr] lg:items-end lg:px-8 lg:py-20">
-          <div>
+        <div data-scroll-progress className="mx-auto grid max-w-[1440px] gap-9 px-4 py-16 sm:px-6 lg:grid-cols-[1.1fr_0.9fr] lg:items-end lg:px-8 lg:py-20">
+          <div data-scroll-reveal="left">
             <p className="text-xs font-semibold uppercase text-[#3f6f08] sm:text-sm">
               Ready when the clip is
             </p>
@@ -439,6 +447,7 @@ export default function HomePage() {
           </div>
           <a
             href="#analyze"
+            data-scroll-reveal="right"
             className="inline-flex h-14 w-full items-center justify-center bg-[#071006] px-7 text-sm font-semibold text-white transition-colors hover:bg-[#14220f] sm:w-fit"
           >
             Start clipping now

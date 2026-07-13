@@ -327,59 +327,40 @@ export async function extractAudioSegment(
 export async function analyzeAudioVolume(
   inputPath: string
 ): Promise<Array<{ timeSeconds: number; volumeDb: number }>> {
-  // Use ffmpeg to output per-frame volume via astats
-  const { stderr } = await runCommand(getFfmpegPath(), [
+  // Resample into one-second frames before running astats. Printing metadata
+  // for every encoded audio frame creates enormous output for long streams and
+  // can exhaust a small Railway container's memory.
+  const { stdout, stderr } = await runCommand(getFfmpegPath(), [
+    "-hide_banner",
+    "-nostats",
     "-i",
     inputPath,
+    "-map",
+    "0:a:0",
+    "-vn",
     "-af",
-    "astats=metadata=1:reset=1,ametadata=print:file=-",
+    "aresample=8000,asetnsamples=n=8000:p=1,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
     "-f",
     "null",
     "-",
   ]);
 
   const samples: Array<{ timeSeconds: number; volumeDb: number }> = [];
-  const lines = stderr.split("\n");
+  // ametadata's file=- output is stdout on current FFmpeg builds. Include
+  // stderr as well for compatibility with builds that route filter logs there.
+  const lines = `${stdout}\n${stderr}`.split("\n");
   let currentTime = 0;
 
   for (const line of lines) {
     const timeMatch = line.match(/pts_time:([0-9.]+)/);
     if (timeMatch) currentTime = parseFloat(timeMatch[1]);
 
-    const rmsMatch = line.match(/RMS level dB: (-?[0-9.]+|inf)/);
+    const rmsMatch = line.match(
+      /lavfi\.astats\.Overall\.RMS_level=(-?[0-9.]+|-?inf)/i
+    );
     if (rmsMatch) {
-      const db = rmsMatch[1] === "inf" ? -60 : parseFloat(rmsMatch[1]);
+      const db = /inf/i.test(rmsMatch[1]) ? -60 : parseFloat(rmsMatch[1]);
       samples.push({ timeSeconds: currentTime, volumeDb: db });
-    }
-  }
-
-  // Fallback: sample every 2 seconds with volumedetect on segments
-  if (samples.length === 0) {
-    const probe = await probeMedia(inputPath);
-    const duration = probe.durationSeconds;
-    for (let t = 0; t < duration; t += 2) {
-      try {
-        const { stderr: segErr } = await runCommand(getFfmpegPath(), [
-          "-ss",
-          String(t),
-          "-t",
-          "2",
-          "-i",
-          inputPath,
-          "-af",
-          "volumedetect",
-          "-f",
-          "null",
-          "-",
-        ]);
-        const meanMatch = segErr.match(/mean_volume: (-?[0-9.]+) dB/);
-        samples.push({
-          timeSeconds: t,
-          volumeDb: meanMatch ? parseFloat(meanMatch[1]) : -30,
-        });
-      } catch {
-        samples.push({ timeSeconds: t, volumeDb: -30 });
-      }
     }
   }
 

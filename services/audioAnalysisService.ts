@@ -140,10 +140,6 @@ export async function syncSessionAudioAnalysis(streamSessionId: string) {
     return { eventsAdded: 0, analyzed: false, reason: "cached" as const };
   }
 
-  if (eventCount > 0 && !cache) {
-    return { eventsAdded: 0, analyzed: false, reason: "events_only" as const };
-  }
-
   try {
     const result = await analyzeAudio(streamSessionId, sourceMedia.filePath);
     return { eventsAdded: result.events, analyzed: true, reason: "full" as const };
@@ -355,6 +351,17 @@ export async function analyzeAudioSegment(
   const mean = meanMatch ? parseFloat(meanMatch[1]) : -30;
   const max = maxMatch ? parseFloat(maxMatch[1]) : mean;
 
+  // The waveform represents all audio, not only unusually loud moments. The
+  // previous implementation never cached ordinary/quiet live audio, leaving
+  // the timeline permanently on "Analyzing audio levels...".
+  await mergeWaveformSegment(
+    streamSessionId,
+    startTimeSeconds,
+    endTimeSeconds,
+    dbToLevel(mean),
+    endTimeSeconds
+  );
+
   if (max > -12 || mean > -18) {
     await prisma.audioEvent.create({
       data: {
@@ -367,13 +374,6 @@ export async function analyzeAudioSegment(
         rawData: toJsonValue({ mean, max, live: true }),
       },
     });
-    await mergeWaveformSegment(
-      streamSessionId,
-      startTimeSeconds,
-      endTimeSeconds,
-      dbToLevel(max),
-      endTimeSeconds
-    );
     return { events: 1 };
   }
 
