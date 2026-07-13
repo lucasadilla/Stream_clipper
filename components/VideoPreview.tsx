@@ -11,7 +11,7 @@ import {
 } from "@/lib/captionTrack";
 import type { StreamEmbedInfo, StreamPlatform } from "@/lib/streamPlatform";
 import { platformLabel } from "@/lib/streamPlatform";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/cn";
 import { useMemo, type RefObject } from "react";
 
 interface VideoPreviewProps {

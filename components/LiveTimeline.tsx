@@ -11,7 +11,7 @@ import { CaptionTimelineTrack, type CaptionDragMode } from "@/components/Caption
 import { CaptionCueEditor } from "@/components/CaptionCueEditor";
 import { RenderClipModal } from "@/components/RenderClipModal";
 import { MIN_CLIP_SECONDS, MAX_CLIP_SECONDS } from "@/lib/clipConstants";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/cn";
 import type { LiveTimelineSegment } from "@/lib/timelineSegments";
 import type { TimelineThumbnail } from "@/services/timelineThumbnailService";
 import {

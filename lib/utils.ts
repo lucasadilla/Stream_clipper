@@ -1,10 +1,4 @@
-import { type ClassValue, clsx } from "clsx";
-import { twMerge } from "tailwind-merge";
-import { Prisma } from "@prisma/client";
-
-export function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+import type { Prisma } from "@prisma/client";
 
 function jsonReplacer(_key: string, value: unknown): unknown {
   if (typeof value === "bigint") return value.toString();

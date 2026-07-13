@@ -220,40 +220,219 @@ export function ParticleEditingHero() {
     const observer = new ResizeObserver(resize);
     observer.observe(mountNode);
 
+    // --- Interaction state -------------------------------------------------
+    // Pointer position in world space (on the z≈0 plane the cloud sits near),
+    // smoothed so the repulsion feels fluid rather than jittery.
+    const pointerTarget = new THREE.Vector2(0, 0);
+    const pointerSmoothed = new THREE.Vector2(0, 0);
+    let pointerActive = false;
+    let pointerStrength = 0;
+
+    // Click ripples: expanding shockwaves that push particles outward.
+    interface Ripple {
+      x: number;
+      y: number;
+      born: number;
+    }
+    const ripples: Ripple[] = [];
+
+    // Scroll velocity feeds vertical stretch (ties the hero into page warp).
+    let scrollStretch = 0;
+    let lastScrollY = window.scrollY;
+    let lastScrollTime = performance.now();
+
+    const raycastPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+    const raycaster = new THREE.Raycaster();
+    const ndc = new THREE.Vector2();
+    const worldHit = new THREE.Vector3();
+
+    function pointerToWorld(clientX: number, clientY: number): THREE.Vector2 | null {
+      const rect = mountNode.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) return null;
+      ndc.set(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1
+      );
+      raycaster.setFromCamera(ndc, camera);
+      if (!raycaster.ray.intersectPlane(raycastPlane, worldHit)) return null;
+      // Convert to group-local coordinates so repulsion matches particle space.
+      const local = group.worldToLocal(worldHit.clone());
+      return new THREE.Vector2(local.x, local.y);
+    }
+
+    function isInsideHero(clientX: number, clientY: number): boolean {
+      const rect = mountNode.getBoundingClientRect();
+      return (
+        clientX >= rect.left &&
+        clientX <= rect.right &&
+        clientY >= rect.top &&
+        clientY <= rect.bottom
+      );
+    }
+
+    function onPointerMove(event: PointerEvent) {
+      if (!isInsideHero(event.clientX, event.clientY)) {
+        pointerActive = false;
+        return;
+      }
+      const world = pointerToWorld(event.clientX, event.clientY);
+      if (!world) return;
+      pointerTarget.copy(world);
+      pointerActive = true;
+    }
+
+    function onPointerDown(event: PointerEvent) {
+      if (!isInsideHero(event.clientX, event.clientY)) return;
+      const world = pointerToWorld(event.clientX, event.clientY);
+      if (!world) return;
+      ripples.push({ x: world.x, y: world.y, born: performance.now() });
+      if (ripples.length > 5) ripples.shift();
+    }
+
+    function onScroll() {
+      const now = performance.now();
+      const elapsed = Math.min(Math.max(now - lastScrollTime, 8), 50);
+      const velocity = (window.scrollY - lastScrollY) / elapsed;
+      scrollStretch = THREE.MathUtils.clamp(velocity, -1.4, 1.4);
+      lastScrollY = window.scrollY;
+      lastScrollTime = now;
+    }
+
+    // Listen on window so particles react even under overlaying hero copy.
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerdown", onPointerDown, { passive: true });
+    window.addEventListener("scroll", onScroll, { passive: true });
+
     let frameId = 0;
     const startTime = performance.now();
     const positionAttr = geometry.getAttribute("position") as THREE.BufferAttribute;
+    const colorAttr = geometry.getAttribute("color") as THREE.BufferAttribute;
+    const baseColors = Float32Array.from(colors);
+
+    const REPULSE_RADIUS = 1.55;
+    const REPULSE_RADIUS_SQ = REPULSE_RADIUS * REPULSE_RADIUS;
+    const RIPPLE_SPEED = 3.4;
+    const RIPPLE_LIFE_MS = 1400;
 
     function renderFrame() {
-      const elapsed = (performance.now() - startTime) / 1000;
+      const now = performance.now();
+      const elapsed = (now - startTime) / 1000;
+
       if (!prefersReducedMotion) {
+        // Smooth pointer + strength (fades out when pointer leaves).
+        pointerSmoothed.lerp(pointerTarget, 0.12);
+        pointerStrength += ((pointerActive ? 1 : 0) - pointerStrength) * 0.06;
+        scrollStretch *= 0.9;
+
+        // Cull dead ripples.
+        for (let r = ripples.length - 1; r >= 0; r--) {
+          if (now - ripples[r].born > RIPPLE_LIFE_MS) ripples.splice(r, 1);
+        }
+
         const array = positionAttr.array as Float32Array;
+        const colorArray = colorAttr.array as Float32Array;
+        const stretch = 1 + Math.abs(scrollStretch) * 0.22;
+        let colorsDirty = false;
+
         for (let i = 0; i < array.length; i += 3) {
           const pointIndex = i / 3;
           const phase = phases[pointIndex];
           const amplitude = amplitudes[pointIndex];
           const drift = driftWeights[pointIndex];
-          array[i] =
-            basePositions[i] +
-            Math.sin(elapsed * 0.42 * drift + phase + basePositions[i + 2]) *
-              amplitude *
-              0.7;
-          array[i + 1] =
-            basePositions[i + 1] +
-            Math.sin(elapsed * 0.72 * drift + phase + basePositions[i] * 0.42) *
-              amplitude;
-          array[i + 2] =
-            basePositions[i + 2] +
-            Math.cos(elapsed * 0.54 * drift + phase + basePositions[i + 1]) *
-              amplitude *
-              0.8;
+
+          const baseX = basePositions[i];
+          const baseY = basePositions[i + 1];
+          const baseZ = basePositions[i + 2];
+
+          let x =
+            baseX +
+            Math.sin(elapsed * 0.42 * drift + phase + baseZ) * amplitude * 0.7;
+          let y =
+            baseY +
+            Math.sin(elapsed * 0.72 * drift + phase + baseX * 0.42) * amplitude;
+          const z =
+            baseZ +
+            Math.cos(elapsed * 0.54 * drift + phase + baseY) * amplitude * 0.8;
+
+          // Scroll warp: stretch vertically away from center, like the page.
+          y = y * stretch - scrollStretch * 0.35;
+
+          let glow = 0;
+
+          // Mouse repulsion: particles near the cursor get pushed out along
+          // the radial direction and brighten while displaced.
+          if (pointerStrength > 0.01) {
+            const dx = x - pointerSmoothed.x;
+            const dy = y - pointerSmoothed.y;
+            const distSq = dx * dx + dy * dy;
+            if (distSq < REPULSE_RADIUS_SQ && distSq > 0.0001) {
+              const dist = Math.sqrt(distSq);
+              const falloff = 1 - dist / REPULSE_RADIUS;
+              const push = falloff * falloff * 0.85 * pointerStrength * drift;
+              x += (dx / dist) * push;
+              y += (dy / dist) * push;
+              glow = Math.max(glow, falloff * pointerStrength);
+            }
+          }
+
+          // Click ripples: ring-shaped shockwave expanding outward.
+          for (let r = 0; r < ripples.length; r++) {
+            const ripple = ripples[r];
+            const age = (now - ripple.born) / 1000;
+            const ringRadius = age * RIPPLE_SPEED;
+            const life = 1 - (now - ripple.born) / RIPPLE_LIFE_MS;
+            const dx = x - ripple.x;
+            const dy = y - ripple.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const band = Math.abs(dist - ringRadius);
+            if (band < 0.55 && dist > 0.001) {
+              const wave = (1 - band / 0.55) * life;
+              const push = wave * wave * 0.6;
+              x += (dx / dist) * push;
+              y += (dy / dist) * push;
+              glow = Math.max(glow, wave * 0.9);
+            }
+          }
+
+          array[i] = x;
+          array[i + 1] = y;
+          array[i + 2] = z;
+
+          // Brighten displaced particles toward hot green/white.
+          const br = baseColors[i];
+          const bg = baseColors[i + 1];
+          const bb = baseColors[i + 2];
+          if (glow > 0.01) {
+            colorArray[i] = br + (0.95 - br) * glow;
+            colorArray[i + 1] = bg + (1.0 - bg) * glow;
+            colorArray[i + 2] = bb + (0.55 - bb) * glow;
+            colorsDirty = true;
+          } else if (
+            colorArray[i] !== br ||
+            colorArray[i + 1] !== bg ||
+            colorArray[i + 2] !== bb
+          ) {
+            colorArray[i] = br;
+            colorArray[i + 1] = bg;
+            colorArray[i + 2] = bb;
+            colorsDirty = true;
+          }
         }
+
         positionAttr.needsUpdate = true;
-        group.rotation.y = Math.sin(elapsed * 0.14) * 0.18 - 0.12;
-        group.rotation.x = Math.sin(elapsed * 0.11) * 0.06;
+        if (colorsDirty) colorAttr.needsUpdate = true;
+
+        // Camera parallax follows the cursor for depth, on top of idle sway.
+        const parallaxX = pointerSmoothed.x * 0.045 * pointerStrength;
+        const parallaxY = pointerSmoothed.y * 0.035 * pointerStrength;
+        group.rotation.y =
+          Math.sin(elapsed * 0.14) * 0.18 - 0.12 + parallaxX;
+        group.rotation.x = Math.sin(elapsed * 0.11) * 0.06 - parallaxY;
         group.rotation.z = Math.sin(elapsed * 0.08) * 0.035;
-        camera.position.x = 0.1 + Math.sin(elapsed * 0.1) * 0.16;
-        camera.position.y = 0.08 + Math.sin(elapsed * 0.08) * 0.07;
+        camera.position.x =
+          0.1 + Math.sin(elapsed * 0.1) * 0.16 + parallaxX * 1.6;
+        camera.position.y =
+          0.08 + Math.sin(elapsed * 0.08) * 0.07 + parallaxY * 1.2;
       } else {
         group.rotation.y = -0.12;
       }
@@ -267,6 +446,9 @@ export function ParticleEditingHero() {
     return () => {
       if (frameId) cancelAnimationFrame(frameId);
       observer.disconnect();
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("scroll", onScroll);
       geometry.dispose();
       material.dispose();
       renderer.dispose();

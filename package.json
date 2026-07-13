@@ -15,8 +15,10 @@
     "postinstall": "prisma generate"
   },
   "dependencies": {
+    "@paper-design/shaders-react": "^0.0.77",
     "@prisma/client": "^6.9.0",
     "clsx": "^2.1.1",
+    "motion": "^12.42.2",
     "next": "^15.3.3",
     "openai": "^4.104.0",
     "posthog-js": "^1.399.2",

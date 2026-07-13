@@ -14,7 +14,7 @@ import {
   captionPreviewStyle,
   type CaptionAppearance,
 } from "@/lib/captionAppearance";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/cn";
 import type { RefObject } from "react";
 
 interface CaptionTrackLayerProps {

@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import posthog from "posthog-js";
 import { fetchJson } from "@/lib/apiClient";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/cn";
 import type { BillingAccountSummary } from "@/services/billingService";
 
 export default function LoginPage() {

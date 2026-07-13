@@ -27,7 +27,7 @@ import {
   suggestedDestinations,
   type PublishDestination,
 } from "@/lib/publishClip";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/cn";
 import {
   MIN_CLIP_SECONDS,
   MAX_CLIP_SECONDS,

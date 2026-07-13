@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { saveAndRenderClip, saveClip } from "@/lib/clipActions";
 import { formatSeconds, formatDuration } from "@/lib/time";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/cn";
 import type { TimelineMarker } from "@/components/Timeline";
 import type { ClipSelection } from "@/components/LiveTimeline";
 import { LIVE_SEGMENT_SECONDS } from "@/lib/timelineConstants";

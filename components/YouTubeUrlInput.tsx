@@ -4,7 +4,7 @@ import { useState } from "react";
 import posthog from "posthog-js";
 import { fetchJson } from "@/lib/apiClient";
 import { normalizeUserStreamUrl, parseStreamUrl } from "@/lib/streamPlatform";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/cn";
 
 export function StreamUrlInput() {
   const [url, setUrl] = useState("");

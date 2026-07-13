@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import type { CaptionCue } from "@/lib/captionTrack";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/cn";
 
 function pct(time: number, max: number) {
   return Math.min(100, Math.max(0, (time / max) * 100));

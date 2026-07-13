@@ -20,7 +20,7 @@ import {
   writeActiveCaptionPresetId,
   type CaptionPreset,
 } from "@/lib/captionPresets";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/cn";
 
 interface CaptionAppearancePanelProps {
   appearance: CaptionAppearance;

@@ -7,7 +7,7 @@ import { clipDownloadUrl } from "@/lib/downloadUrls";
 import { clipShareUrl } from "@/lib/clipShare";
 import { triggerFileDownload } from "@/lib/clientDownload";
 import type { ClipSharePayload } from "@/services/clipShareService";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/cn";
 
 interface ClipShareViewProps {
   clip: ClipSharePayload;

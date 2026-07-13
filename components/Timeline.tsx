@@ -1,7 +1,7 @@
 "use client";
 
 import { formatSeconds } from "@/lib/time";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/cn";
 
 export type TimelineMarkerType =
   | "chat_window"

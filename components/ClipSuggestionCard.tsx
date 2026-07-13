@@ -3,7 +3,7 @@
 import { useState } from "react";
 import posthog from "posthog-js";
 import { formatSeconds, formatDuration } from "@/lib/time";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/cn";
 import { clipDownloadUrl } from "@/lib/downloadUrls";
 import { triggerFileDownload } from "@/lib/clientDownload";
 

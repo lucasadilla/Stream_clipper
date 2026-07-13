@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { fetchJson } from "@/lib/apiClient";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/cn";
 
 interface RuntimeHealth {
   ok?: boolean;

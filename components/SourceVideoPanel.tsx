@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import { formatSeconds } from "@/lib/time";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/cn";
 
 interface SourceMedia {
   id: string;
