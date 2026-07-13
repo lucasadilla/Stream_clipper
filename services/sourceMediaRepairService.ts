@@ -1,23 +1,22 @@
 import path from "path";
 import { stat } from "fs/promises";
 import { prisma } from "@/lib/db";
-import { probeMedia } from "@/lib/ffmpeg";
+import { hasVideoStream, probeMedia } from "@/lib/ffmpeg";
 import {
   fileExists,
   findBestSourceFileInDir,
   getUploadDir,
+  resolveStoragePath,
   toRelativeStoragePath,
 } from "@/lib/storage";
 import { toJsonValue } from "@/lib/utils";
 
-async function sourceMediaFromFoundFile(streamSessionId: string, absolutePath: string) {
+async function sourceMediaFromFoundFile(
+  streamSessionId: string,
+  absolutePath: string,
+  sourceMediaId?: string
+) {
   const relativePath = toRelativeStoragePath(absolutePath);
-  const existing = await prisma.sourceMedia.findFirst({
-    where: { streamSessionId, filePath: relativePath },
-    orderBy: { createdAt: "desc" },
-  });
-  if (existing) return existing;
-
   const fileStat = await stat(absolutePath);
   let probe;
   try {
@@ -35,20 +34,37 @@ async function sourceMediaFromFoundFile(streamSessionId: string, absolutePath: s
   }
 
   const ext = path.extname(absolutePath).toLowerCase();
+  const data = {
+    originalFilename: path.basename(absolutePath),
+    filePath: relativePath,
+    mimeType: ext === ".mkv" ? "video/x-matroska" : "video/mp4",
+    sizeBytes: BigInt(fileStat.size),
+    durationSeconds: probe.durationSeconds || null,
+    width: probe.width || null,
+    height: probe.height || null,
+    fps: probe.fps || null,
+    codecInfo: toJsonValue(probe.raw),
+    isLiveRecording: /^source(?:\.f\d+)?\.mkv$/i.test(
+      path.basename(absolutePath)
+    ),
+  };
+
+  const existing = sourceMediaId
+    ? await prisma.sourceMedia.findUnique({ where: { id: sourceMediaId } })
+    : await prisma.sourceMedia.findFirst({
+        where: { streamSessionId, filePath: relativePath },
+        orderBy: { createdAt: "desc" },
+      });
+
+  if (existing) {
+    return prisma.sourceMedia.update({
+      where: { id: existing.id },
+      data,
+    });
+  }
+
   return prisma.sourceMedia.create({
-    data: {
-      streamSessionId,
-      originalFilename: path.basename(absolutePath),
-      filePath: relativePath,
-      mimeType: ext === ".mkv" ? "video/x-matroska" : "video/mp4",
-      sizeBytes: BigInt(fileStat.size),
-      durationSeconds: probe.durationSeconds || null,
-      width: probe.width || null,
-      height: probe.height || null,
-      fps: probe.fps || null,
-      codecInfo: toJsonValue(probe.raw),
-      isLiveRecording: /^source\.mkv$/i.test(path.basename(absolutePath)),
-    },
+    data: { streamSessionId, ...data },
   });
 }
 
@@ -58,22 +74,23 @@ export async function findLocalSourceMedia(streamSessionId: string) {
     orderBy: { createdAt: "desc" },
   });
   if (sourceMedia?.filePath && fileExists(sourceMedia.filePath)) {
-    return sourceMedia;
+    const absolutePath = resolveStoragePath(sourceMedia.filePath);
+    if ((sourceMedia.width ?? 0) > 0) {
+      return sourceMedia;
+    }
+    if (await hasVideoStream(absolutePath)) {
+      return sourceMediaFromFoundFile(
+        streamSessionId,
+        absolutePath,
+        sourceMedia.id
+      );
+    }
   }
 
   const found = await findBestSourceFileInDir(getUploadDir(streamSessionId));
   if (!found) return null;
 
-  const repaired = await sourceMediaFromFoundFile(streamSessionId, found);
-  if (sourceMedia && sourceMedia.id !== repaired.id) {
-    await prisma.sourceMedia.deleteMany({
-      where: {
-        streamSessionId,
-        id: sourceMedia.id,
-      },
-    });
-  }
-  return repaired;
+  return sourceMediaFromFoundFile(streamSessionId, found, sourceMedia?.id);
 }
 
 export async function ensureLocalSourceMedia(streamSessionId: string) {

@@ -1,8 +1,10 @@
 import path from "path";
 import { existsSync, createReadStream } from "fs";
 import { readFile as readFileFs, stat as statFs } from "fs/promises";
+import { hasVideoStream } from "@/lib/ffmpeg";
 
 const STORAGE_ROOT = process.env.STORAGE_ROOT ?? "./storage";
+const confirmedVideoSourceByDir = new Map<string, string>();
 
 export function getStorageRoot(): string {
   return path.resolve(process.cwd(), STORAGE_ROOT);
@@ -237,8 +239,9 @@ async function safeStatSize(filePath: string): Promise<number | null> {
 }
 
 /**
- * Pick the best yt-dlp output file in a session upload folder.
- * Ignores HLS fragments and tolerates files disappearing during live capture.
+ * Pick the best yt-dlp video output in a session upload folder.
+ * Live captures can leave separate source.fNNN files, including audio-only
+ * tracks, so every candidate is verified before it can become SourceMedia.
  */
 export async function findBestSourceFileInDir(
   uploadDir: string
@@ -252,28 +255,40 @@ export async function findBestSourceFileInDir(
   );
   if (candidates.length === 0) return null;
 
-  const merged = candidates.filter(isMergedSourceFile);
-  const pool =
-    merged.length > 0
-      ? merged
-      : candidates.filter((f) => !/\.f\d+\./i.test(f));
-
-  const searchPool = pool.length > 0 ? pool : candidates;
-
-  let bestPath: string | null = null;
-  let bestSize = 0;
-
-  for (const name of searchPool) {
+  const withMeta: Array<{ name: string; size: number; merged: boolean }> = [];
+  for (const name of candidates) {
     const full = path.join(uploadDir, name);
     const size = await safeStatSize(full);
-    if (size == null) continue;
-    if (size > bestSize) {
-      bestSize = size;
-      bestPath = full;
+    if (size == null || size <= 0) continue;
+    withMeta.push({ name, size, merged: isMergedSourceFile(name) });
+  }
+
+  withMeta.sort(
+    (a, b) => Number(b.merged) - Number(a.merged) || b.size - a.size
+  );
+
+  const cachedPath = confirmedVideoSourceByDir.get(uploadDir);
+  const cached = cachedPath
+    ? withMeta.find(
+        (candidate) => path.join(uploadDir, candidate.name) === cachedPath
+      )
+    : undefined;
+  const hasNewMergedCandidate =
+    !!cached &&
+    !cached.merged &&
+    withMeta.some((candidate) => candidate.merged);
+  if (cachedPath && cached && !hasNewMergedCandidate) return cachedPath;
+  if (cachedPath && !cached) confirmedVideoSourceByDir.delete(uploadDir);
+
+  for (const candidate of withMeta) {
+    const full = path.join(uploadDir, candidate.name);
+    if (full === cachedPath || (await hasVideoStream(full))) {
+      confirmedVideoSourceByDir.set(uploadDir, full);
+      return full;
     }
   }
 
-  return bestPath;
+  return null;
 }
 
 /**

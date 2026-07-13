@@ -1,7 +1,6 @@
 import path from "path";
 import fs from "fs/promises";
 import { existsSync } from "fs";
-import { prisma } from "@/lib/db";
 import { extractFastTimelineFrame, extractThumbnailStrip } from "@/lib/ffmpeg";
 import {
   THUMB_INTERVAL_SECONDS,
@@ -18,6 +17,7 @@ import {
   fileExists,
   toRelativeStoragePath,
 } from "@/lib/storage";
+import { findLocalSourceMedia } from "@/services/sourceMediaRepairService";
 
 export interface TimelineThumbnail {
   startTimeSeconds: number;
@@ -79,11 +79,7 @@ export async function capturePriorityThumbs(
   streamSessionId: string,
   options?: { prioritizeTail?: boolean }
 ): Promise<void> {
-  const sourceMedia = await prisma.sourceMedia.findFirst({
-    where: { streamSessionId },
-    orderBy: { createdAt: "desc" },
-    select: { durationSeconds: true, filePath: true },
-  });
+  const sourceMedia = await findLocalSourceMedia(streamSessionId);
   if (!sourceMedia?.filePath || !fileExists(sourceMedia.filePath)) return;
 
   const recorded = sanitizeDurationSeconds(sourceMedia.durationSeconds ?? 0);
@@ -203,10 +199,7 @@ export async function syncTimelineThumbnails(
   streamSessionId: string,
   options?: { prioritizeTail?: boolean }
 ): Promise<TimelineThumbnail[]> {
-  const sourceMedia = await prisma.sourceMedia.findFirst({
-    where: { streamSessionId },
-    orderBy: { createdAt: "desc" },
-  });
+  const sourceMedia = await findLocalSourceMedia(streamSessionId);
 
   if (!sourceMedia || !fileExists(sourceMedia.filePath)) {
     return [];
@@ -272,11 +265,7 @@ export async function getTimelineThumbnails(
   const framesDir = getFramesDir(streamSessionId);
   const existing = await listThumbnailsFromDisk(streamSessionId, framesDir);
 
-  const sourceMedia = await prisma.sourceMedia.findFirst({
-    where: { streamSessionId },
-    orderBy: { createdAt: "desc" },
-    select: { durationSeconds: true, filePath: true },
-  });
+  const sourceMedia = await findLocalSourceMedia(streamSessionId);
   const recorded = sourceMedia?.durationSeconds ?? 0;
   const lastCovered =
     existing.length > 0 ? existing[existing.length - 1]!.endTimeSeconds : 0;

@@ -208,6 +208,30 @@ export async function hasAudioStream(filePath: string): Promise<boolean> {
   }
 }
 
+/** Fast check whether a media file contains a video stream. */
+export async function hasVideoStream(filePath: string): Promise<boolean> {
+  try {
+    const { stdout } = await runCommand(getFfprobePath(), [
+      "-v",
+      "error",
+      "-probesize",
+      "5000000",
+      "-analyzeduration",
+      "5000000",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=codec_type",
+      "-of",
+      "csv=p=0",
+      filePath,
+    ]);
+    return stdout.includes("video");
+  } catch {
+    return false;
+  }
+}
+
 export async function extractAudio(
   inputPath: string,
   outputPath: string

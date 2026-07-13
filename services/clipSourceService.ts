@@ -1,7 +1,7 @@
 import path from "path";
 import { existsSync } from "fs";
 import { prisma } from "@/lib/db";
-import { probeMedia } from "@/lib/ffmpeg";
+import { hasVideoStream, probeMedia } from "@/lib/ffmpeg";
 import { toJsonValue } from "@/lib/utils";
 import { MIN_CLIP_SECONDS } from "@/lib/clipConstants";
 import {
@@ -262,6 +262,12 @@ export async function ensureClipSourceForRender(
     if (!fileExists(sourceMedia.filePath)) continue;
 
     const absolutePath = resolveStoragePath(sourceMedia.filePath);
+    if (
+      (sourceMedia.width ?? 0) <= 0 &&
+      !(await hasVideoStream(absolutePath))
+    ) {
+      continue;
+    }
     const duration = await resolveFileDurationSeconds(
       absolutePath,
       liveRecordedSeconds,
