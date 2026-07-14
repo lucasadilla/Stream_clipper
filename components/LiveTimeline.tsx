@@ -87,9 +87,22 @@ type HistoryEntry =
       at: number;
     };
 
-const VIDEO_TRACK_STYLE = { flex: "1.35 1 72px", minHeight: 56, maxHeight: 120 };
-const CAPTION_TRACK_STYLE = { flex: "0.65 1 56px", minHeight: 36 };
-const OVERLAY_TRACK_STYLE = { flex: "0.4 1 36px", minHeight: 28 };
+const TRACK_HEIGHT_PX = 72;
+const VIDEO_TRACK_STYLE = {
+  height: TRACK_HEIGHT_PX,
+  flex: "0 0 auto",
+  minHeight: TRACK_HEIGHT_PX,
+} as const;
+const CAPTION_TRACK_STYLE = {
+  height: TRACK_HEIGHT_PX,
+  flex: "0 0 auto",
+  minHeight: TRACK_HEIGHT_PX,
+} as const;
+const OVERLAY_TRACK_STYLE = {
+  height: 36,
+  flex: "0 0 auto",
+  minHeight: 36,
+} as const;
 
 const TRACK_LABEL_W = 52;
 const MIN_ZOOM = 1;
@@ -1088,10 +1101,10 @@ export function LiveTimeline({
         >
           {/* Track labels gutter - stays visible while scrolling */}
           <div
-            className="sticky left-0 z-10 flex h-full min-h-0 shrink-0 flex-col border-r border-[var(--color-card-border)] bg-[#020302]"
+            className="sticky left-0 z-10 flex shrink-0 flex-col border-r border-[var(--color-card-border)] bg-[#020302]"
             style={{ width: TRACK_LABEL_W }}
           >
-            <div className="h-7 border-b border-[var(--color-card-border)]" />
+            <div className="h-7 shrink-0 border-b border-[var(--color-card-border)]" />
             <div
               className="flex items-center justify-center border-b border-[var(--color-card-border)]"
               style={VIDEO_TRACK_STYLE}
@@ -1192,12 +1205,12 @@ export function LiveTimeline({
               )}
             </div>
 
-            {/* Tracks stack - shared playhead spans video + captions */}
-            <div className="relative flex min-h-0 flex-1 flex-col">
+            {/* Tracks stack — fixed track heights (Premiere-style) */}
+            <div className="relative flex shrink-0 flex-col">
               {/* V1 Video track */}
               <div
                 ref={videoTrackRef}
-                className="relative bg-[#020302] border-b border-[var(--color-card-border)] cursor-crosshair"
+                className="relative cursor-crosshair border-b border-[var(--color-card-border)] bg-[#020302]"
                 style={VIDEO_TRACK_STYLE}
                 onPointerDown={handleVideoTrackPointerDown}
               >

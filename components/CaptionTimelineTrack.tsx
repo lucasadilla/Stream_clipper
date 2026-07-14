@@ -51,7 +51,7 @@ export function CaptionTimelineTrack({
   return (
     <div
       ref={trackRef}
-      className="relative min-h-[36px] overflow-hidden border-b border-[var(--color-card-border)] bg-[#040804]"
+      className="relative overflow-hidden border-b border-[var(--color-card-border)] bg-[#040804]"
       style={style}
       onPointerDown={() => onSelectCue(null)}
     >

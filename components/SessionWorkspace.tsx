@@ -45,6 +45,10 @@ import {
 } from "@/lib/timelineBounds";
 import type { MarkerKind, TimelineMarker } from "@/lib/editorState";
 import { SourceUploadFallback } from "@/components/SourceUploadFallback";
+import {
+  beginPaneResize,
+  useEditorLayoutPrefs,
+} from "@/lib/editorLayoutPrefs";
 
 interface SessionData {
   id: string;
@@ -166,6 +170,12 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const [aiMarkers, setAiMarkers] = useState<TimelineMarker[]>([]);
   const [captionEdits, setCaptionEdits] = useState<CaptionEditsMap>({});
   const [assistantOpen, setAssistantOpen] = useState(false);
+  const {
+    monitorHeight,
+    setMonitorHeight,
+    transcriptWidth,
+    setTranscriptWidth,
+  } = useEditorLayoutPrefs();
   const captionSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const playerRef = useRef<StreamPlayerHandle>(null);
   const sourceStarted = useRef(false);
@@ -718,8 +728,11 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
             />
           )}
 
-          {/* Monitor row — compact program + transcript */}
-          <div className="flex h-[min(34vh,300px)] min-h-[168px] shrink-0 border-b border-[var(--color-card-border)]">
+          {/* Monitor row — resizable program + transcript */}
+          <div
+            className="flex shrink-0 border-b border-[var(--color-card-border)]"
+            style={{ height: monitorHeight }}
+          >
             <div className="min-w-0 flex-1">
               <VideoPreview
                 platform={platform}
@@ -750,7 +763,27 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
                 onDurationChange={handlePlayerDurationChange}
               />
             </div>
-            <aside className="hidden w-[min(38%,360px)] shrink-0 border-l border-[var(--color-card-border)] md:block">
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize transcript panel"
+              title="Drag to resize transcript"
+              className="group relative hidden w-1.5 shrink-0 cursor-col-resize bg-[#0a100a] hover:bg-[var(--color-accent)]/40 md:block"
+              onPointerDown={(event) =>
+                beginPaneResize({
+                  axis: "col",
+                  startSize: transcriptWidth,
+                  onResize: setTranscriptWidth,
+                  event,
+                })
+              }
+            >
+              <span className="pointer-events-none absolute inset-y-0 -left-1 -right-1" />
+            </div>
+            <aside
+              className="hidden shrink-0 border-l border-[var(--color-card-border)] md:block"
+              style={{ width: transcriptWidth }}
+            >
               <EditorTranscriptPanel
                 chunks={transcripts}
                 currentTime={currentTime}
@@ -759,6 +792,24 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
                 error={sourcePreparationError ?? transcriptionError}
               />
             </aside>
+          </div>
+
+          <div
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize preview"
+            title="Drag to resize preview"
+            className="group relative z-10 h-1.5 shrink-0 cursor-row-resize bg-[#0a100a] hover:bg-[var(--color-accent)]/40"
+            onPointerDown={(event) =>
+              beginPaneResize({
+                axis: "row",
+                startSize: monitorHeight,
+                onResize: setMonitorHeight,
+                event,
+              })
+            }
+          >
+            <span className="pointer-events-none absolute inset-x-0 -top-1 -bottom-1" />
           </div>
 
           {/* Timeline — primary work surface */}
