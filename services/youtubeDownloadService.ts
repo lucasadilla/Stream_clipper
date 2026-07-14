@@ -18,6 +18,7 @@ export { getYtDlpPath } from "@/lib/ytDlp";
 let resolvedYtDlpInvocation: YtDlpInvocation | null = null;
 let lastYtDlpProbeError: string | null = null;
 let generatedCookiesPath: string | null = null;
+let cachedVisitorData: { value: string; expiresAt: number } | null = null;
 
 export function getLastYtDlpProbeError(): string | null {
   return lastYtDlpProbeError;
@@ -81,15 +82,23 @@ export function networkYtDlpArgs(): string[] {
   return args;
 }
 
-export function baseYtDlpArgs(): string[] {
+export function baseYtDlpArgs(options?: {
+  youtubeExtractorArgs?: string | null;
+}): string[] {
   const impersonate = process.env.YT_DLP_IMPERSONATE?.trim();
-  const youtubeClient = process.env.YT_DLP_YOUTUBE_CLIENT?.trim();
+  const configuredYoutubeClient = process.env.YT_DLP_YOUTUBE_CLIENT?.trim();
+  const youtubeExtractorArgs =
+    options && "youtubeExtractorArgs" in options
+      ? options.youtubeExtractorArgs
+      : configuredYoutubeClient
+        ? `player_client=${configuredYoutubeClient}`
+        : null;
   const potProviderUrl = process.env.YT_DLP_POT_PROVIDER_URL?.trim();
   return [
     ...networkYtDlpArgs(),
     ...(impersonate ? ["--impersonate", impersonate] : []),
-    ...(youtubeClient
-      ? ["--extractor-args", `youtube:player_client=${youtubeClient}`]
+    ...(youtubeExtractorArgs
+      ? ["--extractor-args", `youtube:${youtubeExtractorArgs}`]
       : []),
     ...(potProviderUrl
       ? [
@@ -106,6 +115,36 @@ export function baseYtDlpArgs(): string[] {
     "--ffmpeg-location",
     getFfmpegLocationDir(),
   ];
+}
+
+export async function getYtDlpVisitorData(): Promise<string | null> {
+  if (cachedVisitorData && cachedVisitorData.expiresAt > Date.now()) {
+    return cachedVisitorData.value;
+  }
+
+  const providerUrl = process.env.YT_DLP_POT_PROVIDER_URL?.trim();
+  if (!providerUrl) return null;
+
+  try {
+    const response = await fetch(`${providerUrl}/get_pot`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) return null;
+    const data = (await response.json()) as { contentBinding?: unknown };
+    if (typeof data.contentBinding !== "string" || !data.contentBinding.trim()) {
+      return null;
+    }
+    cachedVisitorData = {
+      value: data.contentBinding.trim(),
+      expiresAt: Date.now() + 30 * 60 * 1000,
+    };
+    return cachedVisitorData.value;
+  } catch {
+    return null;
+  }
 }
 
 /** Optional Railway egress/auth settings for datacenter-blocked media hosts. */

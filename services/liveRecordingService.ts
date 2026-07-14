@@ -17,6 +17,7 @@ import { syncPreviewMp4 } from "@/services/previewVideoService";
 import {
   baseYtDlpArgs,
   getYtDlpDeploymentArgs,
+  getYtDlpVisitorData,
   resolveYtDlpInvocation,
 } from "@/services/youtubeDownloadService";
 
@@ -223,7 +224,10 @@ async function upsertSourceFromFile(
  * Start recording a live stream from the beginning (or continue).
  * Uses mkv for safer partial-file reads while recording.
  */
-export async function startLiveRecording(streamSessionId: string) {
+async function startLiveRecordingAttempt(
+  streamSessionId: string,
+  youtubeExtractorArgs?: string | null
+) {
   const session = await prisma.streamSession.findUnique({
     where: { id: streamSessionId },
     include: { liveRecording: true, sourceMedia: { take: 1 } },
@@ -251,7 +255,9 @@ export async function startLiveRecording(streamSessionId: string) {
   const args = [
     ...invocation.prefixArgs,
     ...(await getYtDlpDeploymentArgs()),
-    ...baseYtDlpArgs(),
+    ...(youtubeExtractorArgs === undefined
+      ? baseYtDlpArgs()
+      : baseYtDlpArgs({ youtubeExtractorArgs })),
     "--live-from-start",
     "-f",
     liveFormat(),
@@ -374,6 +380,44 @@ export async function startLiveRecording(streamSessionId: string) {
     recordedSeconds: 0,
     sourceMedia,
   };
+}
+
+function isYouTubeAccessBlock(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /HTTP Error 429|Too Many Requests|confirm you(?:'|’)re not a bot|LOGIN_REQUIRED|sign in to confirm/i.test(
+    message
+  );
+}
+
+export async function startLiveRecording(streamSessionId: string) {
+  try {
+    return await startLiveRecordingAttempt(streamSessionId);
+  } catch (initialError) {
+    if (!isYouTubeAccessBlock(initialError)) throw initialError;
+
+    const visitorData = await getYtDlpVisitorData();
+    if (!visitorData) throw initialError;
+
+    const strategies = [
+      `player_client=android_vr;player_skip=webpage,configs;visitor_data=${visitorData}`,
+      `player_client=mweb;player_skip=webpage,configs;visitor_data=${visitorData}`,
+      `player_client=default;player_skip=webpage,configs;visitor_data=${visitorData}`,
+    ];
+    let lastError = initialError;
+
+    for (const extractorArgs of strategies) {
+      try {
+        return await startLiveRecordingAttempt(
+          streamSessionId,
+          extractorArgs
+        );
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw lastError;
+  }
 }
 
 /** Refresh recorded duration/size from the growing file on disk. */
