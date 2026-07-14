@@ -32,7 +32,6 @@ import {
   buildAudioSpikeMarkers,
   selectAudioSpikesForTimeline,
   type AudioSpikeMarker,
-  type WaveformBucket,
 } from "@/lib/audioSpikeTimeline";
 import {
   mergeCaptionEdit,
@@ -164,7 +163,6 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   );
   const [audioSpikes, setAudioSpikes] = useState<AudioSpikeMarker[]>([]);
   const [aiMarkers, setAiMarkers] = useState<TimelineMarker[]>([]);
-  const [audioWaveform, setAudioWaveform] = useState<WaveformBucket[]>([]);
   const [captionEdits, setCaptionEdits] = useState<CaptionEditsMap>({});
   const [assistantOpen, setAssistantOpen] = useState(false);
   const captionSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -173,8 +171,6 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const transcribeInFlight = useRef(false);
   const eventsInFlight = useRef(false);
   const audioSyncInFlight = useRef(false);
-  const waveformInFlight = useRef(false);
-  const lastWaveformRequest = useRef({ maxTime: 0, at: 0 });
   const thumbnailsInFlight = useRef(false);
   const transcriptSignature = useRef("");
   const captionRebuildAttempted = useRef(false);
@@ -371,33 +367,6 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
           window.setTimeout(() => setNewSegmentIds(new Set()), 2500);
         }
         setTranscripts(chunks);
-      }
-
-      const timelineMax = coalesceTimelineSeconds([
-        LIVE_SEGMENT_SECONDS,
-        session?.liveRecording?.recordedSeconds,
-        session?.sourceMedia?.[0]?.durationSeconds,
-        ...chunks.map((t) => t.endTimeSeconds),
-        ...(data.audioEvents ?? []).map((e) => e.endTimeSeconds),
-      ]);
-      const now = Date.now();
-      const waveformIsStale =
-        timelineMax > lastWaveformRequest.current.maxTime + 2 ||
-        now - lastWaveformRequest.current.at > 30_000;
-      if (!waveformInFlight.current && waveformIsStale) {
-        waveformInFlight.current = true;
-        lastWaveformRequest.current = { maxTime: timelineMax, at: now };
-        void fetchJson<{ buckets?: WaveformBucket[] }>(
-          `/api/sessions/${sessionId}/audio/waveform?maxTime=${timelineMax}`
-        )
-          .then((waveformRes) => {
-            if (waveformRes.ok) {
-              setAudioWaveform(waveformRes.data.buckets ?? []);
-            }
-          })
-          .finally(() => {
-            waveformInFlight.current = false;
-          });
       }
     } catch {
       // non-fatal
@@ -667,6 +636,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
     isLiveRecording: sourceMedia?.isLiveRecording,
     isLive,
     durationSeconds: sourceMedia?.durationSeconds,
+    knownStreamDuration: session.videoDurationSeconds,
   });
   const recordedSeconds = coalesceTimelineSeconds([
     session.liveRecording?.recordedSeconds,
@@ -689,6 +659,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         recordedSeconds,
         currentTime,
         playerDuration,
+        liveElapsedSeconds,
         LIVE_SEGMENT_SECONDS,
       ])
     : coalesceTimelineSeconds([
@@ -727,7 +698,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       />
 
       <div className="relative flex-1 min-h-0">
-        <div className="flex h-full flex-col min-h-0">
+        <div className="relative z-0 isolate flex h-full min-h-0 flex-col">
           {sourcePreparationError && recordedSeconds <= 0 && (
             <SourceUploadFallback
               sessionId={sessionId}
@@ -799,15 +770,8 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
               captionAppearance={captionAppearance}
               captionEdits={captionEdits}
               onCaptionEdit={handleCaptionEdit}
-              audioWaveform={audioWaveform}
               audioSpikes={audioSpikes}
               aiMarkers={aiMarkers}
-              showAudioLane={
-                recordedSeconds > 0 ||
-                streamDuration > LIVE_SEGMENT_SECONDS ||
-                audioSpikes.length > 0 ||
-                audioWaveform.length > 0
-              }
             />
           </div>
         </div>
@@ -832,10 +796,11 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
             <button
               type="button"
               aria-label="Close assistant"
-              className="absolute inset-0 z-20 bg-black/50"
+              className="absolute inset-0 z-40 bg-black/50"
+              aria-hidden="true"
               onClick={() => setAssistantOpen(false)}
             />
-            <aside className="absolute right-0 top-0 bottom-0 z-30 flex w-[min(100%,380px)] flex-col border-l border-[var(--color-card-border)] bg-[#050705] shadow-2xl">
+            <aside className="absolute bottom-0 right-0 top-0 z-50 flex w-[min(100%,380px)] flex-col border-l border-[var(--color-card-border)] bg-[#050705] shadow-2xl">
               <div className="flex shrink-0 items-center justify-between border-b border-[var(--color-card-border)] bg-[#020302] px-4 py-3">
                 <p className="text-sm font-semibold text-white">Assistant</p>
                 <button

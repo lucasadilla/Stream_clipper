@@ -16,11 +16,7 @@ import { cn } from "@/lib/cn";
 import type { LiveTimelineSegment } from "@/lib/timelineSegments";
 import type { TimelineThumbnail } from "@/services/timelineThumbnailService";
 import {
-  formatAudioSpikeTooltip,
-  waveformHasSignal,
   type AudioSpikeMarker,
-  type AudioSpikeIntensity,
-  type WaveformBucket,
 } from "@/lib/audioSpikeTimeline";
 import {
   emptyEditorState,
@@ -71,10 +67,8 @@ interface LiveTimelineProps {
       endTimeSeconds: number;
     }>
   ) => void;
-  audioWaveform?: WaveformBucket[];
   audioSpikes?: AudioSpikeMarker[];
   aiMarkers?: TimelineMarker[];
-  showAudioLane?: boolean;
 }
 
 type CaptionPatch = Partial<{
@@ -94,7 +88,6 @@ type HistoryEntry =
     };
 
 const VIDEO_TRACK_STYLE = { flex: "1.5 1 100px", minHeight: 52 };
-const AUDIO_TRACK_STYLE = { flex: "0.8 1 72px", minHeight: 34 };
 const CAPTION_TRACK_STYLE = { flex: "0.65 1 56px", minHeight: 36 };
 const OVERLAY_TRACK_STYLE = { flex: "0.4 1 36px", minHeight: 28 };
 
@@ -155,28 +148,6 @@ function clampSelection(
   return { start: s, end: e };
 }
 
-function audioSpikeBarClass(
-  intensity: AudioSpikeIntensity,
-  isActive: boolean
-): string {
-  if (isActive) {
-    if (intensity === "high") {
-      return "border-[var(--color-accent)] bg-[var(--color-accent)]/38 text-[#f4fff1] z-[6] shadow-[0_0_14px_rgba(149,255,0,0.32)]";
-    }
-    if (intensity === "medium") {
-      return "border-[#b7ff3c]/70 bg-[#95ff00]/24 text-[#f4fff1] z-[5]";
-    }
-    return "border-[#5c8f1d]/60 bg-[#95ff00]/14 text-[#d8efc8] z-[4]";
-  }
-  if (intensity === "high") {
-    return "border-[var(--color-accent)]/70 bg-[var(--color-accent)]/20 hover:bg-[var(--color-accent)]/30";
-  }
-  if (intensity === "medium") {
-    return "border-[#b7ff3c]/45 bg-[#95ff00]/14 hover:bg-[#95ff00]/22";
-  }
-  return "border-[#5c8f1d]/35 bg-[#20350c]/40 hover:bg-[#20350c]/70";
-}
-
 function sampleTimelineItems<T>(
   items: T[],
   maxItems: number,
@@ -214,10 +185,8 @@ export function LiveTimeline({
   captionAppearance,
   captionEdits = {},
   onCaptionEdit,
-  audioWaveform = [],
   audioSpikes = [],
   aiMarkers = [],
-  showAudioLane = false,
 }: LiveTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const rulerRef = useRef<HTMLDivElement>(null);
@@ -405,10 +374,7 @@ export function LiveTimeline({
   );
 
   const showCaptionTrack = captionCues.length > 0;
-  const showAudioTrack =
-    showAudioLane ||
-    waveformHasSignal(audioWaveform) ||
-    audioSpikes.length > 0;
+  // Audio spikes stay as ruler markers; the dedicated A1 waveform lane is removed.
 
   const timelineMarkers = useMemo(() => {
     const audioMarkers: TimelineMarker[] = audioSpikes.map((marker) => ({
@@ -486,13 +452,6 @@ export function LiveTimeline({
       setSelectedSegmentId(editorState.segments[0]?.id ?? null);
     }
   }, [editorState.segments, selectedSegmentId]);
-
-  function handleAudioSpikeClick(marker: AudioSpikeMarker) {
-    const start = marker.startTimeSeconds;
-    const end = Math.max(marker.endTimeSeconds, start + MIN_CLIP_SECONDS);
-    onSeek(start);
-    onSelectionChange(clampSelection(start, end, maxTime));
-  }
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -917,18 +876,38 @@ export function LiveTimeline({
     };
   }, [maxTime, scrollLeft, trackContentWidth, viewportWidth]);
 
-  const visibleThumbnails = useMemo(
-    () =>
-      sampleTimelineItems(
-        thumbnails.filter(
-          (thumb) =>
-            thumb.endTimeSeconds >= visibleTimeRange.start &&
-            thumb.startTimeSeconds <= visibleTimeRange.end
-        ),
-        Math.min(140, Math.max(48, Math.ceil(viewportWidth / 24) + 12))
-      ),
-    [thumbnails, visibleTimeRange.start, visibleTimeRange.end, viewportWidth]
-  );
+  const visibleThumbnails = useMemo(() => {
+    const inView = thumbnails
+      .filter(
+        (thumb) =>
+          thumb.endTimeSeconds >= visibleTimeRange.start &&
+          thumb.startTimeSeconds <= visibleTimeRange.end
+      )
+      .slice()
+      .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
+
+    const sampled = sampleTimelineItems(
+      inView,
+      Math.min(140, Math.max(48, Math.ceil(viewportWidth / 24) + 12))
+    );
+
+    // Stretch each visible thumb to the next so sampling / missing blocks
+    // don't leave black gaps on the track.
+    return sampled.map((thumb, index) => {
+      const next = sampled[index + 1];
+      const stretchedEnd = next
+        ? next.startTimeSeconds
+        : Math.max(thumb.endTimeSeconds, visibleTimeRange.end);
+      return stretchedEnd > thumb.endTimeSeconds
+        ? { ...thumb, endTimeSeconds: stretchedEnd }
+        : thumb;
+    });
+  }, [
+    thumbnails,
+    visibleTimeRange.start,
+    visibleTimeRange.end,
+    viewportWidth,
+  ]);
 
   const visibleSegments = useMemo(
     () =>
@@ -941,29 +920,6 @@ export function LiveTimeline({
         Math.min(360, Math.max(100, Math.ceil(viewportWidth / 5)))
       ),
     [segments, visibleTimeRange.start, visibleTimeRange.end, viewportWidth]
-  );
-
-  const visibleWaveform = useMemo(
-    () =>
-      sampleTimelineItems(
-        audioWaveform.filter(
-          (bucket) =>
-            bucket.endTimeSeconds >= visibleTimeRange.start &&
-            bucket.startTimeSeconds <= visibleTimeRange.end
-        ),
-        Math.min(720, Math.max(180, Math.ceil(viewportWidth / 2)))
-      ),
-    [audioWaveform, visibleTimeRange.start, visibleTimeRange.end, viewportWidth]
-  );
-
-  const visibleAudioSpikes = useMemo(
-    () =>
-      audioSpikes.filter(
-        (marker) =>
-          marker.endTimeSeconds >= visibleTimeRange.start &&
-          marker.startTimeSeconds <= visibleTimeRange.end
-      ),
-    [audioSpikes, visibleTimeRange.start, visibleTimeRange.end]
   );
 
   const visibleCaptionCues = useMemo(
@@ -1152,7 +1108,7 @@ export function LiveTimeline({
         >
           {/* Track labels gutter - stays visible while scrolling */}
           <div
-            className="sticky left-0 z-20 flex h-full min-h-0 shrink-0 flex-col border-r border-[var(--color-card-border)] bg-[#020302]"
+            className="sticky left-0 z-10 flex h-full min-h-0 shrink-0 flex-col border-r border-[var(--color-card-border)] bg-[#020302]"
             style={{ width: TRACK_LABEL_W }}
           >
             <div className="h-7 border-b border-[var(--color-card-border)]" />
@@ -1162,14 +1118,6 @@ export function LiveTimeline({
             >
               <span className="text-[10px] font-semibold text-[#9aa49a]">V1</span>
             </div>
-            {showAudioTrack && (
-              <div
-                className="flex items-center justify-center border-b border-[var(--color-card-border)]"
-                style={AUDIO_TRACK_STYLE}
-              >
-                <span className="text-[10px] font-semibold text-[var(--color-accent)]">A1</span>
-              </div>
-            )}
             {showOverlayTrack && (
               <div
                 className="flex items-center justify-center border-b border-[var(--color-card-border)]"
@@ -1292,11 +1240,14 @@ export function LiveTimeline({
                         <img
                           src={thumb.url}
                           alt=""
-                          className="w-full h-full object-cover"
+                          className="h-full w-full bg-[#081008] object-cover"
                           draggable={false}
                           loading={index < 80 ? "eager" : "lazy"}
                           decoding="async"
                           fetchPriority={index < 8 ? "high" : "auto"}
+                          onError={(event) => {
+                            event.currentTarget.style.visibility = "hidden";
+                          }}
                         />
                       </div>
                     ))
@@ -1339,15 +1290,27 @@ export function LiveTimeline({
                     ))}
               </div>
 
-              {/* Unrecorded region */}
-              <div
-                className="absolute inset-y-0 right-0 bg-[#020302]/82 pointer-events-none"
-                style={{ left: `${recordedPct}%` }}
-              />
-              {isLive && recordedSeconds > 0 && (
+              {/* Local-capture frontier: only for live. VOD shows the full stream
+                  length so users can scrub via the platform player before local
+                  download/render finishes. */}
+              {isLive && recordedSeconds > 0 && recordedPct < 99.5 && (
+                <>
+                  <div
+                    className="absolute inset-y-0 right-0 bg-[#020302]/35 pointer-events-none"
+                    style={{ left: `${recordedPct}%` }}
+                  />
+                  <div
+                    className="absolute top-0 bottom-0 w-px bg-red-500/80 z-[2]"
+                    style={{ left: `${recordedPct}%` }}
+                    title="Live capture frontier"
+                  />
+                </>
+              )}
+              {!isLive && recordedSeconds > 0 && recordedPct < 99.5 && (
                 <div
-                  className="absolute top-0 bottom-0 w-px bg-red-500/80 z-[2]"
-                  style={{ left: `${recordedPct}%` }}
+                  className="pointer-events-none absolute top-0 z-[2] h-0.5 bg-[var(--color-accent)]/45"
+                  style={{ width: `${recordedPct}%` }}
+                  title="Local media ready"
                 />
               )}
 
@@ -1410,67 +1373,6 @@ export function LiveTimeline({
               </div>
 
             </div>
-
-            {/* Audio loudness + spike lane */}
-            {showAudioTrack && (
-              <div
-                className="relative overflow-hidden border-b border-[var(--color-card-border)] bg-[#031006]"
-                style={AUDIO_TRACK_STYLE}
-              >
-                {visibleWaveform.map((bucket, i) => (
-                  <div
-                    key={`wf-${i}`}
-                    className="absolute bottom-0 bg-[var(--color-accent)]/28 pointer-events-none rounded-t-[1px]"
-                    style={{
-                      left: `${pct(bucket.startTimeSeconds, maxTime)}%`,
-                      width: `${Math.max(
-                        pct(
-                          bucket.endTimeSeconds - bucket.startTimeSeconds,
-                          maxTime
-                        ),
-                        0.12
-                      )}%`,
-                      height: `${Math.max(8, bucket.level * 92)}%`,
-                    }}
-                  />
-                ))}
-
-                {audioWaveform.length === 0 && audioSpikes.length === 0 && (
-                  <div className="absolute inset-0 flex items-center justify-center text-[9px] text-[var(--color-accent)]/35 pointer-events-none">
-                    {isLive ? "Analyzing audio levels..." : "No audio spikes yet"}
-                  </div>
-                )}
-
-                {visibleAudioSpikes.map((marker) => {
-                  const isActive =
-                    currentTime >= marker.startTimeSeconds &&
-                    currentTime < marker.endTimeSeconds;
-                  return (
-                    <button
-                      key={marker.id}
-                      type="button"
-                      title={formatAudioSpikeTooltip(marker)}
-                      onClick={() => handleAudioSpikeClick(marker)}
-                      className={cn(
-                        "absolute top-0.5 bottom-0.5 rounded-sm border cursor-pointer",
-                        "min-w-[3px] px-0",
-                        audioSpikeBarClass(marker.intensity, isActive)
-                      )}
-                      style={{
-                        left: `${pct(marker.startTimeSeconds, maxTime)}%`,
-                        width: `${Math.max(
-                          pct(
-                            marker.endTimeSeconds - marker.startTimeSeconds,
-                            maxTime
-                          ),
-                          marker.type === "volume_spike" ? 0.35 : 0.6
-                        )}%`,
-                      }}
-                    />
-                  );
-                })}
-              </div>
-            )}
 
             {showOverlayTrack && (
               <div
@@ -1553,7 +1455,7 @@ function Playhead({
   return (
     <div
       data-timeline-playhead
-      className="absolute top-0 bottom-0 z-[30] pointer-events-none"
+      className="pointer-events-none absolute inset-y-0 top-0 z-[12]"
       style={{ left: `${percent}%` }}
     >
       <div

@@ -133,6 +133,16 @@ async function extractMissingRange(
   const span = toSeconds - fromSeconds;
   if (span < 2) return;
 
+  const expectedBlocks: number[] = [];
+  for (
+    let t = fromSeconds;
+    t < toSeconds;
+    t += THUMB_INTERVAL_SECONDS
+  ) {
+    expectedBlocks.push(t);
+  }
+  if (expectedBlocks.length === 0) return;
+
   const tmpDir = path.join(framesDir, `strip-tmp-${Date.now()}`);
   await ensureDir(tmpDir);
 
@@ -150,14 +160,43 @@ async function extractMissingRange(
       .filter((f) => f.startsWith("t_"))
       .sort();
 
-    for (let i = 0; i < outputs.length; i++) {
-      const blockStart = fromSeconds + i * THUMB_INTERVAL_SECONDS;
-      if (blockStart >= toSeconds) break;
-      const dest = path.join(framesDir, `thumb_${blockStart}.jpg`);
-      await fs.rename(path.join(tmpDir, outputs[i]!), dest).catch(() => {});
+    // Only trust strip→block mapping when counts match. Keyframe-only extracts
+    // often return fewer images; renaming by index would stamp wrong times.
+    if (outputs.length === expectedBlocks.length) {
+      for (let i = 0; i < outputs.length; i++) {
+        const blockStart = expectedBlocks[i]!;
+        const dest = path.join(framesDir, `thumb_${blockStart}.jpg`);
+        const src = path.join(tmpDir, outputs[i]!);
+        try {
+          const stat = await fs.stat(src);
+          if (stat.size < 400) continue;
+          await fs.rename(src, dest).catch(() => {});
+        } catch {
+          // gap-fill below
+        }
+      }
     }
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+
+  // Fill any blocks the strip pass skipped (sparse keyframes / bad frames).
+  const have = new Set(await listThumbStarts(framesDir));
+  for (const blockStart of expectedBlocks) {
+    if (have.has(blockStart)) continue;
+    const dest = path.join(framesDir, `thumb_${blockStart}.jpg`);
+    try {
+      await extractFastTimelineFrame(
+        inputPath,
+        dest,
+        blockStart,
+        THUMB_WIDTH_PX
+      );
+      const stat = await fs.stat(dest);
+      if (stat.size < 400) await fs.unlink(dest).catch(() => {});
+    } catch {
+      // leave gap; UI stretches neighboring thumbs
+    }
   }
 }
 

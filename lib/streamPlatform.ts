@@ -157,6 +157,8 @@ export function shouldPreferLocalVideoPreview(options: {
   isLiveRecording?: boolean;
   isLive?: boolean;
   durationSeconds?: number | null;
+  /** Known full stream length (metadata). Local is preferred only once capture catches up. */
+  knownStreamDuration?: number | null;
 }): boolean {
   if (options.platform === "youtube") return false;
 
@@ -174,5 +176,15 @@ export function shouldPreferLocalVideoPreview(options: {
 
   if (!isBrowserPlayableVideoUrl(playbackUrl)) return false;
 
-  return (options.durationSeconds ?? 0) >= 2;
+  const localSeconds = options.durationSeconds ?? 0;
+  if (localSeconds < 2) return false;
+
+  const known = options.knownStreamDuration ?? 0;
+  // Keep using the remote player until local media covers most of the stream,
+  // so the full timeline stays scrubbable before download/render finishes.
+  if (known > 30 && localSeconds < known * 0.9) {
+    return false;
+  }
+
+  return true;
 }
