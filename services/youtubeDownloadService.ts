@@ -169,7 +169,7 @@ function sourceMaxHeight(): number {
   if (Number.isFinite(configured) && configured >= 240) return configured;
   // Railway only needs a lightweight analysis/editing copy. Final render
   // segments can still be fetched separately at higher quality.
-  return process.env.NODE_ENV === "production" ? 480 : 1080;
+  return process.env.NODE_ENV === "production" ? 360 : 1080;
 }
 
 function sourceFormatChains(): string[] {

@@ -20,10 +20,12 @@ import {
   failPlatformExport,
   reclaimStalePlatformExports,
 } from "@/services/platformExportService";
+import { acquireSourceMedia } from "@/services/liveRecordingService";
 
 const WORKER_ID = `worker-${process.pid}-${randomUUID().slice(0, 8)}`;
 
 let tickInFlight = false;
+let sourceRecoveryInFlight = false;
 let lastRetentionAt = 0;
 
 function staleMs(): number {
@@ -43,6 +45,13 @@ function retentionTickMs(): number {
 
 export function isWorkerEnabled(): boolean {
   const raw = process.env.WORKER_ENABLED?.trim().toLowerCase();
+  if (raw === "0" || raw === "false" || raw === "off") return false;
+  if (raw === "1" || raw === "true" || raw === "on") return true;
+  return process.env.NODE_ENV === "production";
+}
+
+function isSourceRecoveryEnabled(): boolean {
+  const raw = process.env.SOURCE_RECOVERY_ENABLED?.trim().toLowerCase();
   if (raw === "0" || raw === "false" || raw === "off") return false;
   if (raw === "1" || raw === "true" || raw === "on") return true;
   return process.env.NODE_ENV === "production";
@@ -225,8 +234,100 @@ async function processOneTranscription(): Promise<boolean> {
   return false;
 }
 
+async function recoverOneStalledSource(): Promise<boolean> {
+  const cutoff = new Date(Date.now() - 30_000);
+  const candidates = await prisma.streamSession.findMany({
+    where: {
+      liveRecording: {
+        is: {
+          status: { in: ["recording", "failed", "stopped", "completed"] },
+          recordedSeconds: { lt: 3 },
+        },
+      },
+    },
+    orderBy: { updatedAt: "desc" },
+    take: 8,
+    select: {
+      id: true,
+      liveRecording: {
+        select: { startedAt: true, lastSyncedAt: true },
+      },
+      sourceMedia: {
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        select: { durationSeconds: true },
+      },
+    },
+  });
+
+  for (const candidate of candidates) {
+    if ((candidate.sourceMedia[0]?.durationSeconds ?? 0) >= 3) continue;
+    const attemptedAt =
+      candidate.liveRecording?.lastSyncedAt ??
+      candidate.liveRecording?.startedAt;
+    if (attemptedAt && attemptedAt > cutoff) continue;
+
+    const claimed = await prisma.liveRecordingState.updateMany({
+      where: {
+        streamSessionId: candidate.id,
+        OR: [{ lastSyncedAt: null }, { lastSyncedAt: { lte: cutoff } }],
+      },
+      data: { lastSyncedAt: new Date() },
+    });
+    if (claimed.count !== 1) continue;
+
+    try {
+      console.info(`[worker] recovering stalled source for ${candidate.id}`);
+      const result = await acquireSourceMedia(candidate.id);
+      const duration = result.sourceMedia?.durationSeconds ?? 0;
+      console.info(
+        `[worker] source recovery finished for ${candidate.id} (${Math.round(duration)}s)`
+      );
+      await prisma.streamSession.update({
+        where: { id: candidate.id },
+        data: {
+          lastTranscriptionError:
+            duration >= 3 ? null : "Source capture is still starting",
+        },
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Source acquisition failed";
+      console.error(
+        `[worker] source recovery failed for ${candidate.id}: ${message}`
+      );
+      await prisma.streamSession.update({
+        where: { id: candidate.id },
+        data: {
+          lastTranscriptionError: `Source acquisition: ${message}`.slice(
+            0,
+            2000
+          ),
+        },
+      });
+    }
+    return true;
+  }
+
+  return false;
+}
+
+function queueStalledSourceRecovery(): number {
+  if (!isSourceRecoveryEnabled() || sourceRecoveryInFlight) return 0;
+  sourceRecoveryInFlight = true;
+  void recoverOneStalledSource()
+    .catch((error) => {
+      console.error("[worker] source recovery failed:", error);
+    })
+    .finally(() => {
+      sourceRecoveryInFlight = false;
+    });
+  return 1;
+}
+
 export interface WorkerTickResult {
   reclaimed: number;
+  sourceRecoveries: number;
   renders: number;
   platformExports: number;
   transcriptions: number;
@@ -237,6 +338,7 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
   if (tickInFlight) {
     return {
       reclaimed: 0,
+      sourceRecoveries: 0,
       renders: 0,
       platformExports: 0,
       transcriptions: 0,
@@ -250,6 +352,7 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
       reclaimStalePlatformExports(),
     ]);
     const reclaimed = staleRenders + stalePlatformExports;
+    const sourceRecoveries = queueStalledSourceRecovery();
     let renders = 0;
     // Process up to a few renders per tick so the loop stays responsive.
     for (let i = 0; i < 2; i++) {
@@ -279,6 +382,7 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
 
     return {
       reclaimed,
+      sourceRecoveries,
       renders,
       platformExports,
       transcriptions,
