@@ -307,7 +307,12 @@ export async function startLiveRecording(streamSessionId: string) {
     if (activeRecordings.get(streamSessionId) !== proc) return;
     activeRecordings.delete(streamSessionId);
     const detail = activeRecordingErrors.get(streamSessionId)?.trim();
-    activeRecordingErrors.delete(streamSessionId);
+    const cleanupErrorBuffer = setTimeout(() => {
+      if (!activeRecordings.has(streamSessionId)) {
+        activeRecordingErrors.delete(streamSessionId);
+      }
+    }, 30_000);
+    cleanupErrorBuffer.unref();
     void (async () => {
       if (code !== 0) {
         await markRecordingFailed(
