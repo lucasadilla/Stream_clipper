@@ -87,7 +87,7 @@ type HistoryEntry =
       at: number;
     };
 
-const VIDEO_TRACK_STYLE = { flex: "1.5 1 100px", minHeight: 52 };
+const VIDEO_TRACK_STYLE = { flex: "1.35 1 72px", minHeight: 56, maxHeight: 120 };
 const CAPTION_TRACK_STYLE = { flex: "0.65 1 56px", minHeight: 36 };
 const OVERLAY_TRACK_STYLE = { flex: "0.4 1 36px", minHeight: 28 };
 
@@ -876,38 +876,18 @@ export function LiveTimeline({
     };
   }, [maxTime, scrollLeft, trackContentWidth, viewportWidth]);
 
-  const visibleThumbnails = useMemo(() => {
-    const inView = thumbnails
-      .filter(
-        (thumb) =>
-          thumb.endTimeSeconds >= visibleTimeRange.start &&
-          thumb.startTimeSeconds <= visibleTimeRange.end
-      )
-      .slice()
-      .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
-
-    const sampled = sampleTimelineItems(
-      inView,
-      Math.min(140, Math.max(48, Math.ceil(viewportWidth / 24) + 12))
-    );
-
-    // Stretch each visible thumb to the next so sampling / missing blocks
-    // don't leave black gaps on the track.
-    return sampled.map((thumb, index) => {
-      const next = sampled[index + 1];
-      const stretchedEnd = next
-        ? next.startTimeSeconds
-        : Math.max(thumb.endTimeSeconds, visibleTimeRange.end);
-      return stretchedEnd > thumb.endTimeSeconds
-        ? { ...thumb, endTimeSeconds: stretchedEnd }
-        : thumb;
-    });
-  }, [
-    thumbnails,
-    visibleTimeRange.start,
-    visibleTimeRange.end,
-    viewportWidth,
-  ]);
+  const visibleThumbnails = useMemo(
+    () =>
+      thumbnails
+        .filter(
+          (thumb) =>
+            thumb.endTimeSeconds >= visibleTimeRange.start &&
+            thumb.startTimeSeconds <= visibleTimeRange.end
+        )
+        .slice()
+        .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds),
+    [thumbnails, visibleTimeRange.start, visibleTimeRange.end]
+  );
 
   const visibleSegments = useMemo(
     () =>
@@ -984,13 +964,13 @@ export function LiveTimeline({
     <>
     <div
       className={cn(
-        "h-full flex flex-col rounded-lg border border-[var(--color-card-border)] bg-[#050705] overflow-hidden shadow-[0_18px_70px_rgba(0,0,0,0.35)] transition-opacity",
+        "flex h-full flex-col overflow-hidden border-t border-[var(--color-card-border)] bg-[#050705] transition-opacity",
         renderModalOpen && "opacity-40 pointer-events-none select-none"
       )}
       aria-hidden={renderModalOpen}
     >
       {/* Editor toolbar */}
-      <div className="shrink-0 flex flex-wrap items-center gap-2 px-3 py-2 border-b border-[var(--color-card-border)] bg-[#020302]">
+      <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--color-card-border)] bg-[#020302] px-2 py-1.5">
         <div className="flex items-center gap-1">
           <ToolBtn onClick={setInPoint} title="Mark In (I)">
             In
@@ -1240,7 +1220,7 @@ export function LiveTimeline({
                         <img
                           src={thumb.url}
                           alt=""
-                          className="h-full w-full bg-[#081008] object-cover"
+                          className="h-full w-full object-cover"
                           draggable={false}
                           loading={index < 80 ? "eager" : "lazy"}
                           decoding="async"

@@ -57,13 +57,16 @@ export function VideoPreview({
   );
 
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-col gap-2.5">
-      <div className="flex items-center justify-between gap-3 px-1">
-        <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
-          {platformLabel(platform)} preview
-          {preferLocalVideo && playbackVideoUrl ? " / local capture" : ""}
+    <div className="flex h-full min-h-0 w-full flex-col bg-[#050705]">
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[var(--color-card-border)] px-3 py-1.5">
+        <p className="truncate text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8f9b89]">
+          Program
+          <span className="ml-2 font-normal normal-case tracking-normal text-[#5f6b5c]">
+            {platformLabel(platform)}
+            {preferLocalVideo && playbackVideoUrl ? " · local" : ""}
+          </span>
         </p>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           <CaptionAppearancePanel
             appearance={captionAppearance}
             onChange={onCaptionAppearanceChange}
@@ -76,16 +79,16 @@ export function VideoPreview({
             aria-checked={captionsEnabled}
             onClick={() => onCaptionsEnabledChange(!captionsEnabled)}
             className={cn(
-              "inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors",
+              "inline-flex h-7 items-center gap-1.5 border px-2 text-[10px] font-semibold transition-colors",
               captionsEnabled
-                ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-black shadow-[0_0_18px_rgba(149,255,0,0.18)]"
+                ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-black"
                 : "border-[#21301f] bg-[#070a07] text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-white"
             )}
             title="Toggle captions overlay and exports"
           >
             <span
               className={cn(
-                "inline-flex h-5 w-5 items-center justify-center rounded text-[10px] font-bold",
+                "inline-flex h-4 w-4 items-center justify-center text-[9px] font-bold",
                 captionsEnabled
                   ? "bg-black text-[var(--color-accent)]"
                   : "bg-[#142114] text-[#dfead8]"
@@ -93,12 +96,12 @@ export function VideoPreview({
             >
               CC
             </span>
-            Captions {captionsEnabled ? "on" : "off"}
+            Captions
           </button>
         </div>
       </div>
 
-      <div className="relative isolate h-[min(42vh,520px)] min-h-[220px] w-full overflow-hidden rounded-lg border border-[var(--color-card-border)] bg-black shadow-[0_20px_80px_rgba(0,0,0,0.42)]">
+      <div className="relative isolate min-h-0 flex-1 bg-black">
         <div className="absolute inset-0 z-0">
           <StreamPlayer
             ref={playerRef}

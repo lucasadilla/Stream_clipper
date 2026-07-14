@@ -18,6 +18,7 @@ import {
 } from "@/lib/transcriptionConstants";
 import { buildLiveTimelineSegments } from "@/lib/timelineSegments";
 import { SidebarPanel } from "@/components/SidebarPanel";
+import { EditorTranscriptPanel } from "@/components/EditorTranscriptPanel";
 import { fetchJson } from "@/lib/apiClient";
 import {
   readCaptionsEnabledPreference,
@@ -717,40 +718,51 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
             />
           )}
 
-          {/* Video preview */}
-          <div className="shrink-0 px-4 pt-3 pb-2 flex justify-center">
-            <VideoPreview
-              platform={platform}
-              sourceId={session.youtubeVideoId}
-              embed={streamEmbed}
-              playbackVideoUrl={
-                playbackVideoUrl
-                  ? `${playbackVideoUrl}${playbackVideoUrl.includes("?") ? "&" : "?"}v=${Math.floor(recordedSeconds / 12)}`
-                  : null
-              }
-              streamPageUrl={session.youtubeUrl}
-              recordedSeconds={recordedSeconds}
-              preferLocalVideo={preferLocalVideo}
-              playerRef={playerRef}
-              transcripts={transcripts}
-              captionsEnabled={captionsEnabled}
-              captionEdits={captionEdits}
-              captionAppearance={captionAppearance}
-              onCaptionsEnabledChange={(enabled) => {
-                setCaptionsEnabled(enabled);
-                writeCaptionsEnabledPreference(enabled);
-              }}
-              onCaptionAppearanceChange={(appearance) => {
-                setCaptionAppearance(appearance);
-                writeCaptionAppearancePreference(appearance);
-              }}
-              onTimeUpdate={handlePlayerTimeUpdate}
-              onDurationChange={handlePlayerDurationChange}
-            />
+          {/* Monitor row — compact program + transcript */}
+          <div className="flex h-[min(34vh,300px)] min-h-[168px] shrink-0 border-b border-[var(--color-card-border)]">
+            <div className="min-w-0 flex-1">
+              <VideoPreview
+                platform={platform}
+                sourceId={session.youtubeVideoId}
+                embed={streamEmbed}
+                playbackVideoUrl={
+                  playbackVideoUrl
+                    ? `${playbackVideoUrl}${playbackVideoUrl.includes("?") ? "&" : "?"}v=${Math.floor(recordedSeconds / 12)}`
+                    : null
+                }
+                streamPageUrl={session.youtubeUrl}
+                recordedSeconds={recordedSeconds}
+                preferLocalVideo={preferLocalVideo}
+                playerRef={playerRef}
+                transcripts={transcripts}
+                captionsEnabled={captionsEnabled}
+                captionEdits={captionEdits}
+                captionAppearance={captionAppearance}
+                onCaptionsEnabledChange={(enabled) => {
+                  setCaptionsEnabled(enabled);
+                  writeCaptionsEnabledPreference(enabled);
+                }}
+                onCaptionAppearanceChange={(appearance) => {
+                  setCaptionAppearance(appearance);
+                  writeCaptionAppearancePreference(appearance);
+                }}
+                onTimeUpdate={handlePlayerTimeUpdate}
+                onDurationChange={handlePlayerDurationChange}
+              />
+            </div>
+            <aside className="hidden w-[min(38%,360px)] shrink-0 border-l border-[var(--color-card-border)] md:block">
+              <EditorTranscriptPanel
+                chunks={transcripts}
+                currentTime={currentTime}
+                onSeek={seekFromAssistant}
+                transcribing={transcribingActive || transcriptionBehind}
+                error={sourcePreparationError ?? transcriptionError}
+              />
+            </aside>
           </div>
 
-          {/* Timeline — full remaining height */}
-          <div className="flex-1 min-h-[160px] px-4 py-1.5">
+          {/* Timeline — primary work surface */}
+          <div className="min-h-0 flex-1">
             <LiveTimeline
               sessionId={sessionId}
               segments={liveSegments}
@@ -776,16 +788,16 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
           </div>
         </div>
 
-        {/* Assistant / live chat drawer */}
+        {/* Assistant drawer */}
         {!assistantOpen && (
           <button
             type="button"
             onClick={() => setAssistantOpen(true)}
-            className="absolute bottom-4 right-4 z-10 flex items-center gap-2 rounded-full border border-[var(--color-card-border)] bg-[#0a0f0a]/95 px-4 py-2.5 text-sm font-medium text-white shadow-lg backdrop-blur-sm transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+            className="absolute bottom-3 right-3 z-10 flex items-center gap-2 border border-[var(--color-card-border)] bg-[#0a0f0a]/95 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#c5cfc0] shadow-lg backdrop-blur-sm transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
             aria-label="Open assistant"
           >
             {(transcribingActive || transcriptionBehind) && (
-              <span className="h-2 w-2 shrink-0 rounded-full bg-[var(--color-accent)] animate-pulse" />
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-accent)] animate-pulse" />
             )}
             Assistant
           </button>
@@ -800,13 +812,15 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
               aria-hidden="true"
               onClick={() => setAssistantOpen(false)}
             />
-            <aside className="absolute bottom-0 right-0 top-0 z-50 flex w-[min(100%,380px)] flex-col border-l border-[var(--color-card-border)] bg-[#050705] shadow-2xl">
-              <div className="flex shrink-0 items-center justify-between border-b border-[var(--color-card-border)] bg-[#020302] px-4 py-3">
-                <p className="text-sm font-semibold text-white">Assistant</p>
+            <aside className="absolute bottom-0 right-0 top-0 z-50 flex w-[min(100%,360px)] flex-col border-l border-[var(--color-card-border)] bg-[#050705] shadow-2xl">
+              <div className="flex shrink-0 items-center justify-between border-b border-[var(--color-card-border)] bg-[#020302] px-3 py-2">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-white">
+                  Assistant
+                </p>
                 <button
                   type="button"
                   onClick={() => setAssistantOpen(false)}
-                  className="rounded-lg px-2 py-1 text-xs text-[var(--color-muted)] transition-colors hover:bg-[#141414] hover:text-white"
+                  className="px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-muted)] transition-colors hover:bg-[#141414] hover:text-white"
                 >
                   Close
                 </button>

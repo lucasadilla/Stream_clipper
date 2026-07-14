@@ -19,19 +19,19 @@ export function EditorHeader({
   onDelete,
 }: EditorHeaderProps) {
   return (
-    <header className="shrink-0 border-b border-[var(--color-card-border)] bg-[#020302]/92 backdrop-blur-sm px-4 sm:px-6 h-14 flex items-center justify-between gap-4">
-      <div className="flex items-center gap-4 min-w-0">
+    <header className="flex h-10 shrink-0 items-center justify-between gap-3 border-b border-[var(--color-card-border)] bg-[#020302] px-3 sm:px-4">
+      <div className="flex min-w-0 items-center gap-3">
         <SiteLogo showText={false} />
-        <div className="h-5 w-px bg-[var(--color-card-border)] hidden sm:block" />
-        <h1 className="text-sm font-semibold truncate text-[var(--color-foreground)]/90">
+        <div className="hidden h-4 w-px bg-[var(--color-card-border)] sm:block" />
+        <h1 className="truncate text-xs font-semibold text-[var(--color-foreground)]/90">
           {title ?? "Editor"}
         </h1>
       </div>
 
-      <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+      <div className="flex shrink-0 items-center gap-2">
         {storageLabel && storageLabel !== "0 B" && (
-          <span className="text-[10px] text-[var(--color-muted)] hidden sm:inline">
-            {storageLabel} local
+          <span className="hidden font-mono text-[10px] text-[var(--color-muted)] sm:inline">
+            {storageLabel}
           </span>
         )}
         {onDelete && (
@@ -39,20 +39,20 @@ export function EditorHeader({
             type="button"
             onClick={onDelete}
             disabled={deleting}
-            className="text-[10px] sm:text-xs px-2.5 py-1 rounded-lg border border-[var(--color-card-border)] text-[var(--color-muted)] hover:border-red-500/50 hover:text-red-400 disabled:opacity-50 transition-colors"
+            className="border border-[var(--color-card-border)] px-2 py-1 text-[10px] text-[var(--color-muted)] transition-colors hover:border-red-500/50 hover:text-red-400 disabled:opacity-50"
           >
-            {deleting ? "Deleting..." : "Delete & free space"}
+            {deleting ? "Deleting…" : "Delete"}
           </button>
         )}
         {isLive && (
-          <span className="text-[10px] sm:text-xs text-[#ff6b6b] flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-            LIVE / {Math.floor(recordedSeconds)}s
+          <span className="flex items-center gap-1.5 font-mono text-[10px] text-[#ff6b6b]">
+            <span className="h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse" />
+            LIVE {Math.floor(recordedSeconds)}s
           </span>
         )}
         <Link
           href="/"
-          className="text-xs text-[var(--color-muted)] hover:text-white hidden sm:inline transition-colors"
+          className="hidden text-[10px] uppercase tracking-[0.12em] text-[var(--color-muted)] transition-colors hover:text-white sm:inline"
         >
           Home
         </Link>
