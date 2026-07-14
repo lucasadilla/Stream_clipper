@@ -101,30 +101,47 @@ export function VideoPreview({
         </div>
       </div>
 
-      <div className="relative isolate min-h-0 flex-1 bg-black">
-        <div className="absolute inset-0 z-0">
-          <StreamPlayer
-            ref={playerRef}
-            platform={platform}
-            sourceId={sourceId}
-            embed={embed}
-            playbackVideoUrl={playbackVideoUrl}
-            streamPageUrl={streamPageUrl}
-            recordedSeconds={recordedSeconds}
-            preferLocalVideo={preferLocalVideo}
-            onTimeUpdate={onTimeUpdate}
-            onDurationChange={onDurationChange}
-            fillContainer
-          />
+      {/* Letterbox stage — video stays 16:9 inside the resizable pane */}
+      <div
+        className="relative min-h-0 flex-1 bg-[#020302]"
+        style={{ containerType: "size" }}
+      >
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div
+            className="relative bg-black shadow-[0_0_0_1px_rgba(33,48,31,0.65)]"
+            style={{
+              aspectRatio: "16 / 9",
+              width: "min(100%, calc(100cqh * 16 / 9))",
+              height: "min(100%, calc(100cqw * 9 / 16))",
+              maxWidth: "100%",
+              maxHeight: "100%",
+            }}
+          >
+            <div className="absolute inset-0 z-0">
+              <StreamPlayer
+                ref={playerRef}
+                platform={platform}
+                sourceId={sourceId}
+                embed={embed}
+                playbackVideoUrl={playbackVideoUrl}
+                streamPageUrl={streamPageUrl}
+                recordedSeconds={recordedSeconds}
+                preferLocalVideo={preferLocalVideo}
+                onTimeUpdate={onTimeUpdate}
+                onDurationChange={onDurationChange}
+                fillContainer
+              />
+            </div>
+            <CaptionTrackLayer
+              enabled={captionsEnabled}
+              playerRef={playerRef}
+              chunks={transcripts}
+              captionEdits={captionEdits}
+              appearance={captionAppearance}
+              showVerticalSafeArea={captionsEnabled}
+            />
+          </div>
         </div>
-        <CaptionTrackLayer
-          enabled={captionsEnabled}
-          playerRef={playerRef}
-          chunks={transcripts}
-          captionEdits={captionEdits}
-          appearance={captionAppearance}
-          showVerticalSafeArea={captionsEnabled}
-        />
       </div>
     </div>
   );

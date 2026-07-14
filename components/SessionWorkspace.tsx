@@ -18,7 +18,6 @@ import {
 } from "@/lib/transcriptionConstants";
 import { buildLiveTimelineSegments } from "@/lib/timelineSegments";
 import { SidebarPanel } from "@/components/SidebarPanel";
-import { EditorTranscriptPanel } from "@/components/EditorTranscriptPanel";
 import { fetchJson } from "@/lib/apiClient";
 import {
   readCaptionsEnabledPreference,
@@ -173,8 +172,6 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const {
     monitorHeight,
     setMonitorHeight,
-    transcriptWidth,
-    setTranscriptWidth,
   } = useEditorLayoutPrefs();
   const captionSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const playerRef = useRef<StreamPlayerHandle>(null);
@@ -728,70 +725,39 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
             />
           )}
 
-          {/* Monitor row — resizable program + transcript */}
+          {/* Program monitor — resizable, 16:9 video inside */}
           <div
-            className="flex shrink-0 border-b border-[var(--color-card-border)]"
+            className="shrink-0 border-b border-[var(--color-card-border)]"
             style={{ height: monitorHeight }}
           >
-            <div className="min-w-0 flex-1">
-              <VideoPreview
-                platform={platform}
-                sourceId={session.youtubeVideoId}
-                embed={streamEmbed}
-                playbackVideoUrl={
-                  playbackVideoUrl
-                    ? `${playbackVideoUrl}${playbackVideoUrl.includes("?") ? "&" : "?"}v=${Math.floor(recordedSeconds / 12)}`
-                    : null
-                }
-                streamPageUrl={session.youtubeUrl}
-                recordedSeconds={recordedSeconds}
-                preferLocalVideo={preferLocalVideo}
-                playerRef={playerRef}
-                transcripts={transcripts}
-                captionsEnabled={captionsEnabled}
-                captionEdits={captionEdits}
-                captionAppearance={captionAppearance}
-                onCaptionsEnabledChange={(enabled) => {
-                  setCaptionsEnabled(enabled);
-                  writeCaptionsEnabledPreference(enabled);
-                }}
-                onCaptionAppearanceChange={(appearance) => {
-                  setCaptionAppearance(appearance);
-                  writeCaptionAppearancePreference(appearance);
-                }}
-                onTimeUpdate={handlePlayerTimeUpdate}
-                onDurationChange={handlePlayerDurationChange}
-              />
-            </div>
-            <div
-              role="separator"
-              aria-orientation="vertical"
-              aria-label="Resize transcript panel"
-              title="Drag to resize transcript"
-              className="group relative hidden w-1.5 shrink-0 cursor-col-resize bg-[#0a100a] hover:bg-[var(--color-accent)]/40 md:block"
-              onPointerDown={(event) =>
-                beginPaneResize({
-                  axis: "col",
-                  startSize: transcriptWidth,
-                  onResize: setTranscriptWidth,
-                  event,
-                })
+            <VideoPreview
+              platform={platform}
+              sourceId={session.youtubeVideoId}
+              embed={streamEmbed}
+              playbackVideoUrl={
+                playbackVideoUrl
+                  ? `${playbackVideoUrl}${playbackVideoUrl.includes("?") ? "&" : "?"}v=${Math.floor(recordedSeconds / 12)}`
+                  : null
               }
-            >
-              <span className="pointer-events-none absolute inset-y-0 -left-1 -right-1" />
-            </div>
-            <aside
-              className="hidden shrink-0 border-l border-[var(--color-card-border)] md:block"
-              style={{ width: transcriptWidth }}
-            >
-              <EditorTranscriptPanel
-                chunks={transcripts}
-                currentTime={currentTime}
-                onSeek={seekFromAssistant}
-                transcribing={transcribingActive || transcriptionBehind}
-                error={sourcePreparationError ?? transcriptionError}
-              />
-            </aside>
+              streamPageUrl={session.youtubeUrl}
+              recordedSeconds={recordedSeconds}
+              preferLocalVideo={preferLocalVideo}
+              playerRef={playerRef}
+              transcripts={transcripts}
+              captionsEnabled={captionsEnabled}
+              captionEdits={captionEdits}
+              captionAppearance={captionAppearance}
+              onCaptionsEnabledChange={(enabled) => {
+                setCaptionsEnabled(enabled);
+                writeCaptionsEnabledPreference(enabled);
+              }}
+              onCaptionAppearanceChange={(appearance) => {
+                setCaptionAppearance(appearance);
+                writeCaptionAppearancePreference(appearance);
+              }}
+              onTimeUpdate={handlePlayerTimeUpdate}
+              onDurationChange={handlePlayerDurationChange}
+            />
           </div>
 
           <div

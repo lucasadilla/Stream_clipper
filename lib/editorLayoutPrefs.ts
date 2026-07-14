@@ -7,8 +7,11 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 
-const MONITOR_HEIGHT_KEY = "clipper.editor.monitorHeightPx";
-const TRANSCRIPT_WIDTH_KEY = "clipper.editor.transcriptWidthPx";
+/** Bump key when default sizing changes so old prefs don't stick. */
+const MONITOR_HEIGHT_KEY = "clipper.editor.monitorHeightPx.v2";
+
+const PROGRAM_CHROME_PX = 32;
+const ASPECT = 16 / 9;
 
 function readStoredNumber(key: string, fallback: number): number {
   if (typeof window === "undefined") return fallback;
@@ -30,44 +33,34 @@ function writeStoredNumber(key: string, value: number) {
   }
 }
 
-function defaultMonitorHeight(): number {
-  if (typeof window === "undefined") return 420;
-  return Math.round(
-    Math.min(520, Math.max(280, window.innerHeight * 0.46))
-  );
+/** Default monitor height so a centered 16:9 frame fits without eating the timeline. */
+export function defaultMonitorHeight(): number {
+  if (typeof window === "undefined") return 380;
+  const availableWidth = Math.max(320, window.innerWidth - 24);
+  const videoHeight = Math.round(Math.min(availableWidth, 960) / ASPECT);
+  const pane = videoHeight + PROGRAM_CHROME_PX;
+  const max = Math.round(window.innerHeight * 0.52);
+  const min = 220;
+  return Math.min(max, Math.max(min, pane));
 }
 
 export function useEditorLayoutPrefs() {
   const [monitorHeight, setMonitorHeightState] = useState(() =>
     readStoredNumber(MONITOR_HEIGHT_KEY, defaultMonitorHeight())
   );
-  const [transcriptWidth, setTranscriptWidthState] = useState(() =>
-    readStoredNumber(TRANSCRIPT_WIDTH_KEY, 320)
-  );
 
   useEffect(() => {
     writeStoredNumber(MONITOR_HEIGHT_KEY, monitorHeight);
   }, [monitorHeight]);
 
-  useEffect(() => {
-    writeStoredNumber(TRANSCRIPT_WIDTH_KEY, transcriptWidth);
-  }, [transcriptWidth]);
-
   const setMonitorHeight = useCallback((next: number) => {
-    const max = Math.max(240, window.innerHeight - 220);
-    setMonitorHeightState(Math.round(Math.min(max, Math.max(180, next))));
-  }, []);
-
-  const setTranscriptWidth = useCallback((next: number) => {
-    const max = Math.max(220, window.innerWidth - 360);
-    setTranscriptWidthState(Math.round(Math.min(max, Math.max(200, next))));
+    const max = Math.max(260, window.innerHeight - 200);
+    setMonitorHeightState(Math.round(Math.min(max, Math.max(200, next))));
   }, []);
 
   return {
     monitorHeight,
     setMonitorHeight,
-    transcriptWidth,
-    setTranscriptWidth,
   };
 }
 
@@ -78,7 +71,6 @@ export function beginPaneResize(options: {
   startSize: number;
   onResize: (size: number) => void;
   event: ReactPointerEvent;
-  /** row: growing downward; col: growing rightward */
   invert?: boolean;
 }) {
   const { axis, startSize, onResize, event, invert = false } = options;
