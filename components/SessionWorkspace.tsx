@@ -94,6 +94,32 @@ function markerKindFromEvent(type: string): MarkerKind {
   return "hype";
 }
 
+function transcriptRevision(
+  chunks: Array<{
+    id: string;
+    startTimeSeconds: number;
+    endTimeSeconds: number;
+    text: string;
+  }>
+): string {
+  let hash = 2166136261;
+  const mix = (value: number) => {
+    hash ^= value;
+    hash = Math.imul(hash, 16777619);
+  };
+  for (const chunk of chunks) {
+    mix(Math.round(chunk.startTimeSeconds * 1000));
+    mix(Math.round(chunk.endTimeSeconds * 1000));
+    for (let index = 0; index < chunk.id.length; index++) {
+      mix(chunk.id.charCodeAt(index));
+    }
+    for (let index = 0; index < chunk.text.length; index++) {
+      mix(chunk.text.charCodeAt(index));
+    }
+  }
+  return `${chunks.length}:${hash >>> 0}`;
+}
+
 export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const router = useRouter();
   const [session, setSession] = useState<SessionData | null>(null);
@@ -144,6 +170,10 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const playerRef = useRef<StreamPlayerHandle>(null);
   const sourceStarted = useRef(false);
   const transcribeInFlight = useRef(false);
+  const eventsInFlight = useRef(false);
+  const audioSyncInFlight = useRef(false);
+  const waveformInFlight = useRef(false);
+  const lastWaveformRequest = useRef({ maxTime: 0, at: 0 });
   const thumbnailsInFlight = useRef(false);
   const transcriptSignature = useRef("");
   const captionRebuildAttempted = useRef(false);
@@ -274,10 +304,17 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   );
 
   async function loadEvents() {
+    if (eventsInFlight.current) return;
+    eventsInFlight.current = true;
     try {
-      await fetch(`/api/sessions/${sessionId}/audio/sync`, { method: "POST" }).catch(
-        () => {}
-      );
+      if (!audioSyncInFlight.current) {
+        audioSyncInFlight.current = true;
+        void fetch(`/api/sessions/${sessionId}/audio/sync`, { method: "POST" })
+          .catch(() => {})
+          .finally(() => {
+            audioSyncInFlight.current = false;
+          });
+      }
 
       const { ok, data } = await fetchJson<{
         transcriptChunks?: typeof transcripts;
@@ -319,6 +356,22 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         )
       );
 
+      // Transcript text should paint independently of waveform generation.
+      const nextTranscriptSignature = transcriptRevision(chunks);
+      if (nextTranscriptSignature !== transcriptSignature.current) {
+        transcriptSignature.current = nextTranscriptSignature;
+        const arrived = new Set<string>();
+        for (const chunk of chunks) {
+          if (!prevTranscriptIds.current.has(chunk.id)) arrived.add(chunk.id);
+        }
+        prevTranscriptIds.current = new Set(chunks.map((chunk) => chunk.id));
+        if (arrived.size > 0) {
+          setNewSegmentIds(arrived);
+          window.setTimeout(() => setNewSegmentIds(new Set()), 2500);
+        }
+        setTranscripts(chunks);
+      }
+
       const timelineMax = coalesceTimelineSeconds([
         LIVE_SEGMENT_SECONDS,
         session?.liveRecording?.recordedSeconds,
@@ -326,31 +379,29 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         ...chunks.map((t) => t.endTimeSeconds),
         ...(data.audioEvents ?? []).map((e) => e.endTimeSeconds),
       ]);
-      const waveformRes = await fetchJson<{ buckets?: WaveformBucket[] }>(
-        `/api/sessions/${sessionId}/audio/waveform?maxTime=${timelineMax}`
-      );
-      if (waveformRes.ok) {
-        setAudioWaveform(waveformRes.data.buckets ?? []);
+      const now = Date.now();
+      const waveformIsStale =
+        timelineMax > lastWaveformRequest.current.maxTime + 2 ||
+        now - lastWaveformRequest.current.at > 30_000;
+      if (!waveformInFlight.current && waveformIsStale) {
+        waveformInFlight.current = true;
+        lastWaveformRequest.current = { maxTime: timelineMax, at: now };
+        void fetchJson<{ buckets?: WaveformBucket[] }>(
+          `/api/sessions/${sessionId}/audio/waveform?maxTime=${timelineMax}`
+        )
+          .then((waveformRes) => {
+            if (waveformRes.ok) {
+              setAudioWaveform(waveformRes.data.buckets ?? []);
+            }
+          })
+          .finally(() => {
+            waveformInFlight.current = false;
+          });
       }
-    const nextTranscriptSignature = chunks
-      .map((t) => `${t.id}:${t.startTimeSeconds}:${t.endTimeSeconds}:${t.text.length}`)
-      .join("|");
-    if (nextTranscriptSignature !== transcriptSignature.current) {
-      transcriptSignature.current = nextTranscriptSignature;
-      const arrived = new Set<string>();
-      for (const t of chunks) {
-        if (!prevTranscriptIds.current.has(t.id)) arrived.add(t.id);
-      }
-      prevTranscriptIds.current = new Set(chunks.map((t: { id: string }) => t.id));
-      if (arrived.size > 0) {
-        setNewSegmentIds(arrived);
-        window.setTimeout(() => setNewSegmentIds(new Set()), 2500);
-      }
-
-      setTranscripts(chunks);
-    }
     } catch {
       // non-fatal
+    } finally {
+      eventsInFlight.current = false;
     }
   }
 

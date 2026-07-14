@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type CSSProperties } from "react";
 import type { CaptionCue } from "@/lib/captionTrack";
 import { cn } from "@/lib/cn";
 
@@ -14,7 +14,7 @@ interface CaptionTimelineTrackProps {
   cues: CaptionCue[];
   maxTime: number;
   currentTime: number;
-  height: string;
+  style?: CSSProperties;
   selectedCueId: string | null;
   onSelectCue: (cueId: string | null) => void;
   onSeek: (seconds: number) => void;
@@ -30,7 +30,7 @@ export function CaptionTimelineTrack({
   cues,
   maxTime,
   currentTime,
-  height,
+  style,
   selectedCueId,
   onSelectCue,
   onSeek,
@@ -51,8 +51,8 @@ export function CaptionTimelineTrack({
   return (
     <div
       ref={trackRef}
-      className="relative bg-[#040804] border-b border-[var(--color-card-border)] shrink-0 overflow-hidden"
-      style={{ height }}
+      className="relative min-h-[36px] overflow-hidden border-b border-[var(--color-card-border)] bg-[#040804]"
+      style={style}
       onPointerDown={() => onSelectCue(null)}
     >
       {cues.map((cue) => {

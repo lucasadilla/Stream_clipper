@@ -9,47 +9,48 @@ export async function GET(
   try {
     const { sessionId } = await params;
 
-    const [eventWindows, transcriptChunks, audioEvents, visualEvents] =
-      await Promise.all([
-        prisma.eventWindow.findMany({
-          where: { streamSessionId: sessionId },
-          orderBy: { startTimeSeconds: "asc" },
-          select: {
-            id: true,
-            startTimeSeconds: true,
-            endTimeSeconds: true,
-            type: true,
-            summary: true,
-            score: true,
-            rawData: true,
-          },
-        }),
-        prisma.transcriptChunk.findMany({
-          where: { streamSessionId: sessionId },
-          orderBy: { startTimeSeconds: "asc" },
-          select: {
-            id: true,
-            startTimeSeconds: true,
-            endTimeSeconds: true,
-            text: true,
-            rawJson: true,
-          },
-        }),
-        prisma.audioEvent.findMany({
-          where: { streamSessionId: sessionId },
-          orderBy: { startTimeSeconds: "asc" },
-        }),
-        prisma.visualEvent.findMany({
-          where: { streamSessionId: sessionId },
-          orderBy: { startTimeSeconds: "asc" },
-        }),
-      ]);
+    const [eventWindows, transcriptChunks, audioEvents] = await Promise.all([
+      prisma.eventWindow.findMany({
+        where: { streamSessionId: sessionId },
+        orderBy: { startTimeSeconds: "asc" },
+        select: {
+          id: true,
+          startTimeSeconds: true,
+          endTimeSeconds: true,
+          type: true,
+          summary: true,
+          score: true,
+        },
+      }),
+      prisma.transcriptChunk.findMany({
+        where: { streamSessionId: sessionId },
+        orderBy: { startTimeSeconds: "asc" },
+        select: {
+          id: true,
+          startTimeSeconds: true,
+          endTimeSeconds: true,
+          text: true,
+          rawJson: true,
+        },
+      }),
+      prisma.audioEvent.findMany({
+        where: { streamSessionId: sessionId },
+        orderBy: { startTimeSeconds: "asc" },
+        select: {
+          id: true,
+          startTimeSeconds: true,
+          endTimeSeconds: true,
+          type: true,
+          score: true,
+          summary: true,
+        },
+      }),
+    ]);
 
     return jsonResponse({
       eventWindows,
       transcriptChunks,
       audioEvents,
-      visualEvents,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to fetch events";

@@ -93,10 +93,10 @@ type HistoryEntry =
       at: number;
     };
 
-const VIDEO_TRACK_H = "min(22vh,100px)";
-const AUDIO_TRACK_H = "min(14vh,72px)";
-const CAPTION_TRACK_H = "min(10vh,56px)";
-const OVERLAY_TRACK_H = "36px";
+const VIDEO_TRACK_STYLE = { flex: "1.5 1 100px", minHeight: 52 };
+const AUDIO_TRACK_STYLE = { flex: "0.8 1 72px", minHeight: 34 };
+const CAPTION_TRACK_STYLE = { flex: "0.65 1 56px", minHeight: 36 };
+const OVERLAY_TRACK_STYLE = { flex: "0.4 1 36px", minHeight: 28 };
 
 const TRACK_LABEL_W = 52;
 const MIN_ZOOM = 1;
@@ -925,9 +925,9 @@ export function LiveTimeline({
             thumb.endTimeSeconds >= visibleTimeRange.start &&
             thumb.startTimeSeconds <= visibleTimeRange.end
         ),
-        360
+        Math.min(140, Math.max(48, Math.ceil(viewportWidth / 24) + 12))
       ),
-    [thumbnails, visibleTimeRange.start, visibleTimeRange.end]
+    [thumbnails, visibleTimeRange.start, visibleTimeRange.end, viewportWidth]
   );
 
   const visibleSegments = useMemo(
@@ -938,9 +938,9 @@ export function LiveTimeline({
             seg.endTimeSeconds >= visibleTimeRange.start &&
             seg.startTimeSeconds <= visibleTimeRange.end
         ),
-        500
+        Math.min(360, Math.max(100, Math.ceil(viewportWidth / 5)))
       ),
-    [segments, visibleTimeRange.start, visibleTimeRange.end]
+    [segments, visibleTimeRange.start, visibleTimeRange.end, viewportWidth]
   );
 
   const visibleWaveform = useMemo(
@@ -951,9 +951,9 @@ export function LiveTimeline({
             bucket.endTimeSeconds >= visibleTimeRange.start &&
             bucket.startTimeSeconds <= visibleTimeRange.end
         ),
-        900
+        Math.min(720, Math.max(180, Math.ceil(viewportWidth / 2)))
       ),
-    [audioWaveform, visibleTimeRange.start, visibleTimeRange.end]
+    [audioWaveform, visibleTimeRange.start, visibleTimeRange.end, viewportWidth]
   );
 
   const visibleAudioSpikes = useMemo(
@@ -974,7 +974,7 @@ export function LiveTimeline({
             cue.endTimeSeconds >= visibleTimeRange.start &&
             cue.startTimeSeconds <= visibleTimeRange.end
         ),
-        800,
+        Math.min(360, Math.max(120, Math.ceil(viewportWidth / 4))),
         (cue) => cue.id === selectedCaptionCueId
       ),
     [
@@ -982,6 +982,7 @@ export function LiveTimeline({
       visibleTimeRange.start,
       visibleTimeRange.end,
       selectedCaptionCueId,
+      viewportWidth,
     ]
   );
 
@@ -1137,7 +1138,10 @@ export function LiveTimeline({
       )}
 
       {/* Timeline body */}
-      <div ref={scrollRef} className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden">
+      <div
+        ref={scrollRef}
+        className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden"
+      >
         <div
           className="flex h-full"
           style={
@@ -1148,20 +1152,20 @@ export function LiveTimeline({
         >
           {/* Track labels gutter - stays visible while scrolling */}
           <div
-            className="sticky left-0 z-20 shrink-0 border-r border-[var(--color-card-border)] bg-[#020302] flex flex-col"
+            className="sticky left-0 z-20 flex h-full min-h-0 shrink-0 flex-col border-r border-[var(--color-card-border)] bg-[#020302]"
             style={{ width: TRACK_LABEL_W }}
           >
             <div className="h-7 border-b border-[var(--color-card-border)]" />
             <div
               className="flex items-center justify-center border-b border-[var(--color-card-border)]"
-              style={{ height: VIDEO_TRACK_H }}
+              style={VIDEO_TRACK_STYLE}
             >
               <span className="text-[10px] font-semibold text-[#9aa49a]">V1</span>
             </div>
             {showAudioTrack && (
               <div
                 className="flex items-center justify-center border-b border-[var(--color-card-border)]"
-                style={{ height: AUDIO_TRACK_H }}
+                style={AUDIO_TRACK_STYLE}
               >
                 <span className="text-[10px] font-semibold text-[var(--color-accent)]">A1</span>
               </div>
@@ -1169,7 +1173,7 @@ export function LiveTimeline({
             {showOverlayTrack && (
               <div
                 className="flex items-center justify-center border-b border-[var(--color-card-border)]"
-                style={{ height: OVERLAY_TRACK_H }}
+                style={OVERLAY_TRACK_STYLE}
               >
                 <span className="text-[10px] font-semibold text-[#f1efe7]">O1</span>
               </div>
@@ -1177,7 +1181,7 @@ export function LiveTimeline({
             {showCaptionTrack && (
               <div
                 className="flex items-center justify-center border-b border-[var(--color-card-border)]"
-                style={{ height: CAPTION_TRACK_H }}
+                style={CAPTION_TRACK_STYLE}
               >
                 <span className="text-[10px] font-semibold text-[#d7ff64]">CC</span>
               </div>
@@ -1186,7 +1190,7 @@ export function LiveTimeline({
 
           {/* Tracks + ruler */}
           <div
-            className="shrink-0 flex flex-col"
+            className="flex h-full min-h-0 shrink-0 flex-col"
             style={{ width: trackContentWidth || "100%" }}
           >
             {/* Ruler */}
@@ -1261,12 +1265,12 @@ export function LiveTimeline({
             </div>
 
             {/* Tracks stack - shared playhead spans video + captions */}
-            <div className="relative shrink-0">
+            <div className="relative flex min-h-0 flex-1 flex-col">
               {/* V1 Video track */}
               <div
                 ref={videoTrackRef}
                 className="relative bg-[#020302] border-b border-[var(--color-card-border)] cursor-crosshair"
-                style={{ height: VIDEO_TRACK_H }}
+                style={VIDEO_TRACK_STYLE}
                 onPointerDown={handleVideoTrackPointerDown}
               >
               {/* Filmstrip */}
@@ -1410,8 +1414,8 @@ export function LiveTimeline({
             {/* Audio loudness + spike lane */}
             {showAudioTrack && (
               <div
-                className="relative bg-[#031006] border-b border-[var(--color-card-border)] shrink-0 overflow-hidden"
-                style={{ height: AUDIO_TRACK_H }}
+                className="relative overflow-hidden border-b border-[var(--color-card-border)] bg-[#031006]"
+                style={AUDIO_TRACK_STYLE}
               >
                 {visibleWaveform.map((bucket, i) => (
                   <div
@@ -1470,8 +1474,8 @@ export function LiveTimeline({
 
             {showOverlayTrack && (
               <div
-                className="relative shrink-0 overflow-hidden border-b border-[var(--color-card-border)] bg-[#080908]"
-                style={{ height: OVERLAY_TRACK_H }}
+                className="relative overflow-hidden border-b border-[var(--color-card-border)] bg-[#080908]"
+                style={OVERLAY_TRACK_STYLE}
               >
                 {overlayBars.map(({ overlay, segment, start, end }) => (
                   <button
@@ -1500,7 +1504,7 @@ export function LiveTimeline({
                 cues={visibleCaptionCues}
                 maxTime={maxTime}
                 currentTime={currentTime}
-                height={CAPTION_TRACK_H}
+                style={CAPTION_TRACK_STYLE}
                 selectedCueId={selectedCaptionCueId}
                 onSelectCue={setSelectedCaptionCueId}
                 onSeek={onSeek}

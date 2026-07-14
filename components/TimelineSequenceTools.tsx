@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useDeferredValue, useMemo, useRef, useState } from "react";
 import { formatDuration, formatSeconds } from "@/lib/time";
 import {
   createEditorSegment,
@@ -35,6 +35,10 @@ interface TimelineSequenceToolsProps {
 
 type ToolPanel = "transcript" | "audio" | "overlays" | "markers" | null;
 
+const TRANSCRIPT_ROW_HEIGHT = 40;
+const TRANSCRIPT_VIEWPORT_HEIGHT = 264;
+const TRANSCRIPT_OVERSCAN = 6;
+
 export function TimelineSequenceTools({
   sessionId,
   state,
@@ -57,6 +61,8 @@ export function TimelineSequenceTools({
     new Set()
   );
   const [cleanupPreview, setCleanupPreview] = useState(false);
+  const [transcriptQuery, setTranscriptQuery] = useState("");
+  const [transcriptScrollTop, setTranscriptScrollTop] = useState(0);
   const [overlayText, setOverlayText] = useState("");
   const [uploading, setUploading] = useState(false);
   const [assetError, setAssetError] = useState<string | null>(null);
@@ -65,6 +71,33 @@ export function TimelineSequenceTools({
   const selectedSegment =
     state.segments.find((segment) => segment.id === selectedSegmentId) ?? null;
   const totalDuration = sequenceDuration(state.segments);
+  const deferredTranscriptQuery = useDeferredValue(
+    transcriptQuery.trim().toLowerCase()
+  );
+
+  const filteredTranscriptChunks = useMemo(() => {
+    if (!deferredTranscriptQuery) return captionChunks;
+    return captionChunks.filter((chunk) =>
+      chunk.text.toLowerCase().includes(deferredTranscriptQuery)
+    );
+  }, [captionChunks, deferredTranscriptQuery]);
+
+  const transcriptWindow = useMemo(() => {
+    const first = Math.max(
+      0,
+      Math.floor(transcriptScrollTop / TRANSCRIPT_ROW_HEIGHT) -
+        TRANSCRIPT_OVERSCAN
+    );
+    const count =
+      Math.ceil(TRANSCRIPT_VIEWPORT_HEIGHT / TRANSCRIPT_ROW_HEIGHT) +
+      TRANSCRIPT_OVERSCAN * 2;
+    const last = Math.min(filteredTranscriptChunks.length, first + count);
+    return {
+      first,
+      chunks: filteredTranscriptChunks.slice(first, last),
+      totalHeight: filteredTranscriptChunks.length * TRANSCRIPT_ROW_HEIGHT,
+    };
+  }, [filteredTranscriptChunks, transcriptScrollTop]);
 
   const cleanupRanges = useMemo(() => {
     const sorted = [...captionChunks].sort(
@@ -296,7 +329,7 @@ export function TimelineSequenceTools({
   }
 
   return (
-    <div className="shrink-0 border-b border-[var(--color-card-border)] bg-[#030503]">
+    <div className="relative z-40 shrink-0 border-b border-[var(--color-card-border)] bg-[#030503]">
       <div className="flex min-h-10 flex-wrap items-center gap-1.5 px-3 py-1.5">
         <ToolButton onClick={onUndo} disabled={!canUndo} title="Undo (Ctrl+Z)">
           Undo
@@ -410,7 +443,7 @@ export function TimelineSequenceTools({
       )}
 
       {panel === "transcript" && (
-        <div className="border-t border-[#172016] px-3 py-2">
+        <div className="absolute right-0 top-full z-50 w-full max-w-[760px] border border-[#263323] bg-[#030503] px-3 py-2 shadow-[0_22px_60px_rgba(0,0,0,0.72)]">
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <span className="text-[10px] font-semibold uppercase text-[var(--color-accent)]">
               Text-based edit
@@ -432,6 +465,9 @@ export function TimelineSequenceTools({
                 Apply cleanup
               </ToolButton>
             )}
+            <span className="ml-auto font-mono text-[9px] text-[#71806d]">
+              {filteredTranscriptChunks.length} lines
+            </span>
           </div>
           {cleanupPreview && cleanupRanges.length > 0 && (
             <div className="mb-2 flex max-h-16 flex-wrap gap-1 overflow-y-auto">
@@ -447,31 +483,62 @@ export function TimelineSequenceTools({
               ))}
             </div>
           )}
-          <div className="flex max-h-28 flex-wrap gap-1 overflow-y-auto">
-            {captionChunks.map((chunk) => (
-              <button
-                type="button"
-                key={chunk.id}
-                onClick={() => toggleTranscript(chunk.id)}
-                className={cn(
-                  "max-w-[22rem] border px-2 py-1 text-left text-[10px] leading-4",
-                  selectedTranscriptIds.has(chunk.id)
-                    ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-white"
-                    : "border-[#21301f] bg-[#070a07] text-[#a8b2a3]"
-                )}
-              >
-                <span className="mr-2 font-mono text-[var(--color-accent)]">
-                  {formatSeconds(chunk.startTimeSeconds)}
-                </span>
-                {chunk.text}
-              </button>
-            ))}
+          <input
+            value={transcriptQuery}
+            onChange={(event) => {
+              setTranscriptQuery(event.target.value);
+              setTranscriptScrollTop(0);
+            }}
+            placeholder="Search transcript"
+            className="mb-2 h-8 w-full border border-[#21301f] bg-[#070a07] px-2 text-xs text-white focus:border-[var(--color-accent)] focus:outline-none"
+          />
+          <div
+            className="relative overflow-y-auto border border-[#172016] bg-[#020302]"
+            style={{ height: TRANSCRIPT_VIEWPORT_HEIGHT }}
+            onScroll={(event) =>
+              setTranscriptScrollTop(event.currentTarget.scrollTop)
+            }
+          >
+            <div
+              className="relative w-full"
+              style={{ height: transcriptWindow.totalHeight }}
+            >
+              {transcriptWindow.chunks.map((chunk, index) => (
+                <button
+                  type="button"
+                  key={chunk.id}
+                  onClick={() => toggleTranscript(chunk.id)}
+                  className={cn(
+                    "absolute left-0 right-0 flex items-center border-b border-[#172016] px-2 text-left text-[10px]",
+                    selectedTranscriptIds.has(chunk.id)
+                      ? "bg-[var(--color-accent)]/10 text-white"
+                      : "bg-[#070a07] text-[#a8b2a3] hover:bg-[#0c120b]"
+                  )}
+                  style={{
+                    top:
+                      (transcriptWindow.first + index) *
+                      TRANSCRIPT_ROW_HEIGHT,
+                    height: TRANSCRIPT_ROW_HEIGHT,
+                  }}
+                >
+                  <span className="mr-2 shrink-0 font-mono text-[var(--color-accent)]">
+                    {formatSeconds(chunk.startTimeSeconds)}
+                  </span>
+                  <span className="truncate">{chunk.text}</span>
+                </button>
+              ))}
+              {filteredTranscriptChunks.length === 0 && (
+                <p className="absolute inset-x-0 top-10 text-center text-[10px] text-[#71806d]">
+                  No transcript lines match.
+                </p>
+              )}
+            </div>
           </div>
         </div>
       )}
 
       {panel === "audio" && (
-        <div className="flex flex-wrap items-center gap-3 border-t border-[#172016] px-3 py-2 text-[10px]">
+        <div className="absolute right-0 top-full z-50 flex w-full max-w-[760px] flex-wrap items-center gap-3 border border-[#263323] bg-[#030503] px-3 py-3 text-[10px] shadow-[0_22px_60px_rgba(0,0,0,0.72)]">
           {selectedSegment ? (
             <>
               <label className="flex items-center gap-2 text-[#aab5a5]">
@@ -541,7 +608,7 @@ export function TimelineSequenceTools({
       )}
 
       {panel === "overlays" && (
-        <div className="border-t border-[#172016] px-3 py-2">
+        <div className="absolute right-0 top-full z-50 w-full max-w-[760px] border border-[#263323] bg-[#030503] px-3 py-3 shadow-[0_22px_60px_rgba(0,0,0,0.72)]">
           <div className="flex flex-wrap items-center gap-2">
             <input
               value={overlayText}
@@ -623,7 +690,7 @@ export function TimelineSequenceTools({
       )}
 
       {panel === "markers" && (
-        <div className="flex max-h-28 flex-wrap gap-1 overflow-y-auto border-t border-[#172016] px-3 py-2">
+        <div className="absolute right-0 top-full z-50 flex max-h-56 w-full max-w-[760px] flex-wrap gap-1 overflow-y-auto border border-[#263323] bg-[#030503] px-3 py-3 shadow-[0_22px_60px_rgba(0,0,0,0.72)]">
           {markers.length === 0 ? (
             <span className="text-[10px] text-[#71806d]">Press M to mark the playhead.</span>
           ) : (
