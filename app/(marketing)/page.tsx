@@ -12,6 +12,27 @@ import { PRICING_PLANS } from "@/lib/pricing";
 
 export const metadata: Metadata = {
   alternates: { canonical: "/" },
+  openGraph: {
+    title: "Clipper — Turn Livestreams into Clips and Shorts",
+    description:
+      "Find the best moments in livestreams and VODs, add captions, and export 16:9 clips or 9:16 Shorts.",
+    url: "/",
+    images: [
+      {
+        url: "/opengraph-image",
+        width: 1200,
+        height: 630,
+        alt: "Clipper — Turn livestreams and VODs into clips and Shorts",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Clipper — AI Livestream Editor & Shorts Generator",
+    description:
+      "Search transcripts, caption clips, and export livestream highlights fast.",
+    images: ["/twitter-image"],
+  },
 };
 
 const HERO_SIGNALS = ["Live input", "AI transcript", "Fast export"];
@@ -103,15 +124,15 @@ const structuredData = {
   "@graph": [
     {
       "@type": "Organization",
-      "@id": "https://streamclipper.app/#organization",
+      "@id": "https://streamclipper.stream/#organization",
       name: "Clipper",
-      url: "https://streamclipper.app/",
+      url: "https://streamclipper.stream/",
     },
     {
       "@type": "SoftwareApplication",
-      "@id": "https://streamclipper.app/#software",
+      "@id": "https://streamclipper.stream/#software",
       name: "Clipper",
-      url: "https://streamclipper.app/",
+      url: "https://streamclipper.stream/",
       applicationCategory: "MultimediaApplication",
       operatingSystem: "Web",
       description:
@@ -123,7 +144,7 @@ const structuredData = {
         "Automatic captions",
         "16:9 and 9:16 video export",
       ],
-      provider: { "@id": "https://streamclipper.app/#organization" },
+      provider: { "@id": "https://streamclipper.stream/#organization" },
     },
     {
       "@type": "FAQPage",

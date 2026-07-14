@@ -12,7 +12,7 @@ const instrumentSerif = Instrument_Serif({
 
 export const metadata: Metadata = {
   metadataBase: new URL(
-    process.env.NEXT_PUBLIC_SITE_URL ?? "https://streamclipper.app"
+    process.env.NEXT_PUBLIC_SITE_URL ?? "https://streamclipper.stream"
   ),
   title: {
     default: "Clipper — AI Livestream Editor & Shorts Generator",
@@ -33,15 +33,25 @@ export const metadata: Metadata = {
     type: "website",
     url: "/",
     siteName: "Clipper",
+    locale: "en_US",
     title: "Clipper — Turn Livestreams into Clips and Shorts",
     description:
       "Find the best moments in livestreams and VODs, add captions, and export 16:9 clips or 9:16 Shorts.",
+    images: [
+      {
+        url: "/opengraph-image",
+        width: 1200,
+        height: 630,
+        alt: "Clipper — Turn livestreams and VODs into clips and Shorts",
+      },
+    ],
   },
   twitter: {
     card: "summary_large_image",
     title: "Clipper — AI Livestream Editor & Shorts Generator",
     description:
       "Search transcripts, caption clips, and export livestream highlights fast.",
+    images: ["/twitter-image"],
   },
   robots: {
     index: true,

@@ -1,6 +1,6 @@
 import type { MetadataRoute } from "next";
 
-const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "https://streamclipper.app";
+const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "https://streamclipper.stream";
 
 export default function robots(): MetadataRoute.Robots {
   return {
