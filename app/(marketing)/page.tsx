@@ -11,27 +11,29 @@ import { MarketingMarquee } from "@/components/MarketingMarquee";
 import { PRICING_PLANS } from "@/lib/pricing";
 
 export const metadata: Metadata = {
-  alternates: { canonical: "/" },
+  alternates: { canonical: "https://streamclipper.stream/" },
   openGraph: {
-    title: "Clipper — Turn Livestreams into Clips and Shorts",
+    title: "Clipper - Turn Livestreams into Clips and Shorts",
     description:
       "Find the best moments in livestreams and VODs, add captions, and export 16:9 clips or 9:16 Shorts.",
-    url: "/",
+    url: "https://streamclipper.stream/",
     images: [
       {
-        url: "/opengraph-image",
+        url: "https://streamclipper.stream/og.png",
+        secureUrl: "https://streamclipper.stream/og.png",
+        type: "image/png",
         width: 1200,
         height: 630,
-        alt: "Clipper — Turn livestreams and VODs into clips and Shorts",
+        alt: "Clipper - Turn livestreams and VODs into clips and Shorts",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Clipper — AI Livestream Editor & Shorts Generator",
+    title: "Clipper - AI Livestream Editor & Shorts Generator",
     description:
-      "Search transcripts, caption clips, and export livestream highlights fast.",
-    images: ["/twitter-image"],
+      "AI finds the best moments in livestreams and VODs. Cut, caption, and export Shorts fast.",
+    images: ["https://streamclipper.stream/og.png"],
   },
 };
 

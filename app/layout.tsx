@@ -15,7 +15,7 @@ export const metadata: Metadata = {
     process.env.NEXT_PUBLIC_SITE_URL ?? "https://streamclipper.stream"
   ),
   title: {
-    default: "Clipper — AI Livestream Editor & Shorts Generator",
+    default: "Clipper - AI Livestream Editor & Shorts Generator",
     template: "%s | Clipper",
   },
   description:
@@ -31,27 +31,29 @@ export const metadata: Metadata = {
   ],
   openGraph: {
     type: "website",
-    url: "/",
+    url: "https://streamclipper.stream/",
     siteName: "Clipper",
     locale: "en_US",
-    title: "Clipper — Turn Livestreams into Clips and Shorts",
+    title: "Clipper - Turn Livestreams into Clips and Shorts",
     description:
       "Find the best moments in livestreams and VODs, add captions, and export 16:9 clips or 9:16 Shorts.",
     images: [
       {
-        url: "/opengraph-image",
+        url: "https://streamclipper.stream/og.png",
+        secureUrl: "https://streamclipper.stream/og.png",
+        type: "image/png",
         width: 1200,
         height: 630,
-        alt: "Clipper — Turn livestreams and VODs into clips and Shorts",
+        alt: "Clipper - Turn livestreams and VODs into clips and Shorts",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Clipper — AI Livestream Editor & Shorts Generator",
+    title: "Clipper - AI Livestream Editor & Shorts Generator",
     description:
-      "Search transcripts, caption clips, and export livestream highlights fast.",
-    images: ["/twitter-image"],
+      "AI finds the best moments in livestreams and VODs. Cut, caption, and export Shorts fast.",
+    images: ["https://streamclipper.stream/og.png"],
   },
   robots: {
     index: true,
