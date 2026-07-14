@@ -43,6 +43,7 @@ import {
   sanitizeDurationSeconds,
   sanitizeStreamStartDate,
 } from "@/lib/timelineBounds";
+import type { MarkerKind, TimelineMarker } from "@/lib/editorState";
 
 interface SessionData {
   id: string;
@@ -83,6 +84,14 @@ function timelineThumbsEqual(
         t.url === prev[i]?.url
     )
   );
+}
+
+function markerKindFromEvent(type: string): MarkerKind {
+  const normalized = type.toLowerCase();
+  if (normalized.includes("laugh") || normalized.includes("funny")) return "laughter";
+  if (normalized.includes("chat")) return "chat";
+  if (normalized.includes("topic")) return "topic";
+  return "hype";
 }
 
 export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
@@ -127,6 +136,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
     readCaptionAppearancePreference
   );
   const [audioSpikes, setAudioSpikes] = useState<AudioSpikeMarker[]>([]);
+  const [aiMarkers, setAiMarkers] = useState<TimelineMarker[]>([]);
   const [audioWaveform, setAudioWaveform] = useState<WaveformBucket[]>([]);
   const [captionEdits, setCaptionEdits] = useState<CaptionEditsMap>({});
   const [assistantOpen, setAssistantOpen] = useState(false);
@@ -153,7 +163,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   }, [seekTo]);
 
   const scrubTo = useCallback((seconds: number) => {
-    playerRef.current?.seekTo(seconds, { play: true });
+    playerRef.current?.seekTo(seconds, { play: false });
     setCurrentTime(seconds);
   }, []);
 
@@ -271,6 +281,14 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
 
       const { ok, data } = await fetchJson<{
         transcriptChunks?: typeof transcripts;
+        eventWindows?: Array<{
+          id: string;
+          startTimeSeconds: number;
+          endTimeSeconds: number;
+          type: string;
+          score: number;
+          summary?: string | null;
+        }>;
         audioEvents?: Array<{
           id: string;
           startTimeSeconds: number;
@@ -284,6 +302,17 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       if (!ok) return;
 
       const chunks = data.transcriptChunks ?? [];
+      setAiMarkers(
+        (data.eventWindows ?? []).map((event) => ({
+          id: `event-${event.id}`,
+          timeSeconds: event.startTimeSeconds,
+          endTimeSeconds: event.endTimeSeconds,
+          label: event.summary?.trim() || event.type.replace(/_/g, " "),
+          kind: markerKindFromEvent(event.type),
+          score: event.score,
+          source: "ai",
+        }))
+      );
       setAudioSpikes(
         selectAudioSpikesForTimeline(
           buildAudioSpikeMarkers(data.audioEvents ?? [])
@@ -702,6 +731,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
               onCaptionEdit={handleCaptionEdit}
               audioWaveform={audioWaveform}
               audioSpikes={audioSpikes}
+              aiMarkers={aiMarkers}
               showAudioLane={
                 recordedSeconds > 0 ||
                 streamDuration > LIVE_SEGMENT_SECONDS ||

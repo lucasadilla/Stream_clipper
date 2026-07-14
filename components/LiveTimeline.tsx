@@ -10,6 +10,7 @@ import { applyCaptionEdits, clampCueRange, type CaptionEditsMap } from "@/lib/ca
 import { CaptionTimelineTrack, type CaptionDragMode } from "@/components/CaptionTimelineTrack";
 import { CaptionCueEditor } from "@/components/CaptionCueEditor";
 import { RenderClipModal } from "@/components/RenderClipModal";
+import { TimelineSequenceTools } from "@/components/TimelineSequenceTools";
 import { MIN_CLIP_SECONDS, MAX_CLIP_SECONDS } from "@/lib/clipConstants";
 import { cn } from "@/lib/cn";
 import type { LiveTimelineSegment } from "@/lib/timelineSegments";
@@ -21,6 +22,14 @@ import {
   type AudioSpikeIntensity,
   type WaveformBucket,
 } from "@/lib/audioSpikeTimeline";
+import {
+  emptyEditorState,
+  normalizeEditorState,
+  segmentDuration,
+  sequenceDuration,
+  type EditorState,
+  type TimelineMarker,
+} from "@/lib/editorState";
 
 export interface ClipSelection {
   start: number;
@@ -64,12 +73,30 @@ interface LiveTimelineProps {
   ) => void;
   audioWaveform?: WaveformBucket[];
   audioSpikes?: AudioSpikeMarker[];
+  aiMarkers?: TimelineMarker[];
   showAudioLane?: boolean;
 }
+
+type CaptionPatch = Partial<{
+  text: string;
+  startTimeSeconds: number;
+  endTimeSeconds: number;
+}>;
+
+type HistoryEntry =
+  | { type: "state"; before: EditorState; after: EditorState }
+  | {
+      type: "caption";
+      cueId: string;
+      before: CaptionPatch;
+      after: CaptionPatch;
+      at: number;
+    };
 
 const VIDEO_TRACK_H = "min(22vh,100px)";
 const AUDIO_TRACK_H = "min(14vh,72px)";
 const CAPTION_TRACK_H = "min(10vh,56px)";
+const OVERLAY_TRACK_H = "36px";
 
 const TRACK_LABEL_W = 52;
 const MIN_ZOOM = 1;
@@ -189,6 +216,7 @@ export function LiveTimeline({
   onCaptionEdit,
   audioWaveform = [],
   audioSpikes = [],
+  aiMarkers = [],
   showAudioLane = false,
 }: LiveTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -200,6 +228,12 @@ export function LiveTimeline({
     null
   );
   const [renderModalOpen, setRenderModalOpen] = useState(false);
+  const [editorState, setEditorState] = useState<EditorState>(emptyEditorState);
+  const [editorLoaded, setEditorLoaded] = useState(false);
+  const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null);
+  const undoStack = useRef<HistoryEntry[]>([]);
+  const redoStack = useRef<HistoryEntry[]>([]);
+  const [historyVersion, setHistoryVersion] = useState(0);
 
   useEffect(() => {
     if (!renderModalOpen) return;
@@ -231,6 +265,127 @@ export function LiveTimeline({
     )
   );
 
+  const commitEditorState = useCallback((nextValue: EditorState) => {
+    const next = normalizeEditorState(nextValue);
+    setEditorState((current) => {
+      if (JSON.stringify(current) === JSON.stringify(next)) return current;
+      undoStack.current.push({ type: "state", before: current, after: next });
+      if (undoStack.current.length > 100) undoStack.current.shift();
+      redoStack.current = [];
+      setHistoryVersion((version) => version + 1);
+      return next;
+    });
+  }, []);
+
+  const commitCaptionEdit = useCallback(
+    (cueId: string, patch: CaptionPatch) => {
+      if (!onCaptionEdit) return;
+      const cue = applyCaptionEdits(
+        buildCaptionTrack(captionChunks, "native"),
+        captionEdits
+      ).find((item) => item.id === cueId);
+      if (!cue) {
+        onCaptionEdit(cueId, patch);
+        return;
+      }
+      const before: CaptionPatch = {
+        text: cue.text,
+        startTimeSeconds: cue.startTimeSeconds,
+        endTimeSeconds: cue.endTimeSeconds,
+      };
+      const after: CaptionPatch = { ...before, ...patch };
+      const previous = undoStack.current[undoStack.current.length - 1];
+      if (
+        previous?.type === "caption" &&
+        previous.cueId === cueId &&
+        Date.now() - previous.at < 700
+      ) {
+        previous.after = after;
+        previous.at = Date.now();
+      } else {
+        undoStack.current.push({
+          type: "caption",
+          cueId,
+          before,
+          after,
+          at: Date.now(),
+        });
+        if (undoStack.current.length > 100) undoStack.current.shift();
+      }
+      redoStack.current = [];
+      setHistoryVersion((version) => version + 1);
+      onCaptionEdit(cueId, patch);
+    },
+    [captionChunks, captionEdits, onCaptionEdit]
+  );
+
+  const undo = useCallback(() => {
+    const entry = undoStack.current.pop();
+    if (!entry) return;
+    redoStack.current.push(entry);
+    if (entry.type === "state") setEditorState(entry.before);
+    else onCaptionEdit?.(entry.cueId, entry.before);
+    setHistoryVersion((version) => version + 1);
+  }, [onCaptionEdit]);
+
+  const redo = useCallback(() => {
+    const entry = redoStack.current.pop();
+    if (!entry) return;
+    undoStack.current.push(entry);
+    if (entry.type === "state") setEditorState(entry.after);
+    else onCaptionEdit?.(entry.cueId, entry.after);
+    setHistoryVersion((version) => version + 1);
+  }, [onCaptionEdit]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const storageKey = `clipper-editor-state:${sessionId}`;
+    async function loadEditorState() {
+      try {
+        const response = await fetch(`/api/sessions/${sessionId}/editor-state`);
+        const data = (await response.json()) as { state?: unknown };
+        if (!cancelled && response.ok) {
+          const loaded = normalizeEditorState(data.state);
+          setEditorState(loaded);
+          setSelectedSegmentId(loaded.segments[0]?.id ?? null);
+          localStorage.setItem(storageKey, JSON.stringify(loaded));
+          setEditorLoaded(true);
+          return;
+        }
+      } catch {
+        // Fall through to the browser copy.
+      }
+      if (cancelled) return;
+      try {
+        const cached = localStorage.getItem(storageKey);
+        const loaded = normalizeEditorState(cached ? JSON.parse(cached) : null);
+        setEditorState(loaded);
+        setSelectedSegmentId(loaded.segments[0]?.id ?? null);
+      } catch {
+        setEditorState(emptyEditorState());
+      }
+      setEditorLoaded(true);
+    }
+    void loadEditorState();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!editorLoaded) return;
+    const storageKey = `clipper-editor-state:${sessionId}`;
+    localStorage.setItem(storageKey, JSON.stringify(editorState));
+    const timer = window.setTimeout(() => {
+      void fetch(`/api/sessions/${sessionId}/editor-state`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state: editorState }),
+      });
+    }, 650);
+    return () => window.clearTimeout(timer);
+  }, [editorLoaded, editorState, sessionId]);
+
   const trackContentWidth =
     viewportWidth > 0 ? viewportWidth * normalizeZoom(zoom) : 0;
 
@@ -254,6 +409,83 @@ export function LiveTimeline({
     showAudioLane ||
     waveformHasSignal(audioWaveform) ||
     audioSpikes.length > 0;
+
+  const timelineMarkers = useMemo(() => {
+    const audioMarkers: TimelineMarker[] = audioSpikes.map((marker) => ({
+      id: `audio-${marker.id}`,
+      timeSeconds: marker.startTimeSeconds,
+      endTimeSeconds: marker.endTimeSeconds,
+      label:
+        marker.summary ||
+        (marker.type === "volume_spike" ? "Volume spike" : "Loud section"),
+      kind: "audio",
+      score: marker.score,
+      source: "ai",
+    }));
+    const byId = new Map<string, TimelineMarker>();
+    for (const marker of [...editorState.markers, ...aiMarkers, ...audioMarkers]) {
+      byId.set(marker.id, marker);
+    }
+    return [...byId.values()].sort((a, b) => a.timeSeconds - b.timeSeconds);
+  }, [aiMarkers, audioSpikes, editorState.markers]);
+
+  const snapPoints = useMemo(
+    () => [
+      ...captionCues.flatMap((cue) => [cue.startTimeSeconds, cue.endTimeSeconds]),
+      ...timelineMarkers.flatMap((marker) => [
+        marker.timeSeconds,
+        ...(marker.endTimeSeconds != null ? [marker.endTimeSeconds] : []),
+      ]),
+    ],
+    [captionCues, timelineMarkers]
+  );
+
+  const snapTimelineTime = useCallback(
+    (seconds: number, fallbackStep = 1 / 30) => {
+      const frameTime = snapTime(seconds, fallbackStep);
+      if (!editorState.settings.snapping || snapPoints.length === 0) {
+        return Math.max(0, Math.min(maxTime, frameTime));
+      }
+      const threshold = Math.min(
+        0.4,
+        Math.max(0.04, maxTime / Math.max(1, viewportWidth * zoom) * 9)
+      );
+      let closest = frameTime;
+      let distance = threshold;
+      for (const point of snapPoints) {
+        const nextDistance = Math.abs(point - seconds);
+        if (nextDistance <= distance) {
+          closest = point;
+          distance = nextDistance;
+        }
+      }
+      return Math.max(0, Math.min(maxTime, closest));
+    },
+    [editorState.settings.snapping, maxTime, snapPoints, viewportWidth, zoom]
+  );
+
+  const addManualMarker = useCallback(() => {
+    const marker: TimelineMarker = {
+      id: crypto.randomUUID(),
+      timeSeconds: currentTime,
+      label: `Marker ${editorState.markers.length + 1}`,
+      kind: "manual",
+      source: "manual",
+    };
+    commitEditorState({
+      ...editorState,
+      markers: [...editorState.markers, marker],
+    });
+  }, [commitEditorState, currentTime, editorState]);
+
+  useEffect(() => {
+    if (
+      selectedSegmentId &&
+      !editorState.segments.some((segment) => segment.id === selectedSegmentId)
+    ) {
+      setSelectedSegmentId(editorState.segments[0]?.id ?? null);
+    }
+  }, [editorState.segments, selectedSegmentId]);
 
   function handleAudioSpikeClick(marker: AudioSpikeMarker) {
     const start = marker.startTimeSeconds;
@@ -424,9 +656,9 @@ export function LiveTimeline({
         dragging === "cue-start" ||
         dragging === "cue-end" ||
         dragging === "cue-move";
-      const t = snapTime(
+      const t = snapTimelineTime(
         isCueDrag ? timeFromCaptionTrack(e.clientX) : timeFromVideoTrack(e.clientX),
-        isCueDrag ? 0.05 : 1
+        1 / 30
       );
       const origin = dragOrigin.current;
 
@@ -448,19 +680,19 @@ export function LiveTimeline({
         start = Math.max(0, Math.min(start, maxTime - width));
         onSelectionChange({ start, end: start + width });
       } else if (dragging === "scrub") {
-        const scrubT = snapTime(
+        const scrubT = snapTimelineTime(
           videoTrackRef.current
             ? timeFromVideoTrack(e.clientX)
             : timeFromRef(e.clientX, rulerRef),
-          0.1
+          1 / 30
         );
         onScrub(scrubT);
       } else if (dragging === "cue-start" && origin.cueId && onCaptionEdit) {
         const range = clampCueRange(t, origin.cueEnd, maxTime);
-        onCaptionEdit(origin.cueId, range);
+        commitCaptionEdit(origin.cueId, range);
       } else if (dragging === "cue-end" && origin.cueId && onCaptionEdit) {
         const range = clampCueRange(origin.cueStart, t, maxTime);
-        onCaptionEdit(origin.cueId, range);
+        commitCaptionEdit(origin.cueId, range);
       } else if (dragging === "cue-move" && origin.cueId && onCaptionEdit) {
         const el = captionTrackRef.current ?? videoTrackRef.current;
         if (!el) return;
@@ -469,7 +701,7 @@ export function LiveTimeline({
         const delta = dt * maxTime;
         let start = origin.cueStart + delta;
         start = Math.max(0, Math.min(start, maxTime - width));
-        onCaptionEdit(origin.cueId, {
+        commitCaptionEdit(origin.cueId, {
           startTimeSeconds: start,
           endTimeSeconds: start + width,
         });
@@ -492,6 +724,8 @@ export function LiveTimeline({
     onSelectionChange,
     onScrub,
     onCaptionEdit,
+    commitCaptionEdit,
+    snapTimelineTime,
     timeFromRef,
     timeFromVideoTrack,
     timeFromCaptionTrack,
@@ -563,8 +797,100 @@ export function LiveTimeline({
     function onKey(e: KeyboardEvent) {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)
         return;
-      if (e.key === "i" || e.key === "I") setInPoint();
-      if (e.key === "o" || e.key === "O") setOutPoint();
+      const key = e.key.toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && key === "z") {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
+        return;
+      }
+      if (key === "i") setInPoint();
+      if (key === "o") setOutPoint();
+      if (key === "m") addManualMarker();
+      if (key === "j") onSeek(Math.max(0, currentTime - 2));
+      if (key === "k") onPause();
+      if (key === "l") onSeek(currentTime);
+
+      const selectedSegment = editorState.segments.find(
+        (segment) => segment.id === selectedSegmentId
+      );
+      if (key === "b" && selectedSegment) {
+        if (
+          currentTime > selectedSegment.sourceStart + 0.15 &&
+          currentTime < selectedSegment.sourceEnd - 0.15
+        ) {
+          const index = editorState.segments.findIndex(
+            (segment) => segment.id === selectedSegment.id
+          );
+          const left = {
+            ...selectedSegment,
+            id: crypto.randomUUID(),
+            sourceEnd: currentTime,
+            label: `${selectedSegment.label} A`,
+          };
+          const right = {
+            ...selectedSegment,
+            id: crypto.randomUUID(),
+            sourceStart: currentTime,
+            label: `${selectedSegment.label} B`,
+          };
+          const next = [...editorState.segments];
+          next.splice(index, 1, left, right);
+          commitEditorState({ ...editorState, segments: next });
+          setSelectedSegmentId(right.id);
+          onSelectionChange({ start: right.sourceStart, end: right.sourceEnd });
+        }
+      }
+
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedSegment) {
+        e.preventDefault();
+        const next = editorState.segments.filter(
+          (segment) => segment.id !== selectedSegment.id
+        );
+        commitEditorState({
+          ...editorState,
+          segments: next,
+          overlays: editorState.overlays.filter(
+            (overlay) => overlay.segmentId !== selectedSegment.id
+          ),
+        });
+        setSelectedSegmentId(next[0]?.id ?? null);
+      }
+
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        e.preventDefault();
+        const delta = (e.key === "ArrowLeft" ? -1 : 1) / 30;
+        if (e.altKey && selectedSegment) {
+          const nextSelection = e.shiftKey
+            ? clampSelection(
+                selectedSegment.sourceStart,
+                selectedSegment.sourceEnd + delta,
+                maxTime
+              )
+            : clampSelection(
+                selectedSegment.sourceStart + delta,
+                selectedSegment.sourceEnd,
+                maxTime,
+                { fixedEnd: true }
+              );
+          onSelectionChange(nextSelection);
+          commitEditorState({
+            ...editorState,
+            segments: editorState.segments.map((segment) =>
+              segment.id === selectedSegment.id
+                ? {
+                    ...segment,
+                    sourceStart: nextSelection.start,
+                    sourceEnd: nextSelection.end,
+                  }
+                : segment
+            ),
+          });
+        } else {
+          onPause();
+          onScrub(Math.max(0, Math.min(maxTime, currentTime + delta)));
+        }
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -659,7 +985,14 @@ export function LiveTimeline({
     ]
   );
 
-  const tickStep = getTickStep(maxTime, zoom);
+  let tickStep = getTickStep(maxTime, zoom);
+  while (
+    maxTime > 0 &&
+    trackContentWidth > 0 &&
+    (tickStep / maxTime) * trackContentWidth < 52
+  ) {
+    tickStep *= 2;
+  }
   const rulerTicks: number[] = [];
   const maxTicks = 400;
   for (
@@ -672,6 +1005,23 @@ export function LiveTimeline({
 
   const zoomLabel = zoom <= 1.02 ? "Fit" : `${Math.round(zoom * 100)}%`;
   const atMinZoom = zoom <= 1.02;
+  const renderDuration =
+    editorState.segments.length > 0
+      ? sequenceDuration(editorState.segments)
+      : selection.end - selection.start;
+  const canUndo = historyVersion >= 0 && undoStack.current.length > 0;
+  const canRedo = historyVersion >= 0 && redoStack.current.length > 0;
+  const showOverlayTrack = editorState.overlays.length > 0;
+  const overlayBars = editorState.overlays.flatMap((overlay) => {
+    const segment = editorState.segments.find((item) => item.id === overlay.segmentId);
+    if (!segment) return [];
+    const start = segment.sourceStart + overlay.startOffsetSeconds;
+    const end = Math.min(
+      segment.sourceEnd,
+      segment.sourceStart + overlay.endOffsetSeconds
+    );
+    return end > start ? [{ overlay, segment, start, end }] : [];
+  });
 
   return (
     <>
@@ -741,11 +1091,11 @@ export function LiveTimeline({
             type="button"
             onClick={() => setRenderModalOpen(true)}
             disabled={
-              selection.end - selection.start < MIN_CLIP_SECONDS ||
-              selection.end - selection.start > MAX_CLIP_SECONDS
+              renderDuration < MIN_CLIP_SECONDS ||
+              renderDuration > MAX_CLIP_SECONDS
             }
             title={
-              selection.end - selection.start > MAX_CLIP_SECONDS
+              renderDuration > MAX_CLIP_SECONDS
                 ? `Clip must be ${MAX_CLIP_SECONDS / 60} minutes or shorter`
                 : "Render clip - pick aspect ratio, title, and export options"
             }
@@ -760,10 +1110,28 @@ export function LiveTimeline({
         </div>
       </div>
 
+      <TimelineSequenceTools
+        sessionId={sessionId}
+        state={editorState}
+        maxTime={maxTime}
+        selection={selection}
+        currentTime={currentTime}
+        selectedSegmentId={selectedSegmentId}
+        markers={timelineMarkers}
+        captionChunks={captionChunks}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onCommit={commitEditorState}
+        onSelectionChange={onSelectionChange}
+        onSelectSegment={setSelectedSegmentId}
+        onUndo={undo}
+        onRedo={redo}
+      />
+
       {selectedCaptionCue && onCaptionEdit && (
         <CaptionCueEditor
           cue={selectedCaptionCue}
-          onSave={(text) => onCaptionEdit(selectedCaptionCue.id, { text })}
+          onSave={(text) => commitCaptionEdit(selectedCaptionCue.id, { text })}
           onClose={() => setSelectedCaptionCueId(null)}
         />
       )}
@@ -798,6 +1166,14 @@ export function LiveTimeline({
                 <span className="text-[10px] font-semibold text-[var(--color-accent)]">A1</span>
               </div>
             )}
+            {showOverlayTrack && (
+              <div
+                className="flex items-center justify-center border-b border-[var(--color-card-border)]"
+                style={{ height: OVERLAY_TRACK_H }}
+              >
+                <span className="text-[10px] font-semibold text-[#f1efe7]">O1</span>
+              </div>
+            )}
             {showCaptionTrack && (
               <div
                 className="flex items-center justify-center border-b border-[var(--color-card-border)]"
@@ -818,7 +1194,7 @@ export function LiveTimeline({
               ref={rulerRef}
               className="relative h-7 bg-[#030403] border-b border-[var(--color-card-border)] cursor-ew-resize shrink-0"
               onPointerDown={(e) => {
-                const t = snapTime(timeFromRef(e.clientX, rulerRef), 0.1);
+                const t = snapTimelineTime(timeFromRef(e.clientX, rulerRef), 1 / 30);
                 onScrub(t);
                 beginDrag("scrub", e);
               }}
@@ -835,6 +1211,46 @@ export function LiveTimeline({
                   </span>
                 </div>
               ))}
+              {timelineMarkers
+                .filter(
+                  (marker) =>
+                    marker.timeSeconds >= visibleTimeRange.start &&
+                    marker.timeSeconds <= visibleTimeRange.end
+                )
+                .map((marker) => (
+                  <button
+                    key={marker.id}
+                    type="button"
+                    title={`${marker.label}${marker.score != null ? ` / score ${marker.score.toFixed(1)}` : ""}`}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={() => {
+                      onPause();
+                      onScrub(marker.timeSeconds);
+                      if (marker.endTimeSeconds != null) {
+                        onSelectionChange(
+                          clampSelection(
+                            marker.timeSeconds,
+                            marker.endTimeSeconds,
+                            maxTime
+                          )
+                        );
+                      }
+                    }}
+                    className={cn(
+                      "absolute top-0 z-10 h-3 w-2 -translate-x-1 border-x-[4px] border-x-transparent border-t-[7px]",
+                      marker.kind === "manual"
+                        ? "border-t-white"
+                        : marker.kind === "audio"
+                          ? "border-t-[var(--color-accent)]"
+                          : marker.kind === "laughter"
+                            ? "border-t-[#ffb84d]"
+                            : marker.kind === "chat"
+                              ? "border-t-[#62d4a4]"
+                              : "border-t-[#d7ff64]"
+                    )}
+                    style={{ left: `${pct(marker.timeSeconds, maxTime)}%` }}
+                  />
+                ))}
               {!renderModalOpen && (
                 <Playhead
                   percent={playheadPct}
@@ -931,6 +1347,41 @@ export function LiveTimeline({
                 />
               )}
 
+              {editorState.segments.map((segment, index) => (
+                <button
+                  key={`sequence-source-${segment.id}`}
+                  type="button"
+                  title={`${index + 1}. ${segment.label} / ${formatDuration(segmentDuration(segment))}`}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={() => {
+                    setSelectedSegmentId(segment.id);
+                    onSelectionChange({
+                      start: segment.sourceStart,
+                      end: segment.sourceEnd,
+                    });
+                    onPause();
+                    onScrub(segment.sourceStart);
+                  }}
+                  className={cn(
+                    "absolute bottom-1 top-1 z-[3] border bg-black/36 text-left",
+                    selectedSegmentId === segment.id
+                      ? "border-white/85"
+                      : "border-[var(--color-accent)]/55"
+                  )}
+                  style={{
+                    left: `${pct(segment.sourceStart, maxTime)}%`,
+                    width: `${Math.max(
+                      pct(segmentDuration(segment), maxTime),
+                      0.3
+                    )}%`,
+                  }}
+                >
+                  <span className="absolute left-1 top-1 bg-[#020302]/85 px-1 font-mono text-[9px] text-[var(--color-accent)]">
+                    {index + 1}
+                  </span>
+                </button>
+              ))}
+
               {/* Active clip selection. */}
               <div
                 className="absolute top-0 bottom-0 z-[5] border-2 border-[var(--color-accent)]"
@@ -1017,6 +1468,32 @@ export function LiveTimeline({
               </div>
             )}
 
+            {showOverlayTrack && (
+              <div
+                className="relative shrink-0 overflow-hidden border-b border-[var(--color-card-border)] bg-[#080908]"
+                style={{ height: OVERLAY_TRACK_H }}
+              >
+                {overlayBars.map(({ overlay, segment, start, end }) => (
+                  <button
+                    key={overlay.id}
+                    type="button"
+                    title={`${overlay.type}: ${overlay.label}`}
+                    onClick={() => {
+                      setSelectedSegmentId(segment.id);
+                      onSelectionChange({ start, end });
+                    }}
+                    className="absolute bottom-1 top-1 min-w-[3px] overflow-hidden border border-[#f1efe7]/55 bg-[#f1efe7]/10 px-1 text-left text-[9px] text-[#f1efe7]"
+                    style={{
+                      left: `${pct(start, maxTime)}%`,
+                      width: `${Math.max(pct(end - start, maxTime), 0.3)}%`,
+                    }}
+                  >
+                    <span className="truncate">{overlay.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* CC Caption track - editable */}
             {showCaptionTrack && (
               <CaptionTimelineTrack
@@ -1053,6 +1530,7 @@ export function LiveTimeline({
       includeCaptions={includeCaptions}
       captionAppearance={captionAppearance}
       captionCues={captionCues}
+      editorState={editorState}
       onClipCreated={onClipCreated}
     />
     </>

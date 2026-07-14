@@ -34,6 +34,11 @@ import {
   formatMaxClipLabel,
 } from "@/lib/clipConstants";
 import type { BillingAccountSummary } from "@/services/billingService";
+import {
+  sequenceBounds,
+  sequenceDuration,
+  type EditorState,
+} from "@/lib/editorState";
 
 interface RenderClipModalProps {
   open: boolean;
@@ -43,6 +48,7 @@ interface RenderClipModalProps {
   includeCaptions?: boolean;
   captionAppearance?: CaptionAppearance;
   captionCues?: CaptionCue[];
+  editorState?: EditorState;
   onClipCreated?: () => void;
 }
 
@@ -57,6 +63,7 @@ export function RenderClipModal({
   includeCaptions = true,
   captionAppearance,
   captionCues = [],
+  editorState,
   onClipCreated,
 }: RenderClipModalProps) {
   const [mounted, setMounted] = useState(false);
@@ -82,7 +89,11 @@ export function RenderClipModal({
   const [marketingSaving, setMarketingSaving] = useState(false);
   const [betaAccess, setBetaAccess] = useState(false);
 
-  const duration = selection.end - selection.start;
+  const sequence = editorState?.segments ?? [];
+  const bounds = sequenceBounds(sequence);
+  const effectiveSelection = bounds ?? selection;
+  const duration =
+    sequence.length > 0 ? sequenceDuration(sequence) : selection.end - selection.start;
   const maxClipSeconds = betaAccess ? 60 : MAX_CLIP_SECONDS;
   const canRender =
     duration >= MIN_CLIP_SECONDS && duration <= maxClipSeconds;
@@ -102,7 +113,7 @@ export function RenderClipModal({
     setExportStep("saving");
     setExportProgress(0);
     setFormat("native");
-    setTitle(`Clip ${formatSeconds(selection.start)}`);
+    setTitle(`Clip ${formatSeconds(effectiveSelection.start)}`);
     setDescription("");
     setTagsText("");
     setBurnCaptions(includeCaptions);
@@ -116,7 +127,7 @@ export function RenderClipModal({
     setDownloadDone(false);
     setMarketingApproved(false);
     setMarketingSaving(false);
-  }, [open, selection.start, selection.end, includeCaptions]);
+  }, [open, effectiveSelection.start, effectiveSelection.end, includeCaptions]);
 
   useEffect(() => {
     if (!open) return;
@@ -137,7 +148,7 @@ export function RenderClipModal({
     .filter(Boolean);
 
   const uploadCopy: ClipMetadata = {
-    title: title.trim() || `Clip ${formatSeconds(selection.start)}`,
+    title: title.trim() || `Clip ${formatSeconds(effectiveSelection.start)}`,
     description,
     hashtags,
   };
@@ -153,8 +164,8 @@ export function RenderClipModal({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            startTimeSeconds: selection.start,
-            endTimeSeconds: selection.end,
+            startTimeSeconds: effectiveSelection.start,
+            endTimeSeconds: effectiveSelection.end,
           }),
         }
       );
@@ -188,8 +199,8 @@ export function RenderClipModal({
       burn_captions: burnCaptions,
     });
     try {
-      const clipTitle = title.trim() || `Clip ${formatSeconds(selection.start)}`;
-      const clip = await saveClip(sessionId, selection, clipTitle);
+      const clipTitle = title.trim() || `Clip ${formatSeconds(effectiveSelection.start)}`;
+      const clip = await saveClip(sessionId, effectiveSelection, clipTitle);
 
       setExportStep("rendering");
       const result = await renderClip(
@@ -197,15 +208,21 @@ export function RenderClipModal({
         format,
         burnCaptions,
         captionAppearance,
-        captionCues.filter(
-          (cue) =>
-            cue.startTimeSeconds <= selection.end &&
-            cue.endTimeSeconds >= selection.start
+        captionCues.filter((cue) =>
+          sequence.length > 0
+            ? sequence.some(
+                (segment) =>
+                  cue.startTimeSeconds <= segment.sourceEnd &&
+                  cue.endTimeSeconds >= segment.sourceStart
+              )
+            : cue.startTimeSeconds <= selection.end &&
+              cue.endTimeSeconds >= selection.start
         ),
         (update) => {
           setExportProgress(update.progress);
           setExportStep("rendering");
-        }
+        },
+        editorState
       );
 
       const url = result.downloadUrl ?? clipDownloadUrl(clip.id);
@@ -329,8 +346,9 @@ export function RenderClipModal({
                   : "Render clip"}
             </h2>
             <p className="mt-0.5 font-mono text-xs tabular-nums text-[var(--color-muted)]">
-              {formatSeconds(selection.start)} to {formatSeconds(selection.end)} (
-              {formatDuration(duration)})
+              {sequence.length > 0
+                ? `${sequence.length} cuts / ${formatDuration(duration)}`
+                : `${formatSeconds(effectiveSelection.start)} to ${formatSeconds(effectiveSelection.end)} (${formatDuration(duration)})`}
             </p>
           </div>
           <button

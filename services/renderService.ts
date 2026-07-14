@@ -2,8 +2,12 @@ import path from "path";
 import fs from "fs/promises";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
-import { renderShort as ffmpegRender, isFfmpegAvailable, formatFfmpegProcessError } from "@/lib/ffmpeg";
-import { generateSrt } from "@/lib/time";
+import {
+  renderShort as ffmpegRender,
+  renderSequence as ffmpegRenderSequence,
+  isFfmpegAvailable,
+  formatFfmpegProcessError,
+} from "@/lib/ffmpeg";
 import { formatCaptionTextForBurn } from "@/lib/captionStyles";
 import { generateAss } from "@/lib/captionAss";
 import { buildCaptionTrack, type CaptionWord } from "@/lib/captionTrack";
@@ -28,6 +32,15 @@ import {
   makeRenderJobLogEntry,
   parseRenderJobLogs,
 } from "@/lib/renderJobLogs";
+import {
+  normalizeEditorState,
+  outputTimeForSegment,
+  segmentDuration,
+  sequenceBounds,
+  type EditorSegment,
+  type EditorOverlay,
+  type EditorState,
+} from "@/lib/editorState";
 
 export interface RenderShortParams {
   streamSessionId: string;
@@ -45,6 +58,7 @@ export interface RenderShortParams {
     text: string;
     words?: CaptionWord[];
   }>;
+  editorState?: EditorState;
 }
 
 export function parseRenderJobParams(value: unknown): RenderShortParams | null {
@@ -79,7 +93,51 @@ export function parseRenderJobParams(value: unknown): RenderShortParams | null {
     captionCues: Array.isArray(raw.captionCues)
       ? (raw.captionCues as RenderShortParams["captionCues"])
       : undefined,
+    editorState: normalizeEditorState(raw.editorState),
   };
+}
+
+type BurnCaptionCue = {
+  startTimeSeconds: number;
+  endTimeSeconds: number;
+  text: string;
+  words?: CaptionWord[];
+};
+
+function mapCaptionsToSequence(
+  cues: BurnCaptionCue[],
+  segments: EditorSegment[],
+  format: RenderFormat
+): BurnCaptionCue[] {
+  const mapped: BurnCaptionCue[] = [];
+  let outputOffset = 0;
+  for (const segment of segments) {
+    for (const cue of cues) {
+      const overlapStart = Math.max(cue.startTimeSeconds, segment.sourceStart);
+      const overlapEnd = Math.min(cue.endTimeSeconds, segment.sourceEnd);
+      if (overlapEnd <= overlapStart) continue;
+      const words = cue.words
+        ?.filter((word) => word.end > overlapStart && word.start < overlapEnd)
+        .map((word) => ({
+          start: outputOffset + Math.max(0, word.start - segment.sourceStart),
+          end:
+            outputOffset +
+            Math.min(segmentDuration(segment), word.end - segment.sourceStart),
+          word: word.word,
+        }))
+        .filter((word) => word.end > word.start && word.word.trim().length > 0);
+      mapped.push({
+        startTimeSeconds:
+          outputOffset + Math.max(0, overlapStart - segment.sourceStart),
+        endTimeSeconds:
+          outputOffset + Math.min(segmentDuration(segment), overlapEnd - segment.sourceStart),
+        text: formatCaptionTextForBurn(cue.text, format),
+        ...(words?.length ? { words } : {}),
+      });
+    }
+    outputOffset += segmentDuration(segment);
+  }
+  return mapped;
 }
 
 async function updateJobProgress(jobId: string, progress: number, step?: string) {
@@ -108,9 +166,15 @@ export async function executeRenderJob(
     includeCaptions = true,
     captionAppearance = DEFAULT_CAPTION_APPEARANCE,
     captionCues: clientCaptionCues,
+    editorState: rawEditorState,
   } = params;
 
   const appearance = normalizeCaptionAppearance(captionAppearance);
+  const editorState = normalizeEditorState(rawEditorState);
+  const sequenceSegments = editorState.segments;
+  const bounds = sequenceBounds(sequenceSegments);
+  const effectiveStart = bounds?.start ?? startTimeSeconds;
+  const effectiveEnd = bounds?.end ?? endTimeSeconds;
 
   const ffmpegOk = await isFfmpegAvailable();
   if (!ffmpegOk) {
@@ -129,8 +193,8 @@ export async function executeRenderJob(
 
   const clipSource = await ensureClipSourceForRender(
     streamSessionId,
-    startTimeSeconds,
-    endTimeSeconds,
+    effectiveStart,
+    effectiveEnd,
     sourceMediaId
   );
 
@@ -161,23 +225,42 @@ export async function executeRenderJob(
   const outputWidth =
     format === "vertical" ? Math.round((outputHeight * 9) / 16) : 1920;
 
-  if (includeCaptions) {
+  const textOverlays = editorState.overlays.filter(
+    (
+      overlay
+    ): overlay is EditorOverlay & { type: "text" | "lower-third" } =>
+      overlay.type === "text" || overlay.type === "lower-third"
+  );
+
+  if (includeCaptions || textOverlays.length > 0) {
     await updateJobProgress(jobId, 35, "captions");
     const clientCues = (clientCaptionCues ?? []).filter(
-      (cue) =>
-        cue.startTimeSeconds <= endTimeSeconds &&
-        cue.endTimeSeconds >= startTimeSeconds
+      (cue) => {
+        if (sequenceSegments.length === 0) {
+          return (
+            cue.startTimeSeconds <= effectiveEnd &&
+            cue.endTimeSeconds >= effectiveStart
+          );
+        }
+        return sequenceSegments.some(
+          (segment) =>
+            cue.startTimeSeconds <= segment.sourceEnd &&
+            cue.endTimeSeconds >= segment.sourceStart
+        );
+      }
     );
-    const chunks = clientCues.length
+    const chunks = !includeCaptions || clientCues.length
       ? []
       : await getTranscriptChunksForRange(
           streamSessionId,
-          startTimeSeconds,
-          endTimeSeconds
+          effectiveStart,
+          effectiveEnd
         );
-    if (clientCues.length > 0 || chunks.length > 0) {
+    if (!includeCaptions || clientCues.length > 0 || chunks.length > 0) {
       const captionEdits = await readCaptionEdits(streamSessionId);
-      const captionLines = clientCues.length
+      const captionLines: BurnCaptionCue[] = !includeCaptions
+        ? []
+        : clientCues.length
         ? clientCues.map((cue, index) => ({
             ...cue,
             id: `client-${index}`,
@@ -199,57 +282,61 @@ export async function executeRenderJob(
             captionEdits
           );
 
-      const shiftedCues = captionLines
-        .map((c) => ({
-          startTimeSeconds: Math.max(0, c.startTimeSeconds - startTimeSeconds),
-          endTimeSeconds: Math.min(
-            endTimeSeconds - startTimeSeconds,
-            c.endTimeSeconds - startTimeSeconds
-          ),
-          text: formatCaptionTextForBurn(c.text, format),
-          words: c.words
-            ?.map((w) => ({
-              start: Math.max(0, w.start - startTimeSeconds),
-              end: Math.min(
-                endTimeSeconds - startTimeSeconds,
-                w.end - startTimeSeconds
+      const shiftedCues = sequenceSegments.length
+        ? mapCaptionsToSequence(captionLines, sequenceSegments, format)
+        : captionLines
+            .map((cue) => ({
+              startTimeSeconds: Math.max(0, cue.startTimeSeconds - effectiveStart),
+              endTimeSeconds: Math.min(
+                effectiveEnd - effectiveStart,
+                cue.endTimeSeconds - effectiveStart
               ),
-              word: w.word,
+              text: formatCaptionTextForBurn(cue.text, format),
+              words: cue.words
+                ?.map((word) => ({
+                  start: Math.max(0, word.start - effectiveStart),
+                  end: Math.min(effectiveEnd - effectiveStart, word.end - effectiveStart),
+                  word: word.word,
+                }))
+                .filter((word) => word.end > word.start && word.word.trim().length > 0),
             }))
-            .filter((w) => w.end > w.start && w.word.trim().length > 0),
-        }))
-        .filter((cue) => cue.endTimeSeconds > cue.startTimeSeconds);
+            .filter((cue) => cue.endTimeSeconds > cue.startTimeSeconds);
 
-      if (shiftedCues.length === 0) {
+      if (includeCaptions && shiftedCues.length === 0) {
         throw new Error("Captions are enabled, but no caption cues overlap this clip.");
       }
 
-      try {
-        const assContent = generateAss({
-          cues: shiftedCues,
-          appearance,
-          width: outputWidth,
-          height: outputHeight,
-        });
-        if (!assContent.trim()) {
-          throw new Error("Empty ASS");
-        }
-        subtitlePath = path.join(rendersDir, `clip-${clipId}.ass`);
-        await fs.writeFile(subtitlePath, assContent, "utf8");
-      } catch {
-        const srtContent = generateSrt(
-          shiftedCues.map((c) => ({
-            startTimeSeconds: c.startTimeSeconds,
-            endTimeSeconds: c.endTimeSeconds,
-            text: c.text,
-          }))
-        );
-        if (!srtContent.trim()) {
-          throw new Error("Captions are enabled, but no caption cues overlap this clip.");
-        }
-        subtitlePath = path.join(rendersDir, `clip-${clipId}.srt`);
-        await fs.writeFile(subtitlePath, srtContent);
-      }
+      const overlayCues = textOverlays.flatMap((overlay) => {
+        const segment = sequenceSegments.find((item) => item.id === overlay.segmentId);
+        if (!segment || !overlay.text?.trim()) return [];
+        return [
+          {
+            startTimeSeconds: outputTimeForSegment(
+              sequenceSegments,
+              segment.id,
+              overlay.startOffsetSeconds
+            ),
+            endTimeSeconds: outputTimeForSegment(
+              sequenceSegments,
+              segment.id,
+              Math.min(segmentDuration(segment), overlay.endOffsetSeconds)
+            ),
+            text: overlay.text,
+            kind: overlay.type,
+            position: overlay.position,
+          },
+        ];
+      });
+
+      const assContent = generateAss({
+        cues: shiftedCues,
+        overlays: overlayCues,
+        appearance,
+        width: outputWidth,
+        height: outputHeight,
+      });
+      subtitlePath = path.join(rendersDir, `clip-${clipId}.ass`);
+      await fs.writeFile(subtitlePath, assContent, "utf8");
     } else {
       throw new Error(
         "Captions are enabled, but transcription has not reached this clip yet. " +
@@ -269,26 +356,81 @@ export async function executeRenderJob(
   await appendRenderJobLog(jobId, "ffmpeg", "Encoding clip");
   await updateJobProgress(jobId, 55);
 
-  await ffmpegRender({
-    inputPath,
-    outputPath,
-    startTimeSeconds: renderStart,
-    endTimeSeconds: renderEnd,
-    format,
-    layout,
-    srtPath: subtitlePath,
-    subtitleFormat: format,
-    outputHeight,
-    captionAppearance: appearance,
-    facecamRegion: facecam
-      ? {
-          x: facecam.x,
-          y: facecam.y,
-          width: facecam.width,
-          height: facecam.height,
-        }
-      : undefined,
-  });
+  if (sequenceSegments.length > 0) {
+    const mediaOverlays = editorState.overlays.flatMap((overlay) => {
+      if (
+        (overlay.type !== "image" && overlay.type !== "broll") ||
+        !overlay.assetPath
+      ) {
+        return [];
+      }
+      const segment = sequenceSegments.find((item) => item.id === overlay.segmentId);
+      if (!segment) return [];
+      return [
+        {
+          inputPath: resolveStoragePath(overlay.assetPath),
+          type: overlay.type,
+          startTimeSeconds: outputTimeForSegment(
+            sequenceSegments,
+            segment.id,
+            overlay.startOffsetSeconds
+          ),
+          endTimeSeconds: outputTimeForSegment(
+            sequenceSegments,
+            segment.id,
+            Math.min(segmentDuration(segment), overlay.endOffsetSeconds)
+          ),
+          position: overlay.position,
+          scalePercent: overlay.scalePercent,
+        },
+      ];
+    });
+
+    await ffmpegRenderSequence({
+      inputPath,
+      outputPath,
+      segments: sequenceSegments.map((segment) => ({
+        startTimeSeconds:
+          renderStart + (segment.sourceStart - effectiveStart),
+        endTimeSeconds:
+          renderStart + (segment.sourceEnd - effectiveStart),
+        volume: segment.volume,
+        muted: segment.muted,
+        fadeInSeconds: segment.fadeInSeconds,
+        fadeOutSeconds: segment.fadeOutSeconds,
+      })),
+      format,
+      width: outputWidth,
+      height: outputHeight,
+      srtPath: subtitlePath,
+      captionAppearance: appearance,
+      normalizeAudio: editorState.settings.normalizeAudio,
+      denoiseAudio: editorState.settings.denoiseAudio,
+      verticalBackground: editorState.settings.verticalBackground,
+      mediaOverlays,
+    });
+  } else {
+    await ffmpegRender({
+      inputPath,
+      outputPath,
+      startTimeSeconds: renderStart,
+      endTimeSeconds: renderEnd,
+      format,
+      layout,
+      srtPath: subtitlePath,
+      subtitleFormat: format,
+      outputHeight,
+      captionAppearance: appearance,
+      facecamRegion: facecam
+        ? {
+            x: facecam.x,
+            y: facecam.y,
+            width: facecam.width,
+            height: facecam.height,
+          }
+        : undefined,
+    });
+  }
 
   const existing = await prisma.renderJob.findUnique({
     where: { id: jobId },

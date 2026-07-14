@@ -44,6 +44,14 @@ export function getCaptionEditsPath(sessionId: string): string {
   return path.join(getCaptionEditsDir(sessionId), "edits.json");
 }
 
+export function getEditorStatePath(sessionId: string): string {
+  return path.join(getUploadDir(sessionId), "editor-state.json");
+}
+
+export function getEditorAssetsDir(sessionId: string): string {
+  return path.join(getUploadDir(sessionId), "editor-assets");
+}
+
 export function getSessionStorageDirs(sessionId: string): string[] {
   return [
     getUploadDir(sessionId),

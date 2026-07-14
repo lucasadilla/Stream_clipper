@@ -17,6 +17,13 @@ export interface GenerateAssOptions {
   appearance: CaptionAppearance;
   width: number;
   height: number;
+  overlays?: Array<{
+    startTimeSeconds: number;
+    endTimeSeconds: number;
+    text: string;
+    kind: "text" | "lower-third";
+    position: "center" | "top-left" | "top-right" | "bottom-left" | "bottom-right";
+  }>;
 }
 
 function escapeAssText(text: string): string {
@@ -131,6 +138,32 @@ export function generateAss(options: GenerateAssOptions): string {
     1, // Encoding
   ].join(",");
 
+  const overlayStyleLine = [
+    "Style: Overlay",
+    "Arial",
+    Math.max(24, Math.round(height * 0.052)),
+    "&H00FFFFFF",
+    "&H00FFFFFF",
+    "&H00000000",
+    "&H78000000",
+    -1,
+    0,
+    0,
+    0,
+    100,
+    100,
+    0,
+    0,
+    3,
+    Math.max(2, Math.round(height * 0.004)),
+    0,
+    2,
+    Math.round(width * 0.05),
+    Math.round(width * 0.05),
+    Math.round(height * 0.08),
+    1,
+  ].join(",");
+
   const anim = animationOverride(app.animation, width, height, app);
   const dialogueLines: string[] = [];
 
@@ -158,6 +191,35 @@ export function generateAss(options: GenerateAssOptions): string {
     );
   }
 
+  const alignmentForPosition = (
+    position: "center" | "top-left" | "top-right" | "bottom-left" | "bottom-right"
+  ) => {
+    switch (position) {
+      case "top-left":
+        return 7;
+      case "top-right":
+        return 9;
+      case "bottom-left":
+        return 1;
+      case "bottom-right":
+        return 3;
+      default:
+        return 5;
+    }
+  };
+
+  for (const overlay of options.overlays ?? []) {
+    if (!overlay.text.trim() || overlay.endTimeSeconds <= overlay.startTimeSeconds) continue;
+    const start = formatAssTime(overlay.startTimeSeconds);
+    const end = formatAssTime(overlay.endTimeSeconds);
+    const size = overlay.kind === "lower-third" ? Math.round(height * 0.048) : Math.round(height * 0.06);
+    const align = alignmentForPosition(overlay.position);
+    const body = escapeAssText(overlay.text.trim());
+    dialogueLines.push(
+      `Dialogue: 1,${start},${end},Overlay,,0,0,0,,{\\an${align}\\fs${size}\\fad(120,120)}${body}`
+    );
+  }
+
   return [
     "[Script Info]",
     "ScriptType: v4.00+",
@@ -169,6 +231,7 @@ export function generateAss(options: GenerateAssOptions): string {
     "[V4+ Styles]",
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
     styleLine,
+    overlayStyleLine,
     "",
     "[Events]",
     "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",

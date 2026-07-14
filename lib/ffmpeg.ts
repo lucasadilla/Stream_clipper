@@ -764,3 +764,199 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
     }
   }
 }
+
+export interface RenderSequenceSegment {
+  startTimeSeconds: number;
+  endTimeSeconds: number;
+  volume: number;
+  muted: boolean;
+  fadeInSeconds: number;
+  fadeOutSeconds: number;
+}
+
+export interface RenderSequenceMediaOverlay {
+  inputPath: string;
+  type: "image" | "broll";
+  startTimeSeconds: number;
+  endTimeSeconds: number;
+  position: "center" | "top-left" | "top-right" | "bottom-left" | "bottom-right";
+  scalePercent: number;
+}
+
+export interface RenderSequenceOptions {
+  inputPath: string;
+  outputPath: string;
+  segments: RenderSequenceSegment[];
+  format: RenderFormat;
+  width: number;
+  height: number;
+  srtPath?: string;
+  captionAppearance?: CaptionAppearance;
+  normalizeAudio?: boolean;
+  denoiseAudio?: boolean;
+  verticalBackground?: "crop" | "blur";
+  mediaOverlays?: RenderSequenceMediaOverlay[];
+}
+
+function overlayPosition(
+  position: RenderSequenceMediaOverlay["position"]
+): { x: string; y: string } {
+  switch (position) {
+    case "top-left":
+      return { x: "40", y: "40" };
+    case "top-right":
+      return { x: "W-w-40", y: "40" };
+    case "bottom-left":
+      return { x: "40", y: "H-h-40" };
+    case "bottom-right":
+      return { x: "W-w-40", y: "H-h-40" };
+    default:
+      return { x: "(W-w)/2", y: "(H-h)/2" };
+  }
+}
+
+/** Encode and concatenate source ranges into one output timeline. */
+export async function renderSequence(options: RenderSequenceOptions): Promise<void> {
+  if (options.segments.length === 0) throw new Error("Sequence has no cuts");
+  const probe = await probeMedia(options.inputPath);
+  const withAudio = Boolean(probe.audioCodec);
+  const totalDuration = options.segments.reduce(
+    (total, segment) => total + segment.endTimeSeconds - segment.startTimeSeconds,
+    0
+  );
+  if (totalDuration <= 0) throw new Error("Sequence duration is invalid");
+
+  if (options.srtPath && !(await hasSubtitleFilter())) {
+    throw captionRendererUnavailableError();
+  }
+
+  const overlays = options.mediaOverlays ?? [];
+  const args = ["-y", "-nostdin", "-loglevel", "error", "-i", options.inputPath];
+  for (const overlay of overlays) {
+    if (overlay.type === "image") {
+      args.push("-loop", "1", "-i", overlay.inputPath);
+    } else {
+      args.push("-stream_loop", "-1", "-i", overlay.inputPath);
+    }
+  }
+
+  const filters: string[] = [];
+  const concatInputs: string[] = [];
+  const width = Math.max(2, Math.round(options.width / 2) * 2);
+  const height = Math.max(2, Math.round(options.height / 2) * 2);
+
+  options.segments.forEach((segment, index) => {
+    const start = Math.max(0, segment.startTimeSeconds);
+    const end = Math.max(start + 0.05, segment.endTimeSeconds);
+    const duration = end - start;
+    const source = `[0:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS`;
+    if (options.format === "vertical" && options.verticalBackground === "blur") {
+      filters.push(`${source},split=2[bg${index}][fg${index}]`);
+      filters.push(
+        `[bg${index}]scale=${width}:${height}:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=${width}:${height},boxblur=20:2[blur${index}]`
+      );
+      filters.push(
+        `[fg${index}]scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=fast_bilinear[fit${index}]`
+      );
+      filters.push(
+        `[blur${index}][fit${index}]overlay=(W-w)/2:(H-h)/2,setsar=1,fps=30,format=yuv420p[v${index}]`
+      );
+    } else {
+      filters.push(
+        `${source},scale=${width}:${height}:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=${width}:${height},setsar=1,fps=30,format=yuv420p[v${index}]`
+      );
+    }
+
+    concatInputs.push(`[v${index}]`);
+    if (withAudio) {
+      const audioFilters = [
+        `[0:a]atrim=start=${start}:end=${end}`,
+        "asetpts=PTS-STARTPTS",
+        `volume=${segment.muted ? 0 : Math.min(2, Math.max(0, segment.volume))}`,
+      ];
+      const fadeIn = Math.min(duration / 2, Math.max(0, segment.fadeInSeconds));
+      const fadeOut = Math.min(duration / 2, Math.max(0, segment.fadeOutSeconds));
+      if (fadeIn > 0.01) audioFilters.push(`afade=t=in:st=0:d=${fadeIn}`);
+      if (fadeOut > 0.01) {
+        audioFilters.push(`afade=t=out:st=${Math.max(0, duration - fadeOut)}:d=${fadeOut}`);
+      }
+      audioFilters.push("aresample=48000", "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo");
+      filters.push(`${audioFilters.join(",")}[a${index}]`);
+      concatInputs.push(`[a${index}]`);
+    }
+  });
+
+  filters.push(
+    `${concatInputs.join("")}concat=n=${options.segments.length}:v=1:a=${withAudio ? 1 : 0}[vcat]${withAudio ? "[acat]" : ""}`
+  );
+
+  let videoLabel = "vcat";
+  if (options.srtPath) {
+    filters.push(
+      `[${videoLabel}]${subtitleFilter(options.srtPath, options.format, height, options.captionAppearance)}[vsub]`
+    );
+    videoLabel = "vsub";
+  }
+
+  overlays.forEach((overlay, index) => {
+    const inputIndex = index + 1;
+    const nextLabel = `vov${index}`;
+    const prepared = `ov${index}`;
+    if (overlay.type === "broll") {
+      filters.push(
+        `[${inputIndex}:v]setpts=PTS-STARTPTS,scale=${width}:${height}:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=${width}:${height},setsar=1,format=yuv420p[${prepared}]`
+      );
+      filters.push(
+        `[${videoLabel}][${prepared}]overlay=0:0:enable='between(t,${overlay.startTimeSeconds},${overlay.endTimeSeconds})':eof_action=repeat[${nextLabel}]`
+      );
+    } else {
+      const overlayWidth = Math.max(
+        40,
+        Math.round((width * Math.min(100, Math.max(10, overlay.scalePercent))) / 100)
+      );
+      const pos = overlayPosition(overlay.position);
+      filters.push(
+        `[${inputIndex}:v]setpts=PTS-STARTPTS,scale=${overlayWidth}:-2:flags=fast_bilinear,format=rgba[${prepared}]`
+      );
+      filters.push(
+        `[${videoLabel}][${prepared}]overlay=${pos.x}:${pos.y}:enable='between(t,${overlay.startTimeSeconds},${overlay.endTimeSeconds})':eof_action=repeat[${nextLabel}]`
+      );
+    }
+    videoLabel = nextLabel;
+  });
+
+  let audioLabel = "acat";
+  if (withAudio && (options.denoiseAudio || options.normalizeAudio)) {
+    const audioFilters: string[] = [];
+    if (options.denoiseAudio) audioFilters.push("afftdn=nf=-25");
+    if (options.normalizeAudio) audioFilters.push("loudnorm=I=-16:TP=-1.5:LRA=11");
+    filters.push(`[acat]${audioFilters.join(",")}[aout]`);
+    audioLabel = "aout";
+  }
+
+  args.push(
+    "-filter_complex",
+    filters.join(";"),
+    "-map",
+    `[${videoLabel}]`
+  );
+  if (withAudio) args.push("-map", `[${audioLabel}]`);
+  args.push(
+    "-c:v",
+    "libx264",
+    "-preset",
+    renderPreset(),
+    "-crf",
+    isFfmpegLowMemoryMode() ? "26" : "24",
+    "-threads",
+    String(getFfmpegThreadCount()),
+    ...x264MemoryArgs()
+  );
+  if (withAudio) args.push("-c:a", "aac", "-b:a", "128k");
+  else args.push("-an");
+  if (isFfmpegLowMemoryMode()) {
+    args.push("-filter_threads", "1", "-filter_complex_threads", "1", "-max_muxing_queue_size", "1024");
+  }
+  args.push("-t", String(totalDuration), "-movflags", "+faststart", options.outputPath);
+  await runCommand(getFfmpegPath(), args);
+}

@@ -5,6 +5,7 @@ import type { RenderFormat } from "@/lib/renderFormat";
 import type { ClipSelection } from "@/components/LiveTimeline";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
 import type { CaptionCue } from "@/lib/captionTrack";
+import type { EditorState } from "@/lib/editorState";
 
 export interface RenderProgressUpdate {
   progress: number;
@@ -78,7 +79,8 @@ export async function renderClip(
   includeCaptions = true,
   captionAppearance?: CaptionAppearance,
   captionCues?: CaptionCue[],
-  onProgress?: (update: RenderProgressUpdate) => void
+  onProgress?: (update: RenderProgressUpdate) => void,
+  editorState?: EditorState
 ) {
   onProgress?.({ progress: 5, status: "queued" });
 
@@ -90,6 +92,7 @@ export async function renderClip(
       format,
       captionAppearance,
       captionCues,
+      editorState,
     }),
   });
   const data = (await res.json()) as {

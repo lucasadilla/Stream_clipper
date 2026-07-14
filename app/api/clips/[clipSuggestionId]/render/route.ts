@@ -11,6 +11,10 @@ import {
   SessionAccessError,
 } from "@/services/sessionAccessService";
 import { getPostHogClient } from "@/lib/posthog-server";
+import {
+  normalizeEditorState,
+  sequenceDuration,
+} from "@/lib/editorState";
 
 interface ClientCaptionCue {
   startTimeSeconds: number;
@@ -96,6 +100,9 @@ export async function POST(
     const captionAppearance = normalizeCaptionAppearance(
       (body as { captionAppearance?: Partial<CaptionAppearance> }).captionAppearance
     );
+    const editorState = normalizeEditorState(
+      (body as { editorState?: unknown }).editorState
+    );
 
     const clip = await prisma.clipSuggestion.findUnique({
       where: { id: clipSuggestionId },
@@ -113,10 +120,14 @@ export async function POST(
       throw err;
     }
 
+    const outputDuration =
+      editorState.segments.length > 0
+        ? sequenceDuration(editorState.segments)
+        : clip.endTimeSeconds - clip.startTimeSeconds;
     const usageGate = await canRenderExport(
       billingAccountId,
       1,
-      clip.endTimeSeconds - clip.startTimeSeconds
+      outputDuration
     );
     if (!usageGate.allowed) {
       return errorResponse(
@@ -141,6 +152,7 @@ export async function POST(
       includeCaptions,
       captionAppearance,
       captionCues,
+      editorState,
     };
 
     const jobId = await createRenderJobRecord({
@@ -163,7 +175,8 @@ export async function POST(
         event: "clip_rendered",
         properties: {
           format: format,
-          duration_seconds: clip.endTimeSeconds - clip.startTimeSeconds,
+          duration_seconds: outputDuration,
+          segment_count: editorState.segments.length || 1,
           include_captions: includeCaptions,
         },
       });
