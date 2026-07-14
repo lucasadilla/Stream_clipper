@@ -26,7 +26,6 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=pot-provider /app /opt/bgutil-ytdlp-pot-provider
-COPY --from=pot-provider /usr/local/bin/node /usr/local/bin/bgutil-node
 
 COPY package.json package-lock.json ./
 COPY prisma ./prisma/
@@ -56,4 +55,4 @@ RUN mkdir -p /app/storage
 
 EXPOSE 3000
 
-CMD ["sh", "-c", "bgutil-node /opt/bgutil-ytdlp-pot-provider/build/main.js >/tmp/bgutil-pot.log 2>&1 & exec npm run start"]
+CMD ["npm", "run", "start"]
