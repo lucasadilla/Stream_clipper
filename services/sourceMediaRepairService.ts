@@ -6,10 +6,12 @@ import {
   fileExists,
   findBestSourceFileInDir,
   getUploadDir,
+  isMergedSourceFile,
   resolveStoragePath,
   toRelativeStoragePath,
 } from "@/lib/storage";
 import { toJsonValue } from "@/lib/utils";
+import { existsSync } from "fs";
 
 async function sourceMediaFromFoundFile(
   streamSessionId: string,
@@ -73,11 +75,35 @@ export async function findLocalSourceMedia(streamSessionId: string) {
     where: { streamSessionId },
     orderBy: { createdAt: "desc" },
   });
+
+  // Always prefer the best file on disk. yt-dlp often registers source.fNNN.*
+  // mid-download, then deletes it after merging to source.mkv / source.mp4.
+  const found = await findBestSourceFileInDir(getUploadDir(streamSessionId));
+  if (found && existsSync(found)) {
+    const foundRel = toRelativeStoragePath(found);
+    const dbPath = sourceMedia?.filePath ?? null;
+    const dbExists = !!dbPath && fileExists(dbPath);
+    const dbIsFragment =
+      !!dbPath && !isMergedSourceFile(path.basename(dbPath));
+    const foundIsMerged = isMergedSourceFile(path.basename(found));
+
+    if (
+      !dbExists ||
+      dbPath !== foundRel ||
+      (dbIsFragment && foundIsMerged)
+    ) {
+      return sourceMediaFromFoundFile(streamSessionId, found, sourceMedia?.id);
+    }
+
+    if ((sourceMedia!.width ?? 0) > 0) return sourceMedia!;
+    if (await hasVideoStream(found)) {
+      return sourceMediaFromFoundFile(streamSessionId, found, sourceMedia!.id);
+    }
+  }
+
   if (sourceMedia?.filePath && fileExists(sourceMedia.filePath)) {
     const absolutePath = resolveStoragePath(sourceMedia.filePath);
-    if ((sourceMedia.width ?? 0) > 0) {
-      return sourceMedia;
-    }
+    if ((sourceMedia.width ?? 0) > 0) return sourceMedia;
     if (await hasVideoStream(absolutePath)) {
       return sourceMediaFromFoundFile(
         streamSessionId,
@@ -87,10 +113,7 @@ export async function findLocalSourceMedia(streamSessionId: string) {
     }
   }
 
-  const found = await findBestSourceFileInDir(getUploadDir(streamSessionId));
-  if (!found) return null;
-
-  return sourceMediaFromFoundFile(streamSessionId, found, sourceMedia?.id);
+  return null;
 }
 
 export async function ensureLocalSourceMedia(streamSessionId: string) {

@@ -234,22 +234,35 @@ function findNextExtractionWindow(
   return { from, to: Math.min(recorded, from + span) };
 }
 
+function isMissingMediaError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /No such file or directory|ENOENT/i.test(message);
+}
+
+async function resolveThumbnailInputPath(
+  streamSessionId: string
+): Promise<{ inputPath: string; recorded: number } | null> {
+  const sourceMedia = await findLocalSourceMedia(streamSessionId);
+  if (!sourceMedia?.filePath || !fileExists(sourceMedia.filePath)) {
+    return null;
+  }
+  const recorded = sanitizeDurationSeconds(sourceMedia.durationSeconds ?? 0);
+  if (recorded < 2) return null;
+  return {
+    inputPath: resolveStoragePath(sourceMedia.filePath),
+    recorded,
+  };
+}
+
 export async function syncTimelineThumbnails(
   streamSessionId: string,
   options?: { prioritizeTail?: boolean }
 ): Promise<TimelineThumbnail[]> {
-  const sourceMedia = await findLocalSourceMedia(streamSessionId);
-
-  if (!sourceMedia || !fileExists(sourceMedia.filePath)) {
-    return [];
-  }
-
-  const recorded = sanitizeDurationSeconds(sourceMedia.durationSeconds ?? 0);
-  if (recorded < 2) return [];
+  let resolved = await resolveThumbnailInputPath(streamSessionId);
+  if (!resolved) return [];
 
   const framesDir = getFramesDir(streamSessionId);
   await ensureDir(framesDir);
-  const inputPath = resolveStoragePath(sourceMedia.filePath);
   const prioritizeTail = options?.prioritizeTail ?? false;
 
   if (!activeExtractions.has(streamSessionId)) {
@@ -258,19 +271,39 @@ export async function syncTimelineThumbnails(
       await removeLegacyThumbs(framesDir);
 
       for (let pass = 0; pass < THUMB_SYNC_PASSES; pass++) {
+        // Re-resolve each pass — live captures can remux away source.fNNN.*
+        // while a strip is still running.
+        resolved = await resolveThumbnailInputPath(streamSessionId);
+        if (!resolved) break;
+
         const starts = new Set(await listThumbStarts(framesDir));
         const window = findNextExtractionWindow(
-          recorded,
+          resolved.recorded,
           starts,
           prioritizeTail
         );
         if (!window || window.to - window.from < 2) break;
-        await extractMissingRange(
-          inputPath,
-          framesDir,
-          window.from,
-          window.to
-        );
+        try {
+          await extractMissingRange(
+            resolved.inputPath,
+            framesDir,
+            window.from,
+            window.to
+          );
+        } catch (error) {
+          if (isMissingMediaError(error)) {
+            const retry = await resolveThumbnailInputPath(streamSessionId);
+            if (!retry || retry.inputPath === resolved.inputPath) break;
+            await extractMissingRange(
+              retry.inputPath,
+              framesDir,
+              window.from,
+              window.to
+            );
+            continue;
+          }
+          throw error;
+        }
       }
     } finally {
       activeExtractions.delete(streamSessionId);
@@ -335,7 +368,15 @@ export async function getTimelineThumbnails(
     );
     if (!activeExtractions.has(streamSessionId)) {
       void syncTimelineThumbnails(streamSessionId, { prioritizeTail }).catch(
-        (error) => console.error("[thumbnails] strip extraction failed:", error)
+        (error) => {
+          if (isMissingMediaError(error)) {
+            console.warn(
+              "[thumbnails] source media disappeared mid-extract; will retry on next poll"
+            );
+            return;
+          }
+          console.error("[thumbnails] strip extraction failed:", error);
+        }
       );
     }
     return listThumbnailsFromDisk(streamSessionId, framesDir);
