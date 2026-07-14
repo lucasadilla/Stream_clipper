@@ -97,6 +97,22 @@ export async function ensureLocalSourceMedia(streamSessionId: string) {
   const local = await findLocalSourceMedia(streamSessionId);
   if (local) return local;
 
+  // A failed extractor used to be restarted by every transcription poll and
+  // live tick. That request storm can turn a temporary YouTube rejection into
+  // an IP-wide 429 block. Explicit source preparation can still retry now;
+  // background work waits before trying the same source again.
+  const failedRecording = await prisma.liveRecordingState.findUnique({
+    where: { streamSessionId },
+    select: { status: true, lastSyncedAt: true },
+  });
+  if (
+    failedRecording?.status === "failed" &&
+    failedRecording.lastSyncedAt &&
+    Date.now() - failedRecording.lastSyncedAt.getTime() < 10 * 60 * 1000
+  ) {
+    return null;
+  }
+
   const { acquireSourceMedia } = await import("@/services/liveRecordingService");
   const result = await acquireSourceMedia(streamSessionId);
   const media = result.sourceMedia;

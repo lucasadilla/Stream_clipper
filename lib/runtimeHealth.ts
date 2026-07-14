@@ -12,6 +12,7 @@ export interface RuntimeHealthReport {
   ok: boolean;
   ffmpeg: boolean;
   ytDlp: boolean;
+  ytDlpPotProvider: boolean | null;
   aiConfigured: boolean;
   whisperConfigured: boolean;
   storageRoot: string;
@@ -65,9 +66,17 @@ export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
       err instanceof Error ? err.message : "Storage directory is not writable";
   }
 
-  const [ffmpeg, ytDlp] = await Promise.all([
+  const potProviderUrl = process.env.YT_DLP_POT_PROVIDER_URL?.trim();
+  const [ffmpeg, ytDlp, ytDlpPotProvider] = await Promise.all([
     isFfmpegAvailable(),
     isYtDlpAvailable(),
+    potProviderUrl
+      ? fetch(`${potProviderUrl}/ping`, {
+          signal: AbortSignal.timeout(3000),
+        })
+          .then((response) => response.ok)
+          .catch(() => false)
+      : Promise.resolve(null),
   ]);
   const nodeMajor = Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10);
   const ytDlpJsRuntimeCompatible = nodeMajor >= 22;
@@ -135,6 +144,11 @@ export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
         : `yt-dlp not found (tried: ${getYtDlpPathCandidates().join(", ")}). Redeploy with the latest Dockerfile.`
     );
   }
+  if (potProviderUrl && !ytDlpPotProvider) {
+    issues.push(
+      "The YouTube proof-of-origin token provider is not responding. Redeploy the current Docker image."
+    );
+  }
   if (!ytDlpJsRuntimeCompatible) {
     issues.push(
       `Node ${process.versions.node} is too old for current yt-dlp YouTube challenge solving. Deploy the Node 22 Docker image.`
@@ -166,6 +180,7 @@ export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
     ok: issues.length === 0,
     ffmpeg,
     ytDlp,
+    ytDlpPotProvider,
     aiConfigured: hasAnyAiKey(),
     whisperConfigured: isWhisperAvailable(),
     storageRoot,

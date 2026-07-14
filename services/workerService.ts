@@ -193,15 +193,11 @@ async function processOneTranscription(): Promise<boolean> {
         budgetSeconds: 120,
         heldLockOwner: WORKER_ID,
       });
-      if (result.error || (result.skipped && result.reason && result.reason !== "caught_up" && result.reason !== "sync_in_progress")) {
+      if (result.error) {
         await prisma.streamSession.update({
           where: { id: sessionId },
           data: {
-            lastTranscriptionError: result.error
-              ? result.error.slice(0, 2000)
-              : result.reason
-                ? `skipped:${result.reason}`
-                : null,
+            lastTranscriptionError: result.error.slice(0, 2000),
           },
         });
       } else if (!result.skipped) {

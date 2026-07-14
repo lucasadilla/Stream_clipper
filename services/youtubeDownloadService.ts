@@ -82,8 +82,21 @@ export function networkYtDlpArgs(): string[] {
 }
 
 export function baseYtDlpArgs(): string[] {
+  const impersonate = process.env.YT_DLP_IMPERSONATE?.trim();
+  const youtubeClient = process.env.YT_DLP_YOUTUBE_CLIENT?.trim();
+  const potProviderUrl = process.env.YT_DLP_POT_PROVIDER_URL?.trim();
   return [
     ...networkYtDlpArgs(),
+    ...(impersonate ? ["--impersonate", impersonate] : []),
+    ...(youtubeClient
+      ? ["--extractor-args", `youtube:player_client=${youtubeClient}`]
+      : []),
+    ...(potProviderUrl
+      ? [
+          "--extractor-args",
+          `youtubepot-bgutilhttp:base_url=${potProviderUrl}`,
+        ]
+      : []),
     // Expose growing media files immediately so transcription and timeline
     // thumbnails do not wait for a multi-hour VOD download to finish.
     "--no-part",

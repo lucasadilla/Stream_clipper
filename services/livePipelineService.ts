@@ -11,6 +11,19 @@ function isLiveStatus(liveStatus: string | null | undefined): boolean {
   );
 }
 
+function canAutoStartRecording(
+  recording: { status: string; lastSyncedAt: Date | null } | null
+): boolean {
+  if (!recording || recording.status === "idle" || recording.status === "stopped") {
+    return true;
+  }
+  if (recording.status !== "failed") return false;
+  return (
+    !recording.lastSyncedAt ||
+    Date.now() - recording.lastSyncedAt.getTime() >= 10 * 60 * 1000
+  );
+}
+
 /**
  * One live tick: sync recording, thumbnails, and metadata.
  * Called from the client every ~15s while a stream session is active.
@@ -50,7 +63,15 @@ export async function runLivePipeline(streamSessionId: string) {
     fresh.liveStatus === "live" ||
     fresh.liveStatus === "upcoming"
   ) {
-    if (fresh.liveRecording?.status !== "recording") {
+    const syncedBeforeStart =
+      fresh.liveRecording?.status === "recording"
+        ? await syncLiveRecording(streamSessionId)
+        : null;
+    const recoveredStaleRecording = syncedBeforeStart?.status === "failed";
+    if (
+      (fresh.liveRecording?.status !== "recording" || recoveredStaleRecording) &&
+      (recoveredStaleRecording || canAutoStartRecording(fresh.liveRecording))
+    ) {
       try {
         const { acquireSourceMedia } = await import(
           "@/services/liveRecordingService"
@@ -61,7 +82,10 @@ export async function runLivePipeline(streamSessionId: string) {
           e instanceof Error ? e.message : String(e);
       }
     }
-    results.recording = await syncLiveRecording(streamSessionId);
+    results.recording =
+      results.recordingStart ??
+      syncedBeforeStart ??
+      (await syncLiveRecording(streamSessionId));
   }
 
   // Recording only — transcription runs on /transcribe (avoids 2min+ live-tick hangs)

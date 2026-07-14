@@ -9,6 +9,7 @@ interface RuntimeHealth {
   ok?: boolean;
   ffmpeg?: boolean;
   ytDlp?: boolean;
+  ytDlpPotProvider?: boolean | null;
   aiConfigured?: boolean;
   whisperConfigured?: boolean;
   storageRoot?: string;
@@ -123,6 +124,12 @@ export default function HealthPage() {
                 />
                 <StatusPill ok={Boolean(health.ffmpeg)} label="FFmpeg" />
                 <StatusPill ok={Boolean(health.ytDlp)} label="yt-dlp" />
+                {health.ytDlpPotProvider != null && (
+                  <StatusPill
+                    ok={health.ytDlpPotProvider}
+                    label="YouTube token provider"
+                  />
+                )}
                 <StatusPill
                   ok={Boolean(health.ytDlpJsRuntimeCompatible)}
                   label="yt-dlp JavaScript runtime"

@@ -1,3 +1,5 @@
+FROM brainicism/bgutil-ytdlp-pot-provider:1.3.1 AS pot-provider
+
 FROM node:22-bookworm-slim AS base
 
 RUN apt-get update \
@@ -12,7 +14,9 @@ RUN apt-get update \
     curl \
     python3 \
     python3-pip \
-  && pip3 install --break-system-packages --no-cache-dir "yt-dlp[default]" \
+  && pip3 install --break-system-packages --no-cache-dir \
+    "yt-dlp[default,curl-cffi]" \
+    "bgutil-ytdlp-pot-provider==1.3.1" \
   && node --version \
   && yt-dlp --version \
   && ffmpeg -hide_banner -filters 2>&1 | grep -q subtitles \
@@ -20,6 +24,9 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+COPY --from=pot-provider /app /opt/bgutil-ytdlp-pot-provider
+COPY --from=pot-provider /usr/local/bin/node /usr/local/bin/bgutil-node
 
 COPY package.json package-lock.json ./
 COPY prisma ./prisma/
@@ -37,6 +44,9 @@ ENV STORAGE_ROOT=/app/storage
 ENV FFMPEG_PATH=ffmpeg
 ENV FFPROBE_PATH=ffprobe
 ENV YT_DLP_PATH=yt-dlp
+ENV YT_DLP_IMPERSONATE=chrome
+ENV YT_DLP_YOUTUBE_CLIENT=mweb
+ENV YT_DLP_POT_PROVIDER_URL=http://127.0.0.1:4416
 ENV FFMPEG_LOW_MEMORY=1
 ENV FFMPEG_THREADS=1
 ENV WORKER_ENABLED=1
@@ -46,4 +56,4 @@ RUN mkdir -p /app/storage
 
 EXPOSE 3000
 
-CMD ["npm", "run", "start"]
+CMD ["sh", "-c", "bgutil-node /opt/bgutil-ytdlp-pot-provider/build/main.js >/tmp/bgutil-pot.log 2>&1 & exec npm run start"]
