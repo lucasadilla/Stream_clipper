@@ -7,6 +7,7 @@ import {
   SessionAccessError,
 } from "@/services/sessionAccessService";
 import { canUseSourceDuration } from "@/services/usageService";
+import { formatYtDlpUserError } from "@/services/youtubeDownloadService";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -40,8 +41,7 @@ export async function POST(
     if (error instanceof SessionAccessError) {
       return errorResponse(error.message, error.status);
     }
-    const message =
-      error instanceof Error ? error.message : "YouTube download failed";
+    const message = formatYtDlpUserError(error);
     return errorResponse(message, 500);
   }
 }

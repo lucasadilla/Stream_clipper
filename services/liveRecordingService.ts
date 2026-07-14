@@ -19,6 +19,7 @@ import {
   getYtDlpDeploymentArgs,
   getYtDlpVisitorData,
   resolveYtDlpInvocation,
+  formatYtDlpUserError,
 } from "@/services/youtubeDownloadService";
 
 function liveFormat(): string {
@@ -110,7 +111,7 @@ async function markRecordingFailed(
   detail: string,
   pid?: number | null
 ): Promise<void> {
-  const message = `Source acquisition: ${detail}`.slice(0, 2000);
+  const message = `Source acquisition: ${formatYtDlpUserError(detail)}`.slice(0, 2000);
   await Promise.all([
     prisma.liveRecordingState.updateMany({
       where: {

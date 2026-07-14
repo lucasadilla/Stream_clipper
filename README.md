@@ -161,11 +161,31 @@ Checkout sessions are created with `managed_payments.enabled=true` using Stripe 
    - `FFMPEG_PATH=ffmpeg`, `FFPROBE_PATH=ffprobe`, `YT_DLP_PATH=yt-dlp`
    - `OPENROUTER_API_KEY` or `OPENAI_API_KEY`
    - `YOUTUBE_API_KEY`
+   - `YT_DLP_COOKIES_B64` containing a Base64-encoded Netscape `cookies.txt`
+     export from a separate YouTube account (server-only; never `NEXT_PUBLIC_*`)
    - Stripe keys and real `price_...` IDs for every `STRIPE_PRICE_*` var
    - Optional: `WORKER_ENABLED=1`, `WORKER_SECRET=...` (background renders/transcription/retention)
 5. Do not copy local Windows paths like `C:\...\ffmpeg.exe` into Railway. The Docker image already installs Linux `ffmpeg`, `ffprobe`, and `yt-dlp`; use the bare command names above.
 6. Redeploy, then verify **`/health`** or **`/api/health`** shows database, Stripe billing, FFmpeg, yt-dlp, AI, Whisper, and storage as ready.
 7. Optional cron: `POST /api/worker/tick` with `Authorization: Bearer $WORKER_SECRET` every minute (the in-process poller also runs when `WORKER_ENABLED` is on).
+
+Before redeploying cookie changes, test the export locally:
+
+```powershell
+$env:YT_DLP_COOKIES_PATH = "C:\secure\youtube-cookies.txt"
+npm run youtube:verify -- "https://www.youtube.com/watch?v=YOUR_VIDEO_ID"
+```
+
+To create the Railway value without printing the cookie contents, run:
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\secure\youtube-cookies.txt")) | Set-Clipboard
+```
+
+Paste the clipboard value into Railway as `YT_DLP_COOKIES_B64`. The app validates
+the Netscape format and decodes it at runtime to `/tmp/youtube-cookies.txt` with
+owner-only permissions. Export fresh cookies when validation starts failing.
+Only process videos the signed-in account and creator are authorized to use.
 
 **Reliability notes:** Render jobs are queued in Postgres and processed by the same Next.js worker (survives request timeouts). Stale `processing` jobs are reclaimed after `WORKER_STALE_MS`. Plan `storageRetentionDays` is enforced by the worker; storage byte caps block new sessions when full. Live yt-dlp capture is still in-process and may need a re-attach after a deploy restart.
 

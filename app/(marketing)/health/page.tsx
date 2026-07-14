@@ -8,8 +8,12 @@ import { cn } from "@/lib/cn";
 interface RuntimeHealth {
   ok?: boolean;
   ffmpeg?: boolean;
+  ffmpegVersion?: string | null;
   ytDlp?: boolean;
+  ytDlpVersion?: string | null;
   ytDlpPotProvider?: boolean | null;
+  youtubeCookiesConfigured?: boolean;
+  youtubeCookiesValid?: boolean;
   aiConfigured?: boolean;
   whisperConfigured?: boolean;
   storageRoot?: string;
@@ -124,6 +128,10 @@ export default function HealthPage() {
                 />
                 <StatusPill ok={Boolean(health.ffmpeg)} label="FFmpeg" />
                 <StatusPill ok={Boolean(health.ytDlp)} label="yt-dlp" />
+                <StatusPill
+                  ok={Boolean(health.youtubeCookiesValid)}
+                  label="YouTube cookies"
+                />
                 {health.ytDlpPotProvider != null && (
                   <StatusPill
                     ok={health.ytDlpPotProvider}
@@ -159,6 +167,14 @@ export default function HealthPage() {
               {health.storageRoot && (
                 <p className="text-xs text-[var(--color-muted)]">
                   Storage root: <code className="text-white/80">{health.storageRoot}</code>
+                </p>
+              )}
+
+              {(health.ffmpegVersion || health.ytDlpVersion) && (
+                <p className="text-xs leading-6 text-[var(--color-muted)]">
+                  FFmpeg: <code className="text-white/80">{health.ffmpegVersion ?? "missing"}</code>
+                  {" / "}
+                  yt-dlp: <code className="text-white/80">{health.ytDlpVersion ?? "missing"}</code>
                 </p>
               )}
 

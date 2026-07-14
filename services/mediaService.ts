@@ -1,4 +1,8 @@
 import path from "path";
+import { createWriteStream } from "fs";
+import { randomUUID } from "crypto";
+import { Readable, Transform } from "stream";
+import { pipeline } from "stream/promises";
 import { toJsonValue } from "@/lib/utils";
 import { LIVE_SEGMENT_SECONDS } from "@/lib/timelineConstants";
 import { TRANSCRIPTION_HEAVY_BACKLOG_SECONDS } from "@/lib/transcriptionConstants";
@@ -14,6 +18,7 @@ import {
   toRelativeStoragePath,
   isAllowedVideoFile,
   fileExists,
+  listSourceCandidateFiles,
 } from "@/lib/storage";
 import {
   ensureLocalSourceMedia,
@@ -26,6 +31,26 @@ const MIN_SEGMENT_SECONDS = 3;
 export async function saveSourceMedia(
   streamSessionId: string,
   file: File,
+  options?: { maxDurationSeconds?: number | null }
+) {
+  return saveSourceMediaStream(
+    streamSessionId,
+    {
+      name: file.name,
+      type: file.type,
+      stream: file.stream(),
+    },
+    options
+  );
+}
+
+export async function saveSourceMediaStream(
+  streamSessionId: string,
+  file: {
+    name: string;
+    type: string;
+    stream: ReadableStream<Uint8Array>;
+  },
   options?: { maxDurationSeconds?: number | null }
 ) {
   if (!isAllowedVideoFile(file.name, file.type)) {
@@ -43,15 +68,40 @@ export async function saveSourceMedia(
 
   const filename = `source${ext}`;
   const absolutePath = path.join(uploadDir, filename);
-  const buffer = Buffer.from(await file.arrayBuffer());
-  const { writeFile } = await import("fs/promises");
-  await writeFile(absolutePath, buffer);
+  const temporaryPath = path.join(
+    uploadDir,
+    `.source-upload-${randomUUID()}${ext}`
+  );
+  const maxBytes = Number.parseInt(
+    process.env.MAX_SOURCE_UPLOAD_BYTES?.trim() ?? "",
+    10
+  ) || 12 * 1024 * 1024 * 1024;
+  let sizeBytes = 0;
+  const meter = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      sizeBytes += chunk.length;
+      if (sizeBytes > maxBytes) {
+        callback(new Error("Source video is too large for this deployment."));
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
 
-  const relativePath = toRelativeStoragePath(absolutePath);
+  try {
+    await pipeline(
+      Readable.fromWeb(file.stream as import("stream/web").ReadableStream),
+      meter,
+      createWriteStream(temporaryPath, { mode: 0o600 })
+    );
+  } catch (error) {
+    await fsUnlink(temporaryPath);
+    throw error;
+  }
 
   let probe;
   try {
-    probe = await probeMedia(absolutePath);
+    probe = await probeMedia(temporaryPath);
   } catch {
     probe = {
       durationSeconds: 0,
@@ -68,27 +118,47 @@ export async function saveSourceMedia(
     options?.maxDurationSeconds &&
     probe.durationSeconds > options.maxDurationSeconds
   ) {
-    const { unlink } = await import("fs/promises");
-    await unlink(absolutePath).catch(() => {});
+    await fsUnlink(temporaryPath);
     throw new Error("Creator Beta source videos can be up to 3 hours long.");
   }
 
-  await prisma.sourceMedia.deleteMany({ where: { streamSessionId } });
+  const { rename } = await import("fs/promises");
+  await fsUnlink(absolutePath);
+  await rename(temporaryPath, absolutePath);
+  const relativePath = toRelativeStoragePath(absolutePath);
 
-  return prisma.sourceMedia.create({
-    data: {
-      streamSessionId,
-      originalFilename: file.name,
-      filePath: relativePath,
-      mimeType: file.type || "video/mp4",
-      sizeBytes: BigInt(buffer.length),
-      durationSeconds: probe.durationSeconds || null,
-      width: probe.width || null,
-      height: probe.height || null,
-      fps: probe.fps || null,
-      codecInfo: toJsonValue(probe.raw),
-    },
+  const sourceMedia = await prisma.$transaction(async (tx) => {
+    await tx.sourceMedia.deleteMany({ where: { streamSessionId } });
+    return tx.sourceMedia.create({
+      data: {
+        streamSessionId,
+        originalFilename: file.name,
+        filePath: relativePath,
+        mimeType: file.type || "video/mp4",
+        sizeBytes: BigInt(sizeBytes),
+        durationSeconds: probe.durationSeconds || null,
+        width: probe.width || null,
+        height: probe.height || null,
+        fps: probe.fps || null,
+        codecInfo: toJsonValue(probe.raw),
+        isLiveRecording: false,
+      },
+    });
   });
+
+  const staleSourceFiles = await listSourceCandidateFiles(uploadDir);
+  await Promise.all(
+    staleSourceFiles
+      .filter((candidate) => path.resolve(candidate) !== path.resolve(absolutePath))
+      .map(fsUnlink)
+  );
+
+  return sourceMedia;
+}
+
+async function fsUnlink(filePath: string): Promise<void> {
+  const { unlink } = await import("fs/promises");
+  await unlink(filePath).catch(() => {});
 }
 
 export async function processVideoIncremental(streamSessionId: string) {

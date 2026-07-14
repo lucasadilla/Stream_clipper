@@ -12,6 +12,7 @@
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
     "stripe:provision-catalog": "npx tsx scripts/provision-stripe-catalog.ts",
+    "youtube:verify": "npx tsx scripts/verify-youtube-runtime.ts",
     "postinstall": "prisma generate"
   },
   "dependencies": {

@@ -765,6 +765,15 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
   }
 }
 
+export async function getFfmpegVersion(): Promise<string | null> {
+  try {
+    const { stdout, stderr } = await runCommand(getFfmpegPath(), ["-version"]);
+    return (stdout || stderr).trim().split(/\r?\n/, 1)[0] || null;
+  } catch {
+    return null;
+  }
+}
+
 export interface RenderSequenceSegment {
   startTimeSeconds: number;
   endTimeSeconds: number;

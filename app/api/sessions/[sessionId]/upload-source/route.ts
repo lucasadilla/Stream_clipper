@@ -1,5 +1,8 @@
 import { NextRequest } from "next/server";
-import { saveSourceMedia } from "@/services/mediaService";
+import {
+  saveSourceMedia,
+  saveSourceMediaStream,
+} from "@/services/mediaService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import { getBillingAccountIdFromRequest } from "@/services/billingService";
 import { getPostHogClient } from "@/lib/posthog-server";
@@ -8,6 +11,7 @@ import {
   SessionAccessError,
 } from "@/services/sessionAccessService";
 import { getUsageSnapshot } from "@/services/usageService";
+import { stopLiveRecording } from "@/services/liveRecordingService";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -21,16 +25,36 @@ export async function POST(
     const billingAccountId = getBillingAccountIdFromRequest(request);
     await ensureSessionBillingAccess(sessionId, billingAccountId);
     const usage = await getUsageSnapshot(billingAccountId);
-    const formData = await request.formData();
-    const file = formData.get("file");
+    await stopLiveRecording(sessionId, { skipSync: true }).catch(() => {});
 
-    if (!file || !(file instanceof File)) {
-      return errorResponse("No file provided", 400);
+    const encodedFileName = request.headers.get("x-file-name");
+    let sourceMedia;
+    if (encodedFileName && request.body) {
+      let fileName = encodedFileName;
+      try {
+        fileName = decodeURIComponent(encodedFileName);
+      } catch {
+        // Keep the header value; file validation below still applies.
+      }
+      sourceMedia = await saveSourceMediaStream(
+        sessionId,
+        {
+          name: fileName,
+          type: request.headers.get("content-type") || "video/mp4",
+          stream: request.body,
+        },
+        { maxDurationSeconds: usage.entitlements?.maxSourceDurationSeconds }
+      );
+    } else {
+      const formData = await request.formData();
+      const file = formData.get("file");
+      if (!file || !(file instanceof File)) {
+        return errorResponse("No file provided", 400);
+      }
+      sourceMedia = await saveSourceMedia(sessionId, file, {
+        maxDurationSeconds: usage.entitlements?.maxSourceDurationSeconds,
+      });
     }
-
-    const sourceMedia = await saveSourceMedia(sessionId, file, {
-      maxDurationSeconds: usage.entitlements?.maxSourceDurationSeconds,
-    });
     if (billingAccountId) {
       getPostHogClient().capture({
         distinctId: billingAccountId,
@@ -52,6 +76,11 @@ export async function POST(
       return errorResponse(error.message, error.status);
     }
     const message = error instanceof Error ? error.message : "Upload failed";
-    return errorResponse(message, /3 hours|access is required/i.test(message) ? 400 : 500);
+    const status = /too large/i.test(message)
+      ? 413
+      : /3 hours|invalid file|access is required/i.test(message)
+        ? 400
+        : 500;
+    return errorResponse(message, status);
   }
 }

@@ -14,7 +14,7 @@ RUN apt-get update \
     curl \
     python3 \
     python3-pip \
-  && pip3 install --break-system-packages --no-cache-dir \
+  && pip3 install --break-system-packages --no-cache-dir --upgrade --pre \
     "yt-dlp[default,curl-cffi]" \
     "bgutil-ytdlp-pot-provider==1.3.1" \
   && node --version \

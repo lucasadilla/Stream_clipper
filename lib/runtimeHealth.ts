@@ -1,7 +1,17 @@
-import { isFfmpegAvailable, getFfmpegPath, getFfprobePath } from "@/lib/ffmpeg";
+import {
+  isFfmpegAvailable,
+  getFfmpegPath,
+  getFfprobePath,
+  getFfmpegVersion,
+} from "@/lib/ffmpeg";
 import { hasAnyAiKey } from "@/lib/aiProvider";
 import { getStorageRoot, ensureDir } from "@/lib/storage";
-import { isYtDlpAvailable, getLastYtDlpProbeError } from "@/services/youtubeDownloadService";
+import {
+  isYtDlpAvailable,
+  getLastYtDlpProbeError,
+  getYoutubeCookieStatus,
+  getYtDlpVersion,
+} from "@/services/youtubeDownloadService";
 import { getYtDlpPathCandidates } from "@/lib/ytDlp";
 import { isWhisperAvailable } from "@/services/whisperTranscription";
 import { PRICING_PLANS } from "@/lib/pricing";
@@ -11,8 +21,12 @@ import fs from "fs/promises";
 export interface RuntimeHealthReport {
   ok: boolean;
   ffmpeg: boolean;
+  ffmpegVersion: string | null;
   ytDlp: boolean;
+  ytDlpVersion: string | null;
   ytDlpPotProvider: boolean | null;
+  youtubeCookiesConfigured: boolean;
+  youtubeCookiesValid: boolean;
   aiConfigured: boolean;
   whisperConfigured: boolean;
   storageRoot: string;
@@ -67,9 +81,12 @@ export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
   }
 
   const potProviderUrl = process.env.YT_DLP_POT_PROVIDER_URL?.trim();
-  const [ffmpeg, ytDlp, ytDlpPotProvider] = await Promise.all([
+  const [ffmpeg, ffmpegVersion, ytDlp, ytDlpVersion, youtubeCookies, ytDlpPotProvider] = await Promise.all([
     isFfmpegAvailable(),
+    getFfmpegVersion(),
     isYtDlpAvailable(),
+    getYtDlpVersion(),
+    getYoutubeCookieStatus(),
     potProviderUrl
       ? fetch(`${potProviderUrl}/ping`, {
           signal: AbortSignal.timeout(3000),
@@ -149,6 +166,15 @@ export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
       "The YouTube proof-of-origin token provider is not responding. Redeploy the current Docker image."
     );
   }
+  if (onRailway && !youtubeCookies.configured) {
+    issues.push(
+      "YouTube cookies are not configured. Add a server-only YT_DLP_COOKIES_B64 Railway variable for challenged, private, or restricted videos; users can upload an authorized VOD when direct capture is blocked."
+    );
+  } else if (youtubeCookies.configured && !youtubeCookies.valid) {
+    issues.push(
+      `YouTube cookies are configured but invalid (${youtubeCookies.error ?? "format error"}). Replace YT_DLP_COOKIES_B64 with a Base64-encoded Netscape cookies.txt export.`
+    );
+  }
   if (!ytDlpJsRuntimeCompatible) {
     issues.push(
       `Node ${process.versions.node} is too old for current yt-dlp YouTube challenge solving. Deploy the Node 22 Docker image.`
@@ -179,8 +205,12 @@ export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
   return {
     ok: issues.length === 0,
     ffmpeg,
+    ffmpegVersion,
     ytDlp,
+    ytDlpVersion,
     ytDlpPotProvider,
+    youtubeCookiesConfigured: youtubeCookies.configured,
+    youtubeCookiesValid: youtubeCookies.valid,
     aiConfigured: hasAnyAiKey(),
     whisperConfigured: isWhisperAvailable(),
     storageRoot,

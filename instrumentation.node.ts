@@ -3,6 +3,32 @@
  * instrumentation compile does not try to bundle child_process/ffmpeg.
  */
 let tokenProviderStarted = false;
+let runtimeLogged = false;
+
+async function logMediaRuntime(): Promise<void> {
+  if (runtimeLogged) return;
+  runtimeLogged = true;
+  const [{ getFfmpegVersion }, youtube] = await Promise.all([
+    import("@/lib/ffmpeg"),
+    import("@/services/youtubeDownloadService"),
+  ]);
+  const [ffmpegVersion, ytDlpVersion, cookieStatus] = await Promise.all([
+    getFfmpegVersion(),
+    youtube.getYtDlpVersion(),
+    youtube.getYoutubeCookieStatus(),
+  ]);
+  console.info(`[runtime] FFmpeg: ${ffmpegVersion ?? "not available"}`);
+  console.info(`[runtime] yt-dlp: ${ytDlpVersion ?? "not available"}`);
+  console.info(
+    `[runtime] YouTube cookies: ${
+      cookieStatus.valid
+        ? "configured and valid"
+        : cookieStatus.configured
+          ? `invalid (${cookieStatus.error ?? "format error"})`
+          : "not configured"
+    }`
+  );
+}
 
 async function startYouTubeTokenProvider(): Promise<void> {
   if (tokenProviderStarted || !process.env.YT_DLP_POT_PROVIDER_URL?.trim()) {
@@ -37,6 +63,7 @@ async function startYouTubeTokenProvider(): Promise<void> {
 }
 
 export async function startBackgroundWorker(): Promise<void> {
+  await logMediaRuntime();
   await startYouTubeTokenProvider();
   const { isWorkerEnabled, startWorkerPoller } = await import(
     "@/services/workerService"

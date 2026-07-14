@@ -44,6 +44,7 @@ import {
   sanitizeStreamStartDate,
 } from "@/lib/timelineBounds";
 import type { MarkerKind, TimelineMarker } from "@/lib/editorState";
+import { SourceUploadFallback } from "@/components/SourceUploadFallback";
 
 interface SessionData {
   id: string;
@@ -727,6 +728,24 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
 
       <div className="relative flex-1 min-h-0">
         <div className="flex h-full flex-col min-h-0">
+          {sourcePreparationError && recordedSeconds <= 0 && (
+            <SourceUploadFallback
+              sessionId={sessionId}
+              message={sourcePreparationError}
+              onUploaded={async () => {
+                setSourcePreparationError(null);
+                setTranscriptionError(null);
+                await loadSession();
+                void fetch(`/api/sessions/${sessionId}/transcribe`, {
+                  method: "POST",
+                }).finally(() => {
+                  void loadEvents();
+                  void loadThumbnails();
+                });
+              }}
+            />
+          )}
+
           {/* Video preview */}
           <div className="shrink-0 px-4 pt-3 pb-2 flex justify-center">
             <VideoPreview
