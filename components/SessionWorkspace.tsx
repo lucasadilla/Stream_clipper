@@ -168,7 +168,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const [assistantOpen, setAssistantOpen] = useState(false);
   const captionSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const playerRef = useRef<StreamPlayerHandle>(null);
-  const sourcePreparationInFlight = useRef(false);
+  const sourceStarted = useRef(false);
   const transcribeInFlight = useRef(false);
   const eventsInFlight = useRef(false);
   const audioSyncInFlight = useRef(false);
@@ -424,67 +424,31 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   }, [sessionId, session?.id]);
 
   useEffect(() => {
-    if (!session) return;
-    const sourceDuration = session.sourceMedia?.[0]?.durationSeconds ?? 0;
-    if (sourceDuration >= 3) {
-      setSourcePreparationError(null);
-      return;
-    }
-
-    let cancelled = false;
-    async function prepareSource() {
-      if (sourcePreparationInFlight.current) return;
-      sourcePreparationInFlight.current = true;
-      try {
-        const { ok, data } = await fetchJson<{
-          error?: string;
-          status?: string;
-          recordedSeconds?: number;
-          sourceMedia?: { durationSeconds?: number | null } | null;
-        }>(`/api/sessions/${sessionId}/download-source`, { method: "POST" });
-        if (cancelled) return;
+    if (sourceStarted.current) return;
+    sourceStarted.current = true;
+    void fetchJson<{ error?: string }>(
+      `/api/sessions/${sessionId}/download-source`,
+      { method: "POST" }
+    )
+      .then(({ ok, data }) => {
         if (!ok) {
           setSourcePreparationError(
             data.error
-              ? `Source preparation failed: ${data.error}`
-              : "Source preparation failed on the server"
+              ? `Source download failed: ${data.error}`
+              : "Source download failed on the server"
           );
           return;
         }
-        const readySeconds = Math.max(
-          data.recordedSeconds ?? 0,
-          data.sourceMedia?.durationSeconds ?? 0
-        );
-        setSourcePreparationError(
-          readySeconds >= 3 ? null : "Starting source capture..."
-        );
-        void loadSession();
-        void loadEvents();
-        void loadThumbnails();
-      } catch (error) {
-        if (cancelled) return;
+        setSourcePreparationError(null);
+      })
+      .catch((error) => {
         setSourcePreparationError(
           error instanceof Error
-            ? `Source preparation failed: ${error.message}`
-            : "Source preparation failed on the server"
+            ? `Source download failed: ${error.message}`
+            : "Source download failed on the server"
         );
-      } finally {
-        sourcePreparationInFlight.current = false;
-      }
-    }
-
-    void prepareSource();
-    const retry = window.setInterval(() => void prepareSource(), 20_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(retry);
-    };
-  }, [
-    sessionId,
-    session?.id,
-    session?.liveStatus,
-    session?.sourceMedia?.[0]?.durationSeconds,
-  ]);
+      });
+  }, [sessionId]);
 
   const isLive =
     session?.liveStatus === "live" || session?.liveStatus === "upcoming";

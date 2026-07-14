@@ -29,7 +29,7 @@ function liveFormat(): string {
     Number.isFinite(configured) && configured >= 240
       ? configured
       : process.env.NODE_ENV === "production"
-        ? 360
+        ? 480
         : 1080;
   return `best[height<=${height}][ext=mp4]/best[height<=${height}]/bestvideo[height<=${height}]+bestaudio/best`;
 }
@@ -37,8 +37,6 @@ function liveFormat(): string {
 const MIN_RECORDED_SECONDS = 3;
 /** Growing live captures below this size are likely still starting up. */
 const MIN_FILE_BYTES_FOR_ESTIMATE = 500_000;
-const RECORDING_STARTUP_TIMEOUT_MS = 20_000;
-const RECORDING_STARTUP_CHECK_MS = 4_000;
 
 function estimateDurationFromFileSize(sizeBytes: number): number {
   // Conservative ~300 KB/s for live 1080p-ish capture.
@@ -90,7 +88,6 @@ async function resolveDurationFromFile(
 
 /** In-memory handles for active yt-dlp recording processes (dev server). */
 const activeRecordings = new Map<string, ChildProcess>();
-const activeRecordingErrors = new Map<string, string>();
 
 function isLiveStatus(liveStatus: string | null | undefined): boolean {
   return liveStatus === "live" || liveStatus === "upcoming";
@@ -102,47 +99,6 @@ export function shouldUseLiveRecording(liveStatus: string | null | undefined): b
 
 async function findRecordingFile(uploadDir: string): Promise<string | null> {
   return findBestSourceFileInDir(uploadDir);
-}
-
-async function markRecordingFailed(
-  streamSessionId: string,
-  pid?: number | null
-): Promise<void> {
-  await prisma.liveRecordingState.updateMany({
-    where: {
-      streamSessionId,
-      ...(pid ? { pid } : {}),
-    },
-    data: {
-      status: "failed",
-      pid: null,
-      lastSyncedAt: new Date(),
-    },
-  });
-}
-
-async function waitForRecordingStartup(
-  streamSessionId: string,
-  uploadDir: string,
-  proc: ChildProcess
-): Promise<void> {
-  const deadline = Date.now() + RECORDING_STARTUP_CHECK_MS;
-  while (Date.now() < deadline) {
-    const filePath = await findRecordingFile(uploadDir);
-    if (filePath) return;
-    if (proc.exitCode !== null) break;
-    await delay(250);
-  }
-
-  if (proc.exitCode !== null) {
-    const detail = activeRecordingErrors.get(streamSessionId)?.trim();
-    await markRecordingFailed(streamSessionId, proc.pid);
-    throw new Error(
-      detail
-        ? `Live source capture exited before media arrived: ${detail}`
-        : `Live source capture exited with code ${proc.exitCode}`
-    );
-  }
 }
 
 async function upsertSourceFromFile(
@@ -232,10 +188,7 @@ export async function startLiveRecording(streamSessionId: string) {
   }
 
   if (session.liveRecording?.status === "recording") {
-    const synced = await syncLiveRecording(streamSessionId);
-    if (synced.status === "recording" || synced.recordedSeconds > 0) {
-      return synced;
-    }
+    return syncLiveRecording(streamSessionId);
   }
 
   const uploadDir = getUploadDir(streamSessionId);
@@ -259,18 +212,9 @@ export async function startLiveRecording(streamSessionId: string) {
 
   const proc = spawn(invocation.command, args, {
     detached: true,
-    stdio: ["ignore", "ignore", "pipe"],
+    stdio: "ignore",
     shell: false,
     windowsHide: true,
-  });
-  activeRecordingErrors.delete(streamSessionId);
-  proc.stderr?.setEncoding("utf8");
-  proc.stderr?.on("data", (chunk: string) => {
-    const previous = activeRecordingErrors.get(streamSessionId) ?? "";
-    activeRecordingErrors.set(
-      streamSessionId,
-      `${previous}${chunk}`.slice(-1800)
-    );
   });
   proc.unref();
   activeRecordings.set(streamSessionId, proc);
@@ -292,46 +236,9 @@ export async function startLiveRecording(streamSessionId: string) {
     },
   });
 
-  proc.once("exit", (code) => {
-    if (activeRecordings.get(streamSessionId) === proc) {
-      activeRecordings.delete(streamSessionId);
-    }
-    void (async () => {
-      if (code !== 0) {
-        await markRecordingFailed(streamSessionId, proc.pid);
-        return;
-      }
-
-      const synced = await syncLiveRecording(streamSessionId);
-      if (synced.recordedSeconds <= 0) {
-        await markRecordingFailed(streamSessionId, proc.pid);
-        return;
-      }
-
-      await prisma.liveRecordingState.updateMany({
-        where: { streamSessionId },
-        data: {
-          status: "completed",
-          pid: null,
-          lastSyncedAt: new Date(),
-        },
-      });
-    })().catch(() => {});
-  });
-
-  await waitForRecordingStartup(streamSessionId, uploadDir, proc);
-
-  // Return real media immediately when yt-dlp has already opened its output.
-  const startedFile = await findRecordingFile(uploadDir);
-  if (startedFile) {
-    const synced = await syncLiveRecording(streamSessionId);
-    if (synced.sourceMedia) return synced;
-  }
-
   // Placeholder until file appears on disk
-  const sourceMedia =
-    session.sourceMedia[0] ??
-    (await prisma.sourceMedia.create({
+  if (!session.sourceMedia[0]) {
+    await prisma.sourceMedia.create({
       data: {
         streamSessionId,
         originalFilename: `${session.youtubeVideoId}.mkv`,
@@ -341,12 +248,13 @@ export async function startLiveRecording(streamSessionId: string) {
         durationSeconds: 0,
         isLiveRecording: true,
       },
-    }));
+    });
+  }
 
   return {
     status: "recording" as const,
     recordedSeconds: 0,
-    sourceMedia,
+    sourceMedia: session.sourceMedia[0],
   };
 }
 
@@ -363,18 +271,6 @@ export async function syncLiveRecording(streamSessionId: string) {
 
   if (!filePath || !existsSync(filePath)) {
     const state = session.liveRecording;
-    const startedAt = state?.startedAt?.getTime() ?? Date.now();
-    const stalled =
-      state?.status === "recording" &&
-      Date.now() - startedAt >= RECORDING_STARTUP_TIMEOUT_MS;
-    if (stalled) {
-      await markRecordingFailed(streamSessionId, state?.pid);
-      return {
-        status: "failed" as const,
-        recordedSeconds: 0,
-        sourceMedia: null,
-      };
-    }
     return {
       status: state?.status ?? "recording",
       recordedSeconds: state?.recordedSeconds ?? 0,
@@ -433,7 +329,6 @@ export async function stopLiveRecording(
   const pids = new Set<number>();
   if (proc?.pid) pids.add(proc.pid);
   activeRecordings.delete(streamSessionId);
-  activeRecordingErrors.delete(streamSessionId);
 
   const state = await prisma.liveRecordingState.findUnique({
     where: { streamSessionId },
@@ -489,7 +384,7 @@ function killProcessTree(pid: number) {
 }
 
 /** Unified entry: live → record, VOD → full download. */
-async function acquireSourceMediaOnce(streamSessionId: string) {
+export async function acquireSourceMedia(streamSessionId: string) {
   const { refreshSessionLiveMetadata } = await import("@/services/youtubeService");
   try {
     await refreshSessionLiveMetadata(streamSessionId);
@@ -499,7 +394,7 @@ async function acquireSourceMediaOnce(streamSessionId: string) {
 
   const session = await prisma.streamSession.findUnique({
     where: { id: streamSessionId },
-    include: { sourceMedia: { take: 1 }, liveRecording: true },
+    include: { sourceMedia: { take: 1 } },
   });
   if (!session) throw new Error("Session not found");
 
@@ -514,21 +409,6 @@ async function acquireSourceMediaOnce(streamSessionId: string) {
     return startLiveRecording(streamSessionId);
   }
 
-  if (session.liveRecording?.status === "recording") {
-    const active = activeRecordings.get(streamSessionId);
-    if (active?.pid) killProcessTree(active.pid);
-    activeRecordings.delete(streamSessionId);
-    activeRecordingErrors.delete(streamSessionId);
-    await prisma.liveRecordingState.updateMany({
-      where: { streamSessionId },
-      data: { status: "stopped", pid: null, lastSyncedAt: new Date() },
-    });
-    await prisma.sourceMedia.updateMany({
-      where: { streamSessionId },
-      data: { isLiveRecording: false },
-    });
-  }
-
   const { downloadSourceFromYouTube } = await import(
     "@/services/youtubeDownloadService"
   );
@@ -538,26 +418,6 @@ async function acquireSourceMediaOnce(streamSessionId: string) {
     recordedSeconds: media.durationSeconds ?? 0,
     sourceMedia: media,
   };
-}
-
-const activeSourceAcquisitions = new Map<
-  string,
-  ReturnType<typeof acquireSourceMediaOnce>
->();
-
-export function acquireSourceMedia(streamSessionId: string) {
-  const active = activeSourceAcquisitions.get(streamSessionId);
-  if (active) return active;
-
-  const acquisition = acquireSourceMediaOnce(streamSessionId);
-  activeSourceAcquisitions.set(streamSessionId, acquisition);
-  const release = () => {
-    if (activeSourceAcquisitions.get(streamSessionId) === acquisition) {
-      activeSourceAcquisitions.delete(streamSessionId);
-    }
-  };
-  void acquisition.then(release, release);
-  return acquisition;
 }
 
 export function getRecordedSecondsForSession(
