@@ -1,8 +1,8 @@
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { PENDING_CREATOR_CODE_COOKIE } from "@/services/authAccountService";
 import { normalizeCreatorBetaCode } from "@/lib/creatorBeta";
-import { errorResponse, jsonResponse } from "@/lib/utils";
+import { errorResponse } from "@/lib/utils";
 
 const schema = z.object({
   code: z.string().max(80).optional().nullable(),
@@ -13,7 +13,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = schema.parse(await request.json());
     const normalized = body.code ? normalizeCreatorBetaCode(body.code) : "";
-    const response = jsonResponse({
+    const response = NextResponse.json({
       ok: true,
       saved: Boolean(normalized),
     });

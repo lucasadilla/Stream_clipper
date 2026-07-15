@@ -9,16 +9,16 @@ export interface KickProfile {
 
 /**
  * Kick OAuth 2 provider (https://docs.kick.com).
- * Requires KICK_CLIENT_ID + KICK_CLIENT_SECRET.
+ * Requires AUTH_KICK_ID + AUTH_KICK_SECRET.
  */
 export function KickProvider(
   options: OAuthUserConfig<KickProfile>
 ): OAuthConfig<KickProfile> {
+  const { checks: _ignoredChecks, ...rest } = options;
   return {
     id: "kick",
     name: "Kick",
     type: "oauth",
-    checks: ["pkce", "state"],
     authorization: {
       url: "https://id.kick.com/oauth/authorize",
       params: {
@@ -29,7 +29,11 @@ export function KickProvider(
     token: "https://id.kick.com/oauth/token",
     userinfo: {
       url: "https://api.kick.com/public/v1/users",
-      async request({ tokens }) {
+      async request({
+        tokens,
+      }: {
+        tokens: { access_token?: string };
+      }) {
         const response = await fetch("https://api.kick.com/public/v1/users", {
           headers: {
             Authorization: `Bearer ${tokens.access_token}`,
@@ -68,6 +72,7 @@ export function KickProvider(
       };
     },
     style: { brandColor: "#53fc18" },
-    ...options,
+    ...rest,
+    checks: ["pkce", "state"],
   };
 }

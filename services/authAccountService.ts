@@ -119,7 +119,7 @@ export async function ensureBillingAccountForAuthUser(params: {
         termsAccepted: true,
       });
       account = await prisma.billingAccount.findUniqueOrThrow({
-        where: { id: unlocked.account.id },
+        where: { id: unlocked.id },
       });
     } catch {
       // leave pending code; user can retry on welcome page
