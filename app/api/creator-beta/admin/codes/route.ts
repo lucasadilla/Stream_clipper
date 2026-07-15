@@ -4,12 +4,15 @@ import { hasCreatorBetaAdminAccess } from "@/lib/creatorBeta";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import {
   createCreatorBetaCode,
+  createCreatorBetaCodeBatch,
   listCreatorBetaCodes,
   serializeCreatorBetaCode,
 } from "@/services/creatorBetaService";
 
 const createSchema = z.object({
   name: z.string().trim().min(1).max(100),
+  intendedFor: z.string().trim().max(120).nullable().optional(),
+  count: z.number().int().min(1).max(50).optional().default(1),
   expiresAt: z.string().datetime().nullable().optional(),
   notes: z.string().max(2000).nullable().optional(),
 });
@@ -34,27 +37,39 @@ export async function POST(request: NextRequest) {
   if (denied) return denied;
   try {
     const input = createSchema.parse(await request.json());
-    const { item, plainCode } = await createCreatorBetaCode({
+    const count = input.count ?? 1;
+    if (count === 1) {
+      const { item, plainCode } = await createCreatorBetaCode({
+        name: input.name,
+        intendedFor: input.intendedFor,
+        expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
+        notes: input.notes,
+      });
+      return jsonResponse(
+        {
+          codes: [serializeCreatorBetaCode({ ...item, usedByAccount: null })],
+          privateCodes: [plainCode],
+          privateCode: plainCode,
+          message: "Copy this private code now. It cannot be viewed again.",
+        },
+        201
+      );
+    }
+
+    const created = await createCreatorBetaCodeBatch({
       name: input.name,
+      intendedFor: input.intendedFor,
+      count,
       expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
       notes: input.notes,
     });
     return jsonResponse(
       {
-        code: {
-          id: item.id,
-          name: item.name,
-          codeHint: item.codeHint,
-          active: item.active,
-          used: false,
-          usedBy: null,
-          usedAt: null,
-          expiresAt: item.expiresAt?.toISOString() ?? null,
-          notes: item.notes,
-          createdAt: item.createdAt.toISOString(),
-        },
-        privateCode: plainCode,
-        message: "Copy this private code now. It cannot be viewed again.",
+        codes: created.map(({ item }) =>
+          serializeCreatorBetaCode({ ...item, usedByAccount: null })
+        ),
+        privateCodes: created.map((row) => row.plainCode),
+        message: `Created ${created.length} codes. Copy them now — they cannot be viewed again.`,
       },
       201
     );

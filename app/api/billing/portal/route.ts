@@ -3,13 +3,14 @@ import {
   createPortalSession,
   getBillingAccountIdFromRequest,
 } from "@/services/billingService";
+import { resolvePublicOrigin } from "@/lib/publicOrigin";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 
 export async function POST(request: NextRequest) {
   try {
     const session = await createPortalSession({
       accountId: getBillingAccountIdFromRequest(request),
-      origin: request.nextUrl.origin,
+      origin: resolvePublicOrigin(request),
     });
     return jsonResponse({ url: session.url });
   } catch (error) {

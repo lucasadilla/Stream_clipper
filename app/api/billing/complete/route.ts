@@ -2,10 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { BILLING_ACCOUNT_COOKIE, getStripe } from "@/lib/stripe";
 import { upsertBillingAccountFromCheckout } from "@/services/billingService";
 import { getPostHogClient } from "@/lib/posthog-server";
+import { resolvePublicOrigin } from "@/lib/publicOrigin";
 
 export async function GET(request: NextRequest) {
   const sessionId = request.nextUrl.searchParams.get("session_id");
-  const redirectUrl = new URL("/#pricing", request.nextUrl.origin);
+  const redirectUrl = new URL("/#pricing", resolvePublicOrigin(request));
 
   if (!sessionId) {
     redirectUrl.searchParams.set("billing", "missing_session");

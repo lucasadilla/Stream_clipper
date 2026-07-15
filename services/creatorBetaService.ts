@@ -159,6 +159,7 @@ function generatePrivateCode(): string {
 
 export async function createCreatorBetaCode(input: {
   name: string;
+  intendedFor?: string | null;
   expiresAt?: Date | null;
   notes?: string | null;
 }) {
@@ -166,6 +167,7 @@ export async function createCreatorBetaCode(input: {
   const item = await prisma.creatorBetaCode.create({
     data: {
       name: input.name.trim().slice(0, 100),
+      intendedFor: input.intendedFor?.trim().slice(0, 120) || null,
       codeHash: hashCreatorBetaCode(plainCode),
       codeHint: `SCB-...-${plainCode.slice(-4)}`,
       expiresAt: input.expiresAt ?? null,
@@ -173,6 +175,33 @@ export async function createCreatorBetaCode(input: {
     },
   });
   return { item, plainCode };
+}
+
+export async function createCreatorBetaCodeBatch(input: {
+  name: string;
+  intendedFor?: string | null;
+  count: number;
+  expiresAt?: Date | null;
+  notes?: string | null;
+}) {
+  const count = Math.min(50, Math.max(1, Math.floor(input.count)));
+  const created: Array<{ item: Awaited<ReturnType<typeof createCreatorBetaCode>>["item"]; plainCode: string }> =
+    [];
+  for (let i = 0; i < count; i++) {
+    const label =
+      count === 1
+        ? input.name
+        : `${input.name.trim()} #${i + 1}`;
+    created.push(
+      await createCreatorBetaCode({
+        name: label.slice(0, 100),
+        intendedFor: input.intendedFor,
+        expiresAt: input.expiresAt,
+        notes: input.notes,
+      })
+    );
+  }
+  return created;
 }
 
 export async function listCreatorBetaCodes() {
@@ -206,6 +235,7 @@ export function serializeCreatorBetaCode(
   return {
     id: item.id,
     name: item.name,
+    intendedFor: item.intendedFor,
     codeHint: item.codeHint,
     active: item.active,
     used: Boolean(item.usedAt || item.usedByAccountId),

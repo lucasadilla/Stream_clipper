@@ -124,6 +124,8 @@ export async function createCheckoutSession(params: {
   planId: string;
   interval: BillingInterval;
   origin: string;
+  customerEmail?: string | null;
+  billingAccountId?: string | null;
 }) {
   if (!isCheckoutPlan(params.planId)) {
     throw new Error("Choose Creator, Pro, or Studio to start checkout");
@@ -145,11 +147,29 @@ export async function createCheckoutSession(params: {
     line_items: [{ price: priceId, quantity: 1 }],
     allow_promotion_codes: true,
     success_url: `${params.origin}/api/billing/complete?session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${params.origin}/#pricing`,
-    client_reference_id: planId,
-    metadata: { plan: planId, interval: params.interval },
-    subscription_data: { metadata: { plan: planId, interval: params.interval } },
+    cancel_url: `${params.origin}/welcome`,
+    client_reference_id: params.billingAccountId || planId,
+    metadata: {
+      plan: planId,
+      interval: params.interval,
+      ...(params.billingAccountId
+        ? { billingAccountId: params.billingAccountId }
+        : {}),
+    },
+    subscription_data: {
+      metadata: {
+        plan: planId,
+        interval: params.interval,
+        ...(params.billingAccountId
+          ? { billingAccountId: params.billingAccountId }
+          : {}),
+      },
+    },
   };
+
+  if (params.customerEmail?.includes("@")) {
+    sessionParams.customer_email = params.customerEmail;
+  }
 
   if (isManagedPaymentsEnabled()) {
     sessionParams.managed_payments = { enabled: true };
