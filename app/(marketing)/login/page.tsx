@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { signIn, signOut } from "next-auth/react";
+import { getProviders, signIn, signOut } from "next-auth/react";
 import posthog from "posthog-js";
 import { fetchJson } from "@/lib/apiClient";
 import { cn } from "@/lib/cn";
@@ -26,22 +26,57 @@ function LoginPageInner() {
   const authError = searchParams.get("error");
 
   useEffect(() => {
-    void fetchJson<{
-      providers: ProviderInfo[];
-      emailEnabled: boolean;
-    }>("/api/auth/providers").then(({ data }) => {
-      setProviders(data.providers ?? []);
-      setEmailEnabled(Boolean(data.emailEnabled));
-    });
+    void (async () => {
+      // Prefer our app route so the button list never depends on Auth.js's
+      // /api/auth/providers shape (which next-auth/react signIn() also needs).
+      try {
+        const { data } = await fetchJson<{
+          providers: ProviderInfo[];
+          emailEnabled: boolean;
+        }>("/api/auth/configured-providers");
+        if (data.providers?.length) {
+          setProviders(data.providers);
+          setEmailEnabled(Boolean(data.emailEnabled));
+          return;
+        }
+      } catch {
+        // fall through to Auth.js getProviders()
+      }
 
-    void fetchJson<{ account: BillingAccountSummary | null }>("/api/auth/me").then(
-      ({ data }) => {
+      try {
+        const configured = await getProviders();
+        if (!configured) {
+          setProviders([]);
+          setEmailEnabled(false);
+          return;
+        }
+        const list = Object.values(configured)
+          .filter(
+            (provider): provider is NonNullable<typeof provider> =>
+              Boolean(provider && typeof provider.id === "string")
+          )
+          .map((provider) => ({
+            id: provider.id,
+            name: provider.name,
+          }));
+        setProviders(list);
+        setEmailEnabled(list.some((provider) => provider.id === "resend"));
+      } catch {
+        setProviders([]);
+        setEmailEnabled(false);
+      }
+    })();
+
+    void fetchJson<{ account: BillingAccountSummary | null }>("/api/auth/me")
+      .then(({ data }) => {
         if (data.account) {
           setAccount(data.account);
           posthog.identify(data.account.id, { email: data.account.email });
         }
-      }
-    );
+      })
+      .catch(() => {
+        // stay signed out in UI
+      });
   }, []);
 
   useEffect(() => {
