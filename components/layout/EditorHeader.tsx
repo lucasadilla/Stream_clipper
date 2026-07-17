@@ -8,6 +8,8 @@ interface EditorHeaderProps {
   recordedSeconds?: number;
   deleting?: boolean;
   onDelete?: () => void;
+  chatVisible?: boolean;
+  onToggleChat?: () => void;
 }
 
 export function EditorHeader({
@@ -17,6 +19,8 @@ export function EditorHeader({
   recordedSeconds = 0,
   deleting,
   onDelete,
+  chatVisible,
+  onToggleChat,
 }: EditorHeaderProps) {
   return (
     <header className="flex h-10 shrink-0 items-center justify-between gap-3 border-b border-[var(--color-card-border)] bg-[#020302] px-3 sm:px-4">
@@ -33,6 +37,20 @@ export function EditorHeader({
           <span className="hidden font-mono text-[10px] text-[var(--color-muted)] sm:inline">
             {storageLabel}
           </span>
+        )}
+        {onToggleChat && (
+          <button
+            type="button"
+            onClick={onToggleChat}
+            aria-pressed={chatVisible}
+            className={`border px-2 py-1 text-[10px] uppercase tracking-[0.12em] transition-colors ${
+              chatVisible
+                ? "border-[var(--color-accent)]/50 text-[var(--color-accent)]"
+                : "border-[var(--color-card-border)] text-[var(--color-muted)] hover:border-[var(--color-accent)]/40 hover:text-white"
+            }`}
+          >
+            Chat
+          </button>
         )}
         {onDelete && (
           <button

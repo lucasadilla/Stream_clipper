@@ -138,13 +138,39 @@ export async function pollChatMessages(streamSessionId: string) {
 
 export async function getChatMessages(
   streamSessionId: string,
-  limit = 200
+  options: {
+    limit?: number;
+    aroundSeconds?: number | null;
+    windowSeconds?: number;
+  } = {}
 ) {
-  return prisma.chatMessage.findMany({
+  const limit = Math.min(Math.max(options.limit ?? 300, 1), 1000);
+  const around = options.aroundSeconds;
+  const windowSeconds = Math.min(
+    Math.max(options.windowSeconds ?? 120, 30),
+    600
+  );
+
+  if (around != null && Number.isFinite(around)) {
+    const start = Math.max(0, around - windowSeconds);
+    const end = around + windowSeconds;
+    return prisma.chatMessage.findMany({
+      where: {
+        streamSessionId,
+        videoTimeSeconds: { gte: start, lte: end },
+      },
+      orderBy: [{ videoTimeSeconds: "asc" }, { publishedAt: "asc" }],
+      take: limit,
+    });
+  }
+
+  // Latest slice by video time (fallback publishedAt), returned ascending.
+  const newest = await prisma.chatMessage.findMany({
     where: { streamSessionId },
-    orderBy: { publishedAt: "asc" },
+    orderBy: [{ videoTimeSeconds: "desc" }, { publishedAt: "desc" }],
     take: limit,
   });
+  return newest.reverse();
 }
 
 /**

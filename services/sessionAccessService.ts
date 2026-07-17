@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { hasAppAccess, getBillingAccount } from "@/services/billingService";
+import { REPLACED_SESSION_STATUS } from "@/services/sessionCleanupService";
 
 export class SessionAccessError extends Error {
   status: number;
@@ -36,7 +37,7 @@ export async function ensureSessionBillingAccess(
     where: { id: sessionId },
     select: { id: true, billingAccountId: true, liveStatus: true },
   });
-  if (!session) {
+  if (!session || session.liveStatus === REPLACED_SESSION_STATUS) {
     throw new SessionAccessError("Session not found", 404);
   }
 

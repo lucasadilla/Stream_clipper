@@ -32,42 +32,94 @@ export async function saveClip(
   return data.clip as { id: string; title: string };
 }
 
+export class RenderAbortedError extends Error {
+  constructor(message = "Render cancelled") {
+    super(message);
+    this.name = "RenderAbortedError";
+  }
+}
+
+function isAbortError(err: unknown): boolean {
+  if (err instanceof RenderAbortedError) return true;
+  if (!err || typeof err !== "object") return false;
+  const name = "name" in err ? String(err.name) : "";
+  return name === "AbortError" || name === "RenderAbortedError";
+}
+
+export { isAbortError };
+
 async function pollRenderJob(
   jobId: string,
-  onProgress?: (update: RenderProgressUpdate) => void
+  onProgress?: (update: RenderProgressUpdate) => void,
+  signal?: AbortSignal
 ): Promise<{ downloadUrl: string }> {
   const started = Date.now();
   const timeoutMs = 10 * 60 * 1000;
+  let consecutiveErrors = 0;
 
   while (Date.now() - started < timeoutMs) {
-    const res = await fetch(`/api/render-jobs/${jobId}`);
-    const data = (await res.json()) as {
-      job?: {
-        status: string;
-        progress: number;
-        errorMessage?: string | null;
-        outputPath?: string | null;
+    if (signal?.aborted) throw new RenderAbortedError();
+
+    let status = "queued";
+    let progress = 0;
+    try {
+      const res = await fetch(`/api/render-jobs/${jobId}`, { signal });
+      const data = (await res.json()) as {
+        job?: {
+          status: string;
+          progress: number;
+          errorMessage?: string | null;
+          outputPath?: string | null;
+        };
+        error?: string;
       };
-      error?: string;
-    };
-    if (!res.ok || !data.job) {
-      throw new Error(data.error ?? "Failed to poll render job");
+      if (!res.ok || !data.job) {
+        throw new Error(data.error ?? "Failed to poll render job");
+      }
+
+      consecutiveErrors = 0;
+      status = data.job.status;
+      progress = data.job.progress;
+
+      onProgress?.({
+        progress,
+        status,
+        errorMessage: data.job.errorMessage,
+      });
+
+      if (status === "completed") {
+        return { downloadUrl: renderJobDownloadUrl(jobId) };
+      }
+      if (status === "failed") {
+        throw new Error(data.job.errorMessage ?? "Render failed");
+      }
+    } catch (err) {
+      if (isAbortError(err) || signal?.aborted) throw new RenderAbortedError();
+      consecutiveErrors += 1;
+      // Dev recompile / brief network blips should not kill a long encode.
+      if (consecutiveErrors >= 8) throw err;
     }
 
-    onProgress?.({
-      progress: data.job.progress,
-      status: data.job.status,
-      errorMessage: data.job.errorMessage,
+    // Faster while queued / early progress; ease off during long encodes.
+    const delayMs =
+      consecutiveErrors > 0
+        ? 1200
+        : status === "queued" || progress < 55
+          ? 350
+          : 900;
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, delayMs);
+      if (!signal) return;
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(new RenderAbortedError());
+      };
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
     });
-
-    if (data.job.status === "completed") {
-      return { downloadUrl: renderJobDownloadUrl(jobId) };
-    }
-    if (data.job.status === "failed") {
-      throw new Error(data.job.errorMessage ?? "Render failed");
-    }
-
-    await new Promise((r) => setTimeout(r, 1500));
   }
 
   throw new Error("Timed out waiting for render");
@@ -75,26 +127,35 @@ async function pollRenderJob(
 
 export async function renderClip(
   clipId: string,
-  format: RenderFormat = "vertical",
-  includeCaptions = true,
+  format: RenderFormat = "native",
+  includeCaptions = false,
   captionAppearance?: CaptionAppearance,
   captionCues?: CaptionCue[],
   onProgress?: (update: RenderProgressUpdate) => void,
-  editorState?: EditorState
+  editorState?: EditorState,
+  signal?: AbortSignal
 ) {
+  if (signal?.aborted) throw new RenderAbortedError();
   onProgress?.({ progress: 5, status: "queued" });
 
-  const res = await fetch(`/api/clips/${clipId}/render`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      includeCaptions,
-      format,
-      captionAppearance,
-      captionCues,
-      editorState,
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`/api/clips/${clipId}/render`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        includeCaptions,
+        format,
+        captionAppearance,
+        captionCues,
+        editorState,
+      }),
+      signal,
+    });
+  } catch (err) {
+    if (isAbortError(err) || signal?.aborted) throw new RenderAbortedError();
+    throw err;
+  }
   const data = (await res.json()) as {
     jobId?: string;
     downloadUrl?: string;
@@ -109,7 +170,7 @@ export async function renderClip(
   const jobId = data.jobId!;
   onProgress?.({ progress: 10, status: data.status ?? "queued" });
 
-  const polled = await pollRenderJob(jobId, onProgress);
+  const polled = await pollRenderJob(jobId, onProgress, signal);
 
   return {
     jobId,
@@ -121,8 +182,8 @@ export async function saveAndRenderClip(
   sessionId: string,
   selection: ClipSelection,
   title?: string,
-  format: RenderFormat = "vertical",
-  includeCaptions = true,
+  format: RenderFormat = "native",
+  includeCaptions = false,
   captionAppearance?: CaptionAppearance,
   onProgress?: (update: RenderProgressUpdate) => void
 ) {

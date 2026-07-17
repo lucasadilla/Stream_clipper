@@ -20,10 +20,17 @@ import {
   failPlatformExport,
   reclaimStalePlatformExports,
 } from "@/services/platformExportService";
+import {
+  claimNextSocialPublishJob,
+  executeSocialPublishJob,
+  failSocialPublishJob,
+  reclaimStaleSocialPublishJobs,
+} from "@/services/social/socialPublishingService";
 
 const WORKER_ID = `worker-${process.pid}-${randomUUID().slice(0, 8)}`;
 
 let tickInFlight = false;
+let pendingNudge = false;
 let lastRetentionAt = 0;
 
 function staleMs(): number {
@@ -45,7 +52,9 @@ export function isWorkerEnabled(): boolean {
   const raw = process.env.WORKER_ENABLED?.trim().toLowerCase();
   if (raw === "0" || raw === "false" || raw === "off") return false;
   if (raw === "1" || raw === "true" || raw === "on") return true;
-  return process.env.NODE_ENV === "production";
+  // On by default in all environments so render jobs don't sit queued in
+  // local next-dev (previously only processed when the API awaited a tick).
+  return true;
 }
 
 export async function reclaimStaleRenderJobs(): Promise<number> {
@@ -183,6 +192,19 @@ async function processOnePlatformExport(): Promise<boolean> {
   return true;
 }
 
+async function processOneSocialPublish(): Promise<boolean> {
+  const jobId = await claimNextSocialPublishJob();
+  if (!jobId) return false;
+
+  try {
+    await executeSocialPublishJob(jobId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Social publish failed";
+    await failSocialPublishJob(jobId, message);
+  }
+  return true;
+}
+
 async function processOneTranscription(): Promise<boolean> {
   const sessionIds = await listSessionsNeedingTranscription(6);
   for (const sessionId of sessionIds) {
@@ -225,27 +247,31 @@ export interface WorkerTickResult {
   reclaimed: number;
   renders: number;
   platformExports: number;
+  socialPublishes: number;
   transcriptions: number;
   retentionDeleted: number;
 }
 
 export async function runWorkerTick(): Promise<WorkerTickResult> {
   if (tickInFlight) {
+    pendingNudge = true;
     return {
       reclaimed: 0,
       renders: 0,
       platformExports: 0,
+      socialPublishes: 0,
       transcriptions: 0,
       retentionDeleted: 0,
     };
   }
   tickInFlight = true;
   try {
-    const [staleRenders, stalePlatformExports] = await Promise.all([
+    const [staleRenders, stalePlatformExports, staleSocial] = await Promise.all([
       reclaimStaleRenderJobs(),
       reclaimStalePlatformExports(),
+      reclaimStaleSocialPublishJobs(),
     ]);
-    const reclaimed = staleRenders + stalePlatformExports;
+    const reclaimed = staleRenders + stalePlatformExports + staleSocial;
     let renders = 0;
     // Process up to a few renders per tick so the loop stays responsive.
     for (let i = 0; i < 2; i++) {
@@ -257,6 +283,10 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
     let platformExports = 0;
     const didPlatformExport = await processOnePlatformExport();
     if (didPlatformExport) platformExports = 1;
+
+    let socialPublishes = 0;
+    const didSocial = await processOneSocialPublish();
+    if (didSocial) socialPublishes = 1;
 
     let transcriptions = 0;
     const didTx = await processOneTranscription();
@@ -277,11 +307,18 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
       reclaimed,
       renders,
       platformExports,
+      socialPublishes,
       transcriptions,
       retentionDeleted,
     };
   } finally {
     tickInFlight = false;
+    if (pendingNudge) {
+      pendingNudge = false;
+      void runWorkerTick().catch((err) =>
+        console.error("[worker] pending nudge failed:", err)
+      );
+    }
   }
 }
 
@@ -293,7 +330,7 @@ export function startWorkerPoller(): void {
   pollerStarted = true;
   const pollMs = Math.max(
     2000,
-    Number.parseInt(process.env.WORKER_POLL_MS || "8000", 10) || 8000
+    Number.parseInt(process.env.WORKER_POLL_MS || "2000", 10) || 2000
   );
   console.info(`[worker] starting poller every ${pollMs}ms (${WORKER_ID})`);
   void runWorkerTick().catch((err) =>

@@ -1,13 +1,17 @@
 import path from "path";
 import fs from "fs/promises";
 import { existsSync } from "fs";
-import { extractFastTimelineFrame, extractThumbnailStrip } from "@/lib/ffmpeg";
+import { extractSoloTimelineFrame, extractThumbnailStrip } from "@/lib/ffmpeg";
 import {
-  THUMB_INTERVAL_SECONDS,
   THUMB_LIVE_TAIL_PRIORITY_SECONDS,
-  THUMB_SYNC_CHUNK_SECONDS,
+  THUMB_MAX_FRAME_COUNT,
+  THUMB_SOLO_QUALITY,
+  THUMB_SOLO_WIDTH_PX,
   THUMB_SYNC_PASSES,
   THUMB_WIDTH_PX,
+  expectedThumbCountForDuration,
+  sparseThumbStarts,
+  thumbIntervalForDuration,
 } from "@/lib/thumbnailConstants";
 import { sanitizeDurationSeconds } from "@/lib/timelineBounds";
 import {
@@ -18,6 +22,7 @@ import {
   toRelativeStoragePath,
 } from "@/lib/storage";
 import { findLocalSourceMedia } from "@/services/sourceMediaRepairService";
+import { prisma } from "@/lib/db";
 
 export interface TimelineThumbnail {
   startTimeSeconds: number;
@@ -27,8 +32,6 @@ export interface TimelineThumbnail {
 
 /** Legacy full-resolution thumbs (~200 KB); new strip thumbs are ~3 KB. */
 const LEGACY_THUMB_MIN_BYTES = 30 * 1024;
-
-const MAX_SPAN_SECONDS_PER_SYNC = THUMB_SYNC_CHUNK_SECONDS;
 
 /** Strip extraction — one at a time per session. */
 const activeExtractions = new Set<string>();
@@ -40,11 +43,9 @@ function thumbStartFromFilename(filename: string): number | null {
   return Number.isNaN(start) ? null : start;
 }
 
-function alignBlock(timeSeconds: number): number {
-  return (
-    Math.floor(Math.max(0, timeSeconds) / THUMB_INTERVAL_SECONDS) *
-    THUMB_INTERVAL_SECONDS
-  );
+function alignBlock(timeSeconds: number, interval: number): number {
+  const step = Math.max(1, interval);
+  return Math.floor(Math.max(0, timeSeconds) / step) * step;
 }
 
 async function listThumbStarts(framesDir: string): Promise<number[]> {
@@ -90,6 +91,7 @@ export async function capturePriorityThumbs(
   const starts = new Set(await listThumbStarts(framesDir));
   const inputPath = resolveStoragePath(sourceMedia.filePath);
   const prioritizeTail = options?.prioritizeTail ?? false;
+  const interval = thumbIntervalForDuration(recorded);
 
   const jobs: Array<{ blockStart: number; seekSeconds: number }> = [];
 
@@ -97,8 +99,8 @@ export async function capturePriorityThumbs(
     jobs.push({ blockStart: 0, seekSeconds: 0 });
   }
 
-  if (prioritizeTail && recorded >= THUMB_INTERVAL_SECONDS) {
-    const tailBlock = alignBlock(recorded - 1);
+  if (prioritizeTail && recorded >= interval) {
+    const tailBlock = alignBlock(recorded - 1, interval);
     if (!starts.has(tailBlock)) {
       jobs.push({
         blockStart: tailBlock,
@@ -111,11 +113,12 @@ export async function capturePriorityThumbs(
     jobs.map(async ({ blockStart, seekSeconds }) => {
       const dest = path.join(framesDir, `thumb_${blockStart}.jpg`);
       try {
-        await extractFastTimelineFrame(
+        await extractSoloTimelineFrame(
           inputPath,
           dest,
           seekSeconds,
-          THUMB_WIDTH_PX
+          THUMB_SOLO_WIDTH_PX,
+          THUMB_SOLO_QUALITY
         );
       } catch {
         // strip pass will cover this block
@@ -127,111 +130,100 @@ export async function capturePriorityThumbs(
 async function extractMissingRange(
   inputPath: string,
   framesDir: string,
-  fromSeconds: number,
-  toSeconds: number
+  expectedBlocks: number[],
+  interval: number
 ): Promise<void> {
-  const span = toSeconds - fromSeconds;
-  if (span < 2) return;
-
-  const expectedBlocks: number[] = [];
-  for (
-    let t = fromSeconds;
-    t < toSeconds;
-    t += THUMB_INTERVAL_SECONDS
-  ) {
-    expectedBlocks.push(t);
-  }
   if (expectedBlocks.length === 0) return;
 
-  const tmpDir = path.join(framesDir, `strip-tmp-${Date.now()}`);
-  await ensureDir(tmpDir);
+  const isArithmetic = expectedBlocks.every((start, index) => {
+    if (index === 0) return true;
+    return start - expectedBlocks[index - 1]! === interval;
+  });
 
-  try {
-    await extractThumbnailStrip(
-      inputPath,
-      path.join(tmpDir, "t_%06d.jpg"),
-      fromSeconds,
-      span,
-      THUMB_INTERVAL_SECONDS,
-      THUMB_WIDTH_PX
-    );
+  const useStrip = isArithmetic && expectedBlocks.length > 4;
+  if (useStrip) {
+    const fromSeconds = expectedBlocks[0]!;
+    const lastStart = expectedBlocks[expectedBlocks.length - 1]!;
+    const span = Math.max(interval, lastStart - fromSeconds + interval);
+    if (span >= 2) {
+      const tmpDir = path.join(framesDir, `strip-tmp-${Date.now()}`);
+      await ensureDir(tmpDir);
+      try {
+        await extractThumbnailStrip(
+          inputPath,
+          path.join(tmpDir, "t_%06d.jpg"),
+          fromSeconds,
+          span,
+          interval,
+          THUMB_WIDTH_PX
+        );
 
-    const outputs = (await fs.readdir(tmpDir))
-      .filter((f) => f.startsWith("t_"))
-      .sort();
+        const outputs = (await fs.readdir(tmpDir))
+          .filter((f) => f.startsWith("t_"))
+          .sort();
 
-    // Only trust strip→block mapping when counts match. Keyframe-only extracts
-    // often return fewer images; renaming by index would stamp wrong times.
-    if (outputs.length === expectedBlocks.length) {
-      for (let i = 0; i < outputs.length; i++) {
-        const blockStart = expectedBlocks[i]!;
-        const dest = path.join(framesDir, `thumb_${blockStart}.jpg`);
-        const src = path.join(tmpDir, outputs[i]!);
-        try {
-          const stat = await fs.stat(src);
-          if (stat.size < 400) continue;
-          await fs.rename(src, dest).catch(() => {});
-        } catch {
-          // gap-fill below
+        // Only trust strip→block mapping when counts match. Keyframe-only extracts
+        // often return fewer images; renaming by index would stamp wrong times.
+        if (outputs.length === expectedBlocks.length) {
+          for (let i = 0; i < outputs.length; i++) {
+            const blockStart = expectedBlocks[i]!;
+            const dest = path.join(framesDir, `thumb_${blockStart}.jpg`);
+            const src = path.join(tmpDir, outputs[i]!);
+            try {
+              const stat = await fs.stat(src);
+              if (stat.size < 400) continue;
+              await fs.rename(src, dest).catch(() => {});
+            } catch {
+              // gap-fill below
+            }
+          }
         }
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
       }
     }
-  } finally {
-    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
 
-  // Fill any blocks the strip pass skipped (sparse keyframes / bad frames).
+  // Sparse mode: only fill a few gaps — UI stretches neighbors.
+  const MAX_GAP_FILL_PER_PASS = useStrip ? 4 : Math.min(12, expectedBlocks.length);
   const have = new Set(await listThumbStarts(framesDir));
+  let filled = 0;
   for (const blockStart of expectedBlocks) {
+    if (filled >= MAX_GAP_FILL_PER_PASS) break;
     if (have.has(blockStart)) continue;
     const dest = path.join(framesDir, `thumb_${blockStart}.jpg`);
     try {
-      await extractFastTimelineFrame(
+      await extractSoloTimelineFrame(
         inputPath,
         dest,
         blockStart,
-        THUMB_WIDTH_PX
+        THUMB_SOLO_WIDTH_PX,
+        THUMB_SOLO_QUALITY
       );
       const stat = await fs.stat(dest);
       if (stat.size < 400) await fs.unlink(dest).catch(() => {});
+      else filled += 1;
     } catch {
       // leave gap; UI stretches neighboring thumbs
     }
   }
 }
 
-function findNextExtractionWindow(
+function findMissingSparseBlocks(
   recordedInput: number,
   starts: Set<number>,
   prioritizeTail: boolean
-): { from: number; to: number } | null {
+): number[] {
   const recorded = sanitizeDurationSeconds(recordedInput);
-  const blockCount = Math.min(
-    10_000,
-    Math.max(1, Math.ceil(recorded / THUMB_INTERVAL_SECONDS))
-  );
-  const missing: number[] = [];
-  for (let i = 0; i < blockCount; i++) {
-    const blockStart = i * THUMB_INTERVAL_SECONDS;
-    if (!starts.has(blockStart)) missing.push(blockStart);
-  }
-  if (missing.length === 0) return null;
-
-  const span = Math.min(MAX_SPAN_SECONDS_PER_SYNC, recorded);
+  const expected = sparseThumbStarts(recorded);
+  const missing = expected.filter((start) => !starts.has(start));
+  if (missing.length === 0) return [];
 
   if (prioritizeTail && recorded > THUMB_LIVE_TAIL_PRIORITY_SECONDS) {
-    const tailAnchor = missing[missing.length - 1]!;
-    const from = Math.max(
-      0,
-      Math.floor(
-        (tailAnchor - span + THUMB_INTERVAL_SECONDS) / THUMB_INTERVAL_SECONDS
-      ) * THUMB_INTERVAL_SECONDS
-    );
-    return { from, to: Math.min(recorded, from + span) };
+    // Pull the last missing blocks first so the live edge paints sooner.
+    return missing.slice(-Math.min(missing.length, THUMB_MAX_FRAME_COUNT));
   }
-
-  const from = missing[0]!;
-  return { from, to: Math.min(recorded, from + span) };
+  return missing.slice(0, THUMB_MAX_FRAME_COUNT);
 }
 
 function isMissingMediaError(error: unknown): boolean {
@@ -277,18 +269,20 @@ export async function syncTimelineThumbnails(
         if (!resolved) break;
 
         const starts = new Set(await listThumbStarts(framesDir));
-        const window = findNextExtractionWindow(
+        const missing = findMissingSparseBlocks(
           resolved.recorded,
           starts,
           prioritizeTail
         );
-        if (!window || window.to - window.from < 2) break;
+        if (missing.length === 0) break;
+
+        const interval = thumbIntervalForDuration(resolved.recorded);
         try {
           await extractMissingRange(
             resolved.inputPath,
             framesDir,
-            window.from,
-            window.to
+            missing,
+            interval
           );
         } catch (error) {
           if (isMissingMediaError(error)) {
@@ -297,8 +291,8 @@ export async function syncTimelineThumbnails(
             await extractMissingRange(
               retry.inputPath,
               framesDir,
-              window.from,
-              window.to
+              missing,
+              thumbIntervalForDuration(retry.recorded)
             );
             continue;
           }
@@ -310,21 +304,33 @@ export async function syncTimelineThumbnails(
     }
   }
 
-  return listThumbnailsFromDisk(streamSessionId, framesDir);
+  return listThumbnailsFromDisk(streamSessionId, framesDir, resolved?.recorded);
 }
 
 async function listThumbnailsFromDisk(
   streamSessionId: string,
-  framesDir: string
+  framesDir: string,
+  recordedSeconds?: number
 ): Promise<TimelineThumbnail[]> {
   const starts = await listThumbStarts(framesDir);
-  return starts.map((start) => {
+  if (starts.length === 0) return [];
+
+  const recorded =
+    recordedSeconds != null && recordedSeconds > 0
+      ? recordedSeconds
+      : starts[starts.length - 1]! +
+        thumbIntervalForDuration(starts[starts.length - 1]! + 1);
+
+  return starts.map((start, index) => {
+    const next = starts[index + 1];
+    const endTimeSeconds =
+      next != null ? next : Math.max(start + 1, recorded);
     const relative = toRelativeStoragePath(
       path.join(framesDir, `thumb_${start}.jpg`)
     );
     return {
       startTimeSeconds: start,
-      endTimeSeconds: start + THUMB_INTERVAL_SECONDS,
+      endTimeSeconds,
       url: `/api/storage/${relative.replace(/\\/g, "/")}?inline=1`,
     };
   });
@@ -334,13 +340,26 @@ export async function getTimelineThumbnails(
   streamSessionId: string,
   options?: { isLive?: boolean }
 ): Promise<TimelineThumbnail[]> {
-  const framesDir = getFramesDir(streamSessionId);
-  const existing = await listThumbnailsFromDisk(streamSessionId, framesDir);
+  const session = await prisma.streamSession.findUnique({
+    where: { id: streamSessionId },
+    select: { mode: true },
+  });
+  if (session?.mode === "agent") {
+    return [];
+  }
 
+  const framesDir = getFramesDir(streamSessionId);
   const sourceMedia = await findLocalSourceMedia(streamSessionId);
-  const recorded = sourceMedia?.durationSeconds ?? 0;
-  const lastCovered =
-    existing.length > 0 ? existing[existing.length - 1]!.endTimeSeconds : 0;
+  const recorded = sanitizeDurationSeconds(sourceMedia?.durationSeconds ?? 0);
+  const existing = await listThumbnailsFromDisk(
+    streamSessionId,
+    framesDir,
+    recorded
+  );
+
+  const expected = expectedThumbCountForDuration(recorded);
+  const coverage =
+    expected > 0 ? existing.length / expected : existing.length > 0 ? 1 : 0;
 
   let hasLegacyThumbs = false;
   if (existing.length > 0) {
@@ -355,31 +374,31 @@ export async function getTimelineThumbnails(
     }
   }
 
-  const needsMore =
-    recorded - lastCovered >= THUMB_INTERVAL_SECONDS || hasLegacyThumbs;
+  const needsMore = (expected > 0 && coverage < 0.9) || hasLegacyThumbs;
 
   if (needsMore && sourceMedia && fileExists(sourceMedia.filePath)) {
     const prioritizeTail = options?.isLive ?? false;
-    // Await the small priority grab so Railway cannot finish the request before
-    // any image exists. The larger strip remains asynchronous.
-    await capturePriorityThumbs(streamSessionId, { prioritizeTail }).catch(
-      (error) =>
-        console.warn("[thumbnails] priority capture failed:", error)
-    );
+    // Hot path: return disk list immediately. Kick ffmpeg in the background so
+    // timeline polls never block on encode (critical for multi-hour live).
     if (!activeExtractions.has(streamSessionId)) {
-      void syncTimelineThumbnails(streamSessionId, { prioritizeTail }).catch(
-        (error) => {
-          if (isMissingMediaError(error)) {
-            console.warn(
-              "[thumbnails] source media disappeared mid-extract; will retry on next poll"
-            );
-            return;
+      void (async () => {
+        await capturePriorityThumbs(streamSessionId, { prioritizeTail }).catch(
+          (error) =>
+            console.warn("[thumbnails] priority capture failed:", error)
+        );
+        await syncTimelineThumbnails(streamSessionId, { prioritizeTail }).catch(
+          (error) => {
+            if (isMissingMediaError(error)) {
+              console.warn(
+                "[thumbnails] source media disappeared mid-extract; will retry on next poll"
+              );
+              return;
+            }
+            console.error("[thumbnails] strip extraction failed:", error);
           }
-          console.error("[thumbnails] strip extraction failed:", error);
-        }
-      );
+        );
+      })();
     }
-    return listThumbnailsFromDisk(streamSessionId, framesDir);
   }
 
   return existing;

@@ -4,6 +4,7 @@ import {
   clearSessionStorage,
   deleteStreamSession,
   getSessionStorageInfo,
+  REPLACED_SESSION_STATUS,
 } from "@/services/sessionCleanupService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import { resolveVideoDurationFromMetadata } from "@/lib/youtube";
@@ -24,7 +25,9 @@ export async function GET(
   try {
     const { sessionId } = await params;
     let session = await getStreamSession(sessionId);
-    if (!session) return errorResponse("Session not found", 404);
+    if (!session || session.liveStatus === REPLACED_SESSION_STATUS) {
+      return errorResponse("Session not found", 404);
+    }
 
     let videoDurationSeconds = resolveVideoDurationFromMetadata(
       session.metadataJson,
@@ -55,6 +58,7 @@ export async function GET(
       session: {
         id: session.id,
         platform: session.platform ?? "youtube",
+        mode: session.mode === "agent" ? "agent" : "timeline",
         youtubeVideoId: session.youtubeVideoId,
         youtubeUrl: session.youtubeUrl,
         title: session.title,
@@ -72,8 +76,20 @@ export async function GET(
         sourceMedia: await Promise.all(
           session.sourceMedia.map(async (m) => {
           const hasFile = m.filePath ? fileExists(m.filePath) : false;
+          let sourceVersion = Date.now();
+          if (hasFile && m.filePath) {
+            try {
+              const { statSync } = await import("fs");
+              const { resolveStoragePath } = await import("@/lib/storage");
+              sourceVersion = Math.floor(
+                statSync(resolveStoragePath(m.filePath)).mtimeMs
+              );
+            } catch {
+              // keep Date.now()
+            }
+          }
           const sourceVideoUrl = hasFile
-            ? `/api/storage/${m.filePath.replace(/\\/g, "/")}?inline=1`
+            ? `/api/storage/${m.filePath!.replace(/\\/g, "/")}?inline=1&v=${sourceVersion}`
             : null;
           const previewRelative = getPreviewVideoRelativePath(sessionId);
           const previewReady = await previewMp4Ready(sessionId);
@@ -92,6 +108,16 @@ export async function GET(
           };
         })
         ),
+        clipSuggestions: session.clipSuggestions.map((clip) => ({
+          id: clip.id,
+          title: clip.title,
+          startTimeSeconds: clip.startTimeSeconds,
+          endTimeSeconds: clip.endTimeSeconds,
+          reason: clip.reason,
+          confidence: clip.confidence,
+          suggestedLayout: clip.suggestedLayout,
+          status: clip.status,
+        })),
         storageBytes: storage?.storageBytes ?? 0,
         storageLabel: storage?.storageLabel ?? "0 B",
         streamEmbed: readStreamEmbed(session.metadataJson),

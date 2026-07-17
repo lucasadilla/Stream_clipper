@@ -249,7 +249,7 @@ export function PlatformExportWorkspace({ clipId }: { clipId: string }) {
             </div>
             <div className="mb-8 h-1 overflow-hidden bg-[#182015]"><div className="h-full bg-[#95ff00] transition-all duration-500" style={{ width: `${overallProgress}%` }} /></div>
             <div className="space-y-4">
-              {pack.exports.map((item) => <PlatformExportResult key={item.id} item={item} onRegenerate={() => void regenerateCopy(item.id)} regenerating={regenerating === item.id} />)}
+              {pack.exports.map((item) => <PlatformExportResult key={item.id} item={item} clipId={clipId} onRegenerate={() => void regenerateCopy(item.id)} regenerating={regenerating === item.id} />)}
             </div>
           </section>
         )}

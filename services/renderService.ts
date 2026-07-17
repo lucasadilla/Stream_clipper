@@ -232,6 +232,82 @@ export async function executeRenderJob(
       overlay.type === "text" || overlay.type === "lower-third"
   );
 
+  const hasMediaOverlays = editorState.overlays.some(
+    (overlay) => overlay.type === "image" || overlay.type === "broll"
+  );
+  const canStreamCopy =
+    format === "native" &&
+    !includeCaptions &&
+    textOverlays.length === 0 &&
+    !hasMediaOverlays &&
+    !editorState.settings.normalizeAudio &&
+    !editorState.settings.denoiseAudio &&
+    sequenceSegments.length <= 1;
+
+  // Fast path: skip ASS/transcript prep and cut with stream copy.
+  if (canStreamCopy) {
+    await appendRenderJobLog(jobId, "ffmpeg", "Stream copy (no re-encode)");
+    await updateJobProgress(jobId, 55, "cutting");
+    const seg = sequenceSegments[0];
+    const cutStart = seg
+      ? renderStart + (seg.sourceStart - effectiveStart)
+      : renderStart;
+    const cutEnd = seg
+      ? renderStart + (seg.sourceEnd - effectiveStart)
+      : renderEnd;
+
+    // Muxed segment-* files are already the requested range — avoid a second
+    // ffmpeg pass when the cut is essentially the whole file.
+    const alreadyCut =
+      cutStart < 0.05 &&
+      path.basename(inputPath).toLowerCase().startsWith("segment-");
+    if (alreadyCut) {
+      await fs.copyFile(inputPath, outputPath);
+    } else {
+      await ffmpegRender({
+        inputPath,
+        outputPath,
+        startTimeSeconds: cutStart,
+        endTimeSeconds: cutEnd,
+        format: "native",
+        layout: "center_crop",
+        outputHeight: 1080,
+      });
+    }
+
+    await updateJobProgress(jobId, 90, "finalizing");
+
+    const existing = await prisma.renderJob.findUnique({
+      where: { id: jobId },
+      select: { logs: true },
+    });
+    const logs = [
+      ...parseRenderJobLogs(existing?.logs),
+      makeRenderJobLogEntry("completed", "Stream copy finished"),
+    ];
+
+    await prisma.renderJob.update({
+      where: { id: jobId },
+      data: {
+        status: "completed",
+        progress: 100,
+        outputPath: relativeOutput,
+        logs: logs as unknown as Prisma.InputJsonValue,
+        completedAt: new Date(),
+        errorMessage: null,
+      },
+    });
+
+    if (clipSuggestionId) {
+      await prisma.clipSuggestion.update({
+        where: { id: clipSuggestionId },
+        data: { status: "rendered" },
+      });
+    }
+
+    return { outputPath: relativeOutput };
+  }
+
   if (includeCaptions || textOverlays.length > 0) {
     await updateJobProgress(jobId, 35, "captions");
     const clientCues = (clientCaptionCues ?? []).filter(

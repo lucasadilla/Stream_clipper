@@ -1,9 +1,12 @@
 import { toJsonValue } from "@/lib/utils";
 import { prisma } from "@/lib/db";
-import { analyzeAudioVolume } from "@/lib/ffmpeg";
+import { analyzeAudioVolume, hasAudioStream } from "@/lib/ffmpeg";
 import {
+  getUploadDir,
   getWaveformCachePath,
+  listSourceCandidateFiles,
   resolveStoragePath,
+  toRelativeStoragePath,
 } from "@/lib/storage";
 import { formatSeconds } from "@/lib/time";
 import {
@@ -25,6 +28,35 @@ export interface AudioVolumeSample {
 interface WaveformCacheFile {
   maxTimeSeconds: number;
   buckets: WaveformBucket[];
+}
+
+/** Avoid spamming ffmpeg on video-only DASH parts every poll. */
+const noAudioRetryAfter = new Map<string, number>();
+const NO_AUDIO_RETRY_MS = 60_000;
+
+function clearNoAudioBackoff(streamSessionId: string) {
+  noAudioRetryAfter.delete(streamSessionId);
+}
+
+/**
+ * Prefer the main source when it has audio; otherwise look for a companion
+ * yt-dlp audio-only track (e.g. source.f140.m4a next to source.f299.mp4).
+ */
+async function resolveAudioInputPath(
+  streamSessionId: string,
+  preferredRelativePath: string
+): Promise<string | null> {
+  const preferred = resolveStoragePath(preferredRelativePath);
+  if (existsSync(preferred) && (await hasAudioStream(preferred))) {
+    return preferred;
+  }
+
+  const candidates = await listSourceCandidateFiles(getUploadDir(streamSessionId));
+  for (const full of candidates) {
+    if (full === preferred) continue;
+    if (await hasAudioStream(full)) return full;
+  }
+  return null;
 }
 
 export async function readWaveformCache(
@@ -105,6 +137,26 @@ export async function syncSessionAudioAnalysis(streamSessionId: string) {
     return { eventsAdded: 0, analyzed: false, reason: "no_source" as const };
   }
 
+  const backoffUntil = noAudioRetryAfter.get(streamSessionId) ?? 0;
+  if (Date.now() < backoffUntil) {
+    return { eventsAdded: 0, analyzed: false, reason: "no_audio" as const };
+  }
+
+  const audioPath = await resolveAudioInputPath(
+    streamSessionId,
+    sourceMedia.filePath
+  );
+  if (!audioPath) {
+    noAudioRetryAfter.set(streamSessionId, Date.now() + NO_AUDIO_RETRY_MS);
+    return { eventsAdded: 0, analyzed: false, reason: "no_audio" as const };
+  }
+  clearNoAudioBackoff(streamSessionId);
+
+  const audioRelativePath =
+    audioPath === resolveStoragePath(sourceMedia.filePath)
+      ? sourceMedia.filePath
+      : toRelativeStoragePath(audioPath);
+
   const session = await prisma.streamSession.findUnique({
     where: { id: streamSessionId },
     include: { liveRecording: true },
@@ -121,12 +173,13 @@ export async function syncSessionAudioAnalysis(streamSessionId: string) {
     try {
       const result = await analyzeAudioSegment(
         streamSessionId,
-        sourceMedia.filePath,
+        audioRelativePath,
         fromSeconds,
         recorded
       );
       return { eventsAdded: result.events, analyzed: true, reason: "live" as const };
-    } catch {
+    } catch (err) {
+      console.warn("[audio] live analysis failed:", err instanceof Error ? err.message : err);
       return { eventsAdded: 0, analyzed: false, reason: "live_failed" as const };
     }
   }
@@ -141,10 +194,13 @@ export async function syncSessionAudioAnalysis(streamSessionId: string) {
   }
 
   try {
-    const result = await analyzeAudio(streamSessionId, sourceMedia.filePath);
+    const result = await analyzeAudio(streamSessionId, audioRelativePath);
     return { eventsAdded: result.events, analyzed: true, reason: "full" as const };
   } catch (err) {
-    console.warn("[audio] full analysis failed:", err);
+    console.warn(
+      "[audio] full analysis failed:",
+      err instanceof Error ? err.message : err
+    );
     return { eventsAdded: 0, analyzed: false, reason: "failed" as const };
   }
 }
@@ -330,6 +386,7 @@ export async function analyzeAudioSegment(
   const fullPath = resolveStoragePath(sourceFilePath);
   const duration = endTimeSeconds - startTimeSeconds;
   if (duration <= 0) return { events: 0 };
+  if (!(await hasAudioStream(fullPath))) return { events: 0 };
 
   const { runCommand, getFfmpegPath } = await import("@/lib/ffmpeg");
   const { stderr: segErr } = await runCommand(getFfmpegPath(), [
@@ -339,6 +396,8 @@ export async function analyzeAudioSegment(
     String(duration),
     "-i",
     fullPath,
+    "-map",
+    "0:a:0?",
     "-af",
     "volumedetect",
     "-f",
@@ -348,6 +407,7 @@ export async function analyzeAudioSegment(
 
   const meanMatch = segErr.match(/mean_volume: (-?[0-9.]+) dB/);
   const maxMatch = segErr.match(/max_volume: (-?[0-9.]+) dB/);
+  if (!meanMatch && !maxMatch) return { events: 0 };
   const mean = meanMatch ? parseFloat(meanMatch[1]) : -30;
   const max = maxMatch ? parseFloat(maxMatch[1]) : mean;
 

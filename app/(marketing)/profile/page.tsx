@@ -249,8 +249,23 @@ export default function ProfilePage() {
           Profile
         </h1>
         <p className="mt-4 max-w-2xl text-lg leading-8 text-white/74">
-          Update your details and manage your subscription.
+          Update your details, manage your subscription, and connect social
+          publishing accounts.
         </p>
+        <div className="mt-5 flex flex-wrap gap-2">
+          <Link
+            href="/settings/connected-accounts"
+            className="inline-flex border border-[var(--color-accent)]/50 bg-[var(--color-accent)]/10 px-4 py-2 text-sm font-semibold text-[var(--color-accent)] hover:bg-[var(--color-accent)]/20"
+          >
+            Connected Accounts
+          </Link>
+          <Link
+            href="/settings/publishing"
+            className="inline-flex border border-[#21301f] px-4 py-2 text-sm font-semibold text-[#9aa49a] hover:border-[var(--color-accent)] hover:text-white"
+          >
+            Publishing settings
+          </Link>
+        </div>
 
         {isCreatorBeta && (
           <div className="mt-7 border-l-2 border-[var(--color-accent)] bg-[#0a1008] px-5 py-4">
@@ -512,7 +527,7 @@ export default function ProfilePage() {
               href="/#analyze"
               className="text-sm text-[var(--color-accent)] hover:underline"
             >
-              Open timeline
+              Start clipping
             </Link>
             <div className="flex flex-wrap gap-3">
               <button

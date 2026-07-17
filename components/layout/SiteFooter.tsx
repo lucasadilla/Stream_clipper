@@ -7,10 +7,10 @@ const FOOTER_LINKS = {
     { href: "/#how-it-works", label: "Workflow" },
     { href: "/#pricing", label: "Pricing" },
     { href: "/#faq", label: "FAQ" },
-    { href: "/#analyze", label: "Open timeline" },
+    { href: "/#analyze", label: "Start clipping" },
   ],
   Editor: [
-    { href: "/#sessions", label: "Recent sessions" },
+    { href: "/#sessions", label: "Active session" },
     { href: "/#features", label: "Timeline editor" },
     { href: "/#features", label: "Transcript search" },
   ],

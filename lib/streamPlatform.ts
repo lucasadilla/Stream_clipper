@@ -160,24 +160,27 @@ export function shouldPreferLocalVideoPreview(options: {
   /** Known full stream length (metadata). Local is preferred only once capture catches up. */
   knownStreamDuration?: number | null;
 }): boolean {
+  // YouTube embed is the live + full-VOD player. Local capture is for clipping,
+  // not for replacing the stream viewer.
   if (options.platform === "youtube") return false;
-
-  // Twitch live embed is live-edge only — local capture enables timeline scrub.
-  if (
-    options.platform === "twitch" &&
-    (options.isLive || options.isLiveRecording)
-  ) {
-    return true;
-  }
 
   const playbackUrl =
     options.previewVideoUrl ??
     (options.sourceIsPlayableMp4 ? options.sourceVideoUrl : null);
 
+  // Never prefer local without a playable file (avoids black placeholder).
   if (!isBrowserPlayableVideoUrl(playbackUrl)) return false;
 
   const localSeconds = options.durationSeconds ?? 0;
   if (localSeconds < 2) return false;
+
+  // Twitch/Kick live: local capture enables scrubbing of what we've recorded.
+  if (
+    (options.platform === "twitch" || options.platform === "kick") &&
+    (options.isLive || options.isLiveRecording)
+  ) {
+    return true;
+  }
 
   const known = options.knownStreamDuration ?? 0;
   // Keep using the remote player until local media covers most of the stream,

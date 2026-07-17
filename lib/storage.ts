@@ -413,6 +413,14 @@ export async function serveStorageFileInline(
   const isVideo = contentType.startsWith("video/");
   const stat = await statFs(fullPath);
   const fileSize = stat.size;
+  // Growing captures / remuxed previews must not be sticky-cached or the
+  // editor plays a short stale MP4 (black / won't seek) after refresh.
+  const isMutableCapture =
+    /[\\/]preview\.mp4$/i.test(fullPath) ||
+    /[\\/]source\.[^/\\]+$/i.test(fullPath);
+  const videoCacheControl = isMutableCapture
+    ? "private, max-age=0, must-revalidate"
+    : "public, max-age=3600";
 
   const rangeHeader = request?.headers.get("range");
   if (isVideo && rangeHeader) {
@@ -430,7 +438,7 @@ export async function serveStorageFileInline(
             "Content-Length": String(chunkSize),
             "Content-Range": `bytes ${start}-${end}/${fileSize}`,
             "Accept-Ranges": "bytes",
-            "Cache-Control": "public, max-age=3600",
+            "Cache-Control": videoCacheControl,
           },
         });
       }
@@ -449,7 +457,7 @@ export async function serveStorageFileInline(
         "Content-Type": contentType,
         "Content-Length": String(fileSize),
         "Accept-Ranges": "bytes",
-        "Cache-Control": "public, max-age=3600",
+        "Cache-Control": videoCacheControl,
       },
     });
   }
@@ -463,7 +471,9 @@ export async function serveStorageFileInline(
       ...(isVideo ? { "Accept-Ranges": "bytes" } : {}),
       "Cache-Control": immutable
         ? "public, max-age=31536000, immutable"
-        : "public, max-age=3600",
+        : isVideo
+          ? videoCacheControl
+          : "public, max-age=3600",
     },
   });
 }

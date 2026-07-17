@@ -1,6 +1,17 @@
 "use client";
 
 import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo } from "react";
+import {
+  ArrowLeftToLine,
+  ArrowRightToLine,
+  Maximize2,
+  Pause,
+  Play,
+  SkipBack,
+  SkipForward,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
 import { formatSeconds, formatDuration } from "@/lib/time";
 import { LIVE_SEGMENT_SECONDS } from "@/lib/timelineConstants";
 import { sanitizeDurationSeconds } from "@/lib/timelineBounds";
@@ -87,16 +98,16 @@ type HistoryEntry =
       at: number;
     };
 
-const TRACK_HEIGHT_PX = 72;
+const TRACK_HEIGHT_PX = 80;
 const VIDEO_TRACK_STYLE = {
   height: TRACK_HEIGHT_PX,
   flex: "0 0 auto",
   minHeight: TRACK_HEIGHT_PX,
 } as const;
 const CAPTION_TRACK_STYLE = {
-  height: TRACK_HEIGHT_PX,
+  height: 56,
   flex: "0 0 auto",
-  minHeight: TRACK_HEIGHT_PX,
+  minHeight: 56,
 } as const;
 const OVERLAY_TRACK_STYLE = {
   height: 36,
@@ -229,6 +240,16 @@ export function LiveTimeline({
   const [viewportWidth, setViewportWidth] = useState(0);
   const [scrollLeft, setScrollLeft] = useState(0);
   const scrollRaf = useRef<number | null>(null);
+  const scrubRaf = useRef<number | null>(null);
+  const pendingScrub = useRef<number | null>(null);
+  const playheadElRef = useRef<HTMLDivElement | null>(null);
+  const currentTimeRef = useRef(currentTime);
+  currentTimeRef.current = currentTime;
+  const [isPlaying, setIsPlaying] = useState(false);
+  const isPlayingRef = useRef(false);
+  isPlayingRef.current = isPlaying;
+  const [scrubPreview, setScrubPreview] = useState<number | null>(null);
+
   const dragOrigin = useRef({
     x: 0,
     anchorTime: 0,
@@ -246,6 +267,41 @@ export function LiveTimeline({
       recordedSeconds + (isLive ? LIVE_SEGMENT_SECONDS : 0)
     )
   );
+
+  function pauseTransport() {
+    setIsPlaying(false);
+    onPause();
+  }
+
+  function playFromPlayhead(atSeconds?: number) {
+    const t = Math.max(
+      0,
+      Math.min(
+        maxTime,
+        atSeconds ?? scrubPreview ?? currentTimeRef.current
+      )
+    );
+    currentTimeRef.current = t;
+    setIsPlaying(true);
+    onSeek(t);
+    setScrubPreview(null);
+  }
+
+  function togglePlayPause() {
+    if (isPlayingRef.current) {
+      pauseTransport();
+    } else {
+      playFromPlayhead();
+    }
+  }
+
+  useLayoutEffect(() => {
+    if (dragging === "scrub") return;
+    const el = playheadElRef.current;
+    if (!el || maxTime <= 0) return;
+    const t = scrubPreview ?? currentTime;
+    el.style.left = `${Math.min(100, Math.max(0, (t / maxTime) * 100))}%`;
+  }, [currentTime, maxTime, dragging, scrubPreview]);
 
   const commitEditorState = useCallback((nextValue: EditorState) => {
     const next = normalizeEditorState(nextValue);
@@ -638,6 +694,7 @@ export function LiveTimeline({
         const start = Math.min(origin.anchorTime, t);
         const end = Math.max(origin.anchorTime, t);
         onSelectionChange(clampSelection(start, end, maxTime));
+        onScrub(t);
       } else if (dragging === "start") {
         onSelectionChange(clampSelection(t, origin.end, maxTime, { fixedEnd: true }));
       } else if (dragging === "end") {
@@ -658,7 +715,21 @@ export function LiveTimeline({
             : timeFromRef(e.clientX, rulerRef),
           1 / 30
         );
-        onScrub(scrubT);
+        pendingScrub.current = scrubT;
+        currentTimeRef.current = scrubT;
+        const needle = playheadElRef.current;
+        if (needle && maxTime > 0) {
+          needle.style.left = `${Math.min(100, Math.max(0, (scrubT / maxTime) * 100))}%`;
+        }
+        if (scrubRaf.current == null) {
+          scrubRaf.current = requestAnimationFrame(() => {
+            scrubRaf.current = null;
+            const next = pendingScrub.current;
+            if (next == null) return;
+            setScrubPreview(next);
+            onScrub(next);
+          });
+        }
       } else if (dragging === "cue-start" && origin.cueId && onCaptionEdit) {
         const range = clampCueRange(t, origin.cueEnd, maxTime);
         commitCaptionEdit(origin.cueId, range);
@@ -681,6 +752,17 @@ export function LiveTimeline({
     }
 
     function onUp() {
+      if (scrubRaf.current != null) {
+        cancelAnimationFrame(scrubRaf.current);
+        scrubRaf.current = null;
+      }
+      const pending = pendingScrub.current;
+      if (pending != null) {
+        pendingScrub.current = null;
+        currentTimeRef.current = pending;
+        onScrub(pending);
+      }
+      setScrubPreview(null);
       setDragging(null);
     }
 
@@ -740,9 +822,18 @@ export function LiveTimeline({
 
   function handleVideoTrackPointerDown(e: React.PointerEvent) {
     if (dragging) return;
-    const t = timeFromVideoTrack(e.clientX);
-    beginDrag("range", e, t);
-    onSelectionChange(clampSelection(t, t + MIN_CLIP_SECONDS, maxTime));
+    const t = snapTimelineTime(timeFromVideoTrack(e.clientX), 1 / 30);
+    // Click/drag on filmstrip moves the playhead. Hold Shift to draw a range.
+    pauseTransport();
+    currentTimeRef.current = t;
+    setScrubPreview(t);
+    onScrub(t);
+    if (e.shiftKey) {
+      beginDrag("range", e, t);
+      onSelectionChange(clampSelection(t, t + MIN_CLIP_SECONDS, maxTime));
+      return;
+    }
+    beginDrag("scrub", e);
   }
 
   function setInPoint() {
@@ -765,64 +856,119 @@ export function LiveTimeline({
     );
   }
 
+  const setInPointRef = useRef(setInPoint);
+  const setOutPointRef = useRef(setOutPoint);
+  const addManualMarkerRef = useRef(addManualMarker);
+  const onSeekRef = useRef(onSeek);
+  const onPauseRef = useRef(onPause);
+  const onScrubRef = useRef(onScrub);
+  const onSelectionChangeRef = useRef(onSelectionChange);
+  const commitEditorStateRef = useRef(commitEditorState);
+  const editorStateRef = useRef(editorState);
+  const selectedSegmentIdRef = useRef(selectedSegmentId);
+  const maxTimeRef = useRef(maxTime);
+  const undoRef = useRef(undo);
+  const redoRef = useRef(redo);
+  const pauseTransportRef = useRef(pauseTransport);
+  const playFromPlayheadRef = useRef(playFromPlayhead);
+  const togglePlayPauseRef = useRef(togglePlayPause);
+  setInPointRef.current = setInPoint;
+  setOutPointRef.current = setOutPoint;
+  addManualMarkerRef.current = addManualMarker;
+  onSeekRef.current = onSeek;
+  onPauseRef.current = onPause;
+  onScrubRef.current = onScrub;
+  onSelectionChangeRef.current = onSelectionChange;
+  commitEditorStateRef.current = commitEditorState;
+  editorStateRef.current = editorState;
+  selectedSegmentIdRef.current = selectedSegmentId;
+  maxTimeRef.current = maxTime;
+  undoRef.current = undo;
+  redoRef.current = redo;
+  pauseTransportRef.current = pauseTransport;
+  playFromPlayheadRef.current = playFromPlayhead;
+  togglePlayPauseRef.current = togglePlayPause;
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        (e.target instanceof HTMLElement && e.target.isContentEditable)
+      )
         return;
+      if (document.body.dataset.renderModalOpen === "true") return;
+
       const key = e.key.toLowerCase();
-      if ((e.ctrlKey || e.metaKey) && key === "z") {
+      const t = currentTimeRef.current;
+      const state = editorStateRef.current;
+      const max = maxTimeRef.current;
+
+      if (e.code === "Space" || key === " ") {
         e.preventDefault();
-        if (e.shiftKey) redo();
-        else undo();
+        togglePlayPauseRef.current();
         return;
       }
-      if (key === "i") setInPoint();
-      if (key === "o") setOutPoint();
-      if (key === "m") addManualMarker();
-      if (key === "j") onSeek(Math.max(0, currentTime - 2));
-      if (key === "k") onPause();
-      if (key === "l") onSeek(currentTime);
 
-      const selectedSegment = editorState.segments.find(
-        (segment) => segment.id === selectedSegmentId
+      if ((e.ctrlKey || e.metaKey) && key === "z") {
+        e.preventDefault();
+        if (e.shiftKey) redoRef.current();
+        else undoRef.current();
+        return;
+      }
+      if (key === "i") setInPointRef.current();
+      if (key === "o") setOutPointRef.current();
+      if (key === "m") addManualMarkerRef.current();
+      if (key === "j") {
+        pauseTransportRef.current();
+        onScrubRef.current(Math.max(0, t - 2));
+      }
+      if (key === "k") pauseTransportRef.current();
+      if (key === "l") playFromPlayheadRef.current(t);
+
+      const selectedSegment = state.segments.find(
+        (segment) => segment.id === selectedSegmentIdRef.current
       );
       if (key === "b" && selectedSegment) {
         if (
-          currentTime > selectedSegment.sourceStart + 0.15 &&
-          currentTime < selectedSegment.sourceEnd - 0.15
+          t > selectedSegment.sourceStart + 0.15 &&
+          t < selectedSegment.sourceEnd - 0.15
         ) {
-          const index = editorState.segments.findIndex(
+          const index = state.segments.findIndex(
             (segment) => segment.id === selectedSegment.id
           );
           const left = {
             ...selectedSegment,
             id: crypto.randomUUID(),
-            sourceEnd: currentTime,
+            sourceEnd: t,
             label: `${selectedSegment.label} A`,
           };
           const right = {
             ...selectedSegment,
             id: crypto.randomUUID(),
-            sourceStart: currentTime,
+            sourceStart: t,
             label: `${selectedSegment.label} B`,
           };
-          const next = [...editorState.segments];
+          const next = [...state.segments];
           next.splice(index, 1, left, right);
-          commitEditorState({ ...editorState, segments: next });
+          commitEditorStateRef.current({ ...state, segments: next });
           setSelectedSegmentId(right.id);
-          onSelectionChange({ start: right.sourceStart, end: right.sourceEnd });
+          onSelectionChangeRef.current({
+            start: right.sourceStart,
+            end: right.sourceEnd,
+          });
         }
       }
 
       if ((e.key === "Delete" || e.key === "Backspace") && selectedSegment) {
         e.preventDefault();
-        const next = editorState.segments.filter(
+        const next = state.segments.filter(
           (segment) => segment.id !== selectedSegment.id
         );
-        commitEditorState({
-          ...editorState,
+        commitEditorStateRef.current({
+          ...state,
           segments: next,
-          overlays: editorState.overlays.filter(
+          overlays: state.overlays.filter(
             (overlay) => overlay.segmentId !== selectedSegment.id
           ),
         });
@@ -837,18 +983,18 @@ export function LiveTimeline({
             ? clampSelection(
                 selectedSegment.sourceStart,
                 selectedSegment.sourceEnd + delta,
-                maxTime
+                max
               )
             : clampSelection(
                 selectedSegment.sourceStart + delta,
                 selectedSegment.sourceEnd,
-                maxTime,
+                max,
                 { fixedEnd: true }
               );
-          onSelectionChange(nextSelection);
-          commitEditorState({
-            ...editorState,
-            segments: editorState.segments.map((segment) =>
+          onSelectionChangeRef.current(nextSelection);
+          commitEditorStateRef.current({
+            ...state,
+            segments: state.segments.map((segment) =>
               segment.id === selectedSegment.id
                 ? {
                     ...segment,
@@ -859,16 +1005,16 @@ export function LiveTimeline({
             ),
           });
         } else {
-          onPause();
-          onScrub(Math.max(0, Math.min(maxTime, currentTime + delta)));
+          pauseTransportRef.current();
+          onScrubRef.current(Math.max(0, Math.min(max, t + delta)));
         }
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  });
+  }, []);
 
-  const playheadPct = pct(currentTime, maxTime);
+  const playheadPct = pct(scrubPreview ?? currentTime, maxTime);
   const recordedPct = pct(recordedSeconds, maxTime);
   const selStartPct = pct(selection.start, maxTime);
   const selWidthPct = pct(selection.end - selection.start, maxTime);
@@ -889,18 +1035,28 @@ export function LiveTimeline({
     };
   }, [maxTime, scrollLeft, trackContentWidth, viewportWidth]);
 
-  const visibleThumbnails = useMemo(
-    () =>
-      thumbnails
-        .filter(
-          (thumb) =>
-            thumb.endTimeSeconds >= visibleTimeRange.start &&
-            thumb.startTimeSeconds <= visibleTimeRange.end
-        )
-        .slice()
-        .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds),
-    [thumbnails, visibleTimeRange.start, visibleTimeRange.end]
-  );
+  const visibleThumbnails = useMemo(() => {
+    const inView = thumbnails
+      .filter(
+        (thumb) =>
+          thumb.endTimeSeconds >= visibleTimeRange.start &&
+          thumb.startTimeSeconds <= visibleTimeRange.end
+      )
+      .slice()
+      .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
+    // Cap DOM nodes when zoomed out — dense thumbs were freezing the editor.
+    // Aim for roughly viewport-width / thumb width (~40–60 visible).
+    const maxThumbs = Math.min(
+      64,
+      Math.max(36, Math.ceil(viewportWidth / 14))
+    );
+    return sampleTimelineItems(inView, maxThumbs);
+  }, [
+    thumbnails,
+    visibleTimeRange.start,
+    visibleTimeRange.end,
+    viewportWidth,
+  ]);
 
   const visibleSegments = useMemo(
     () =>
@@ -982,28 +1138,75 @@ export function LiveTimeline({
       )}
       aria-hidden={renderModalOpen}
     >
-      {/* Editor toolbar */}
-      <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--color-card-border)] bg-[#020302] px-2 py-1.5">
-        <div className="flex items-center gap-1">
-          <ToolBtn onClick={setInPoint} title="Mark In (I)">
-            In
+      {/* Editor transport — icon controls like a real NLE */}
+      <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-[var(--color-card-border)] bg-[#020302] px-2 py-1.5">
+        <div className="flex items-center gap-0.5 rounded-md border border-[#1a2419] bg-[#070a07] p-0.5">
+          <ToolBtn
+            onClick={() => {
+              pauseTransport();
+              onScrub(Math.max(0, currentTime - 2));
+            }}
+            title="Back 2s (J)"
+          >
+            <SkipBack className="h-3.5 w-3.5" strokeWidth={2.25} />
           </ToolBtn>
-          <ToolBtn onClick={setOutPoint} title="Mark Out (O)">
-            Out
+          <ToolBtn
+            onClick={togglePlayPause}
+            title={isPlaying ? "Pause (Space)" : "Play from playhead (Space)"}
+            active={isPlaying}
+          >
+            {isPlaying ? (
+              <Pause className="h-3.5 w-3.5" strokeWidth={2.25} fill="currentColor" />
+            ) : (
+              <Play className="h-3.5 w-3.5" strokeWidth={2.25} fill="currentColor" />
+            )}
           </ToolBtn>
-          <ToolBtn onClick={() => onSeek(selection.start)} title="Play from In point">
-            Play
-          </ToolBtn>
-          <ToolBtn onClick={onPause} title="Pause">
-            Pause
+          <ToolBtn
+            onClick={() => {
+              pauseTransport();
+              onScrub(Math.min(maxTime, currentTime + 2));
+            }}
+            title="Forward 2s"
+          >
+            <SkipForward className="h-3.5 w-3.5" strokeWidth={2.25} />
           </ToolBtn>
         </div>
 
-        <div className="font-mono text-xs text-[#dfead8] tabular-nums">
-          <span className="text-[var(--color-accent)]">{formatSeconds(selection.start)}</span>
-          <span className="text-[#666] mx-1.5">to</span>
-          <span className="text-[var(--color-accent)]">{formatSeconds(selection.end)}</span>
-          <span className="text-[#71806d] ml-2">({formatDuration(selection.end - selection.start)})</span>
+        <div className="ml-1 flex items-center gap-0.5 rounded-md border border-[#1a2419] bg-[#070a07] p-0.5">
+          <ToolBtn onClick={setInPoint} title="Mark In (I)">
+            <ArrowLeftToLine className="h-3.5 w-3.5" strokeWidth={2.25} />
+          </ToolBtn>
+          <ToolBtn onClick={setOutPoint} title="Mark Out (O)">
+            <ArrowRightToLine className="h-3.5 w-3.5" strokeWidth={2.25} />
+          </ToolBtn>
+          <ToolBtn
+            onClick={() => playFromPlayhead(selection.start)}
+            title="Play from In point"
+          >
+            <Play className="h-3.5 w-3.5" strokeWidth={2.25} />
+            <ArrowLeftToLine className="h-3 w-3 -ml-0.5 opacity-80" strokeWidth={2.25} />
+          </ToolBtn>
+        </div>
+
+        <div className="ml-1.5 flex items-center gap-1.5 border-l border-[var(--color-card-border)] pl-2 font-mono text-xs tabular-nums">
+          <span className="text-[var(--color-accent)]">{formatSeconds(currentTime)}</span>
+          <span className="text-[#5f6b5c]">/</span>
+          <span className="text-[#9aa49a]">{formatSeconds(maxTime)}</span>
+        </div>
+
+        <div className="hidden font-mono text-[10px] text-[#71806d] sm:block">
+          <span className="text-[#5f6b5c]">In</span>{" "}
+          <span className="text-[var(--color-accent)]">
+            {formatSeconds(selection.start)}
+          </span>
+          <span className="mx-1 text-[#5f6b5c]">→</span>
+          <span className="text-[#5f6b5c]">Out</span>{" "}
+          <span className="text-[var(--color-accent)]">
+            {formatSeconds(selection.end)}
+          </span>
+          <span className="ml-1.5 text-[#9aa49a]">
+            ({formatDuration(selection.end - selection.start)})
+          </span>
         </div>
 
         {audioSpikes.length > 0 && (
@@ -1015,28 +1218,25 @@ export function LiveTimeline({
           </span>
         )}
 
-        <div className="flex items-center gap-1 border-l border-[var(--color-card-border)] pl-2 ml-1">
+        <div className="ml-auto flex items-center gap-0.5 rounded-md border border-[#1a2419] bg-[#070a07] p-0.5">
           <ToolBtn onClick={zoomOut} title="Zoom out" disabled={atMinZoom}>
-            -
+            <ZoomOut className="h-3.5 w-3.5" strokeWidth={2.25} />
           </ToolBtn>
           <button
             type="button"
             onClick={zoomToFit}
-            title="Zoom to fit"
-            className="min-w-[44px] h-7 px-1.5 text-[10px] font-mono text-[#9aa49a] border border-[#21301f] bg-[#070a07] hover:border-[var(--color-accent)] hover:text-white transition-colors"
+            title="Fit timeline in view"
+            className="flex h-7 min-w-[52px] items-center justify-center gap-1 px-1.5 font-mono text-[10px] text-[#9aa49a] transition-colors hover:text-white"
           >
+            <Maximize2 className="h-3 w-3 opacity-70" strokeWidth={2.25} />
             {zoomLabel}
           </button>
-          <ToolBtn onClick={zoomIn} title="Zoom in (scroll wheel)" disabled={zoom >= MAX_ZOOM}>
-            +
+          <ToolBtn onClick={zoomIn} title="Zoom in (scroll / Ctrl+wheel)" disabled={zoom >= MAX_ZOOM}>
+            <ZoomIn className="h-3.5 w-3.5" strokeWidth={2.25} />
           </ToolBtn>
         </div>
 
-        <div className="font-mono text-xs text-[#9aa49a] ml-auto">
-          {formatSeconds(currentTime)}
-        </div>
-
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 pl-1">
           <button
             type="button"
             onClick={() => setRenderModalOpen(true)}
@@ -1047,15 +1247,17 @@ export function LiveTimeline({
             title={
               renderDuration > MAX_CLIP_SECONDS
                 ? `Clip must be ${MAX_CLIP_SECONDS / 60} minutes or shorter`
-                : "Render clip - pick aspect ratio, title, and export options"
+                : renderDuration < MIN_CLIP_SECONDS
+                  ? `Selection must be at least ${MIN_CLIP_SECONDS}s`
+                  : "Export clip — pick aspect ratio, title, and options"
             }
             className={cn(
-              "text-xs px-4 py-1.5 rounded-lg font-semibold",
-              "bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-black",
+              "rounded-md px-3 py-1.5 text-xs font-semibold",
+              "bg-[var(--color-accent)] text-black hover:bg-[var(--color-accent-hover)]",
               "disabled:opacity-40"
             )}
           >
-            Render
+            Export
           </button>
         </div>
       </div>
@@ -1131,7 +1333,7 @@ export function LiveTimeline({
 
           {/* Tracks + ruler */}
           <div
-            className="flex h-full min-h-0 shrink-0 flex-col"
+            className="relative flex h-full min-h-0 shrink-0 flex-col"
             style={{ width: trackContentWidth || "100%" }}
           >
             {/* Ruler */}
@@ -1140,6 +1342,9 @@ export function LiveTimeline({
               className="relative h-7 bg-[#030403] border-b border-[var(--color-card-border)] cursor-ew-resize shrink-0"
               onPointerDown={(e) => {
                 const t = snapTimelineTime(timeFromRef(e.clientX, rulerRef), 1 / 30);
+                pauseTransport();
+                currentTimeRef.current = t;
+                setScrubPreview(t);
                 onScrub(t);
                 beginDrag("scrub", e);
               }}
@@ -1169,7 +1374,7 @@ export function LiveTimeline({
                     title={`${marker.label}${marker.score != null ? ` / score ${marker.score.toFixed(1)}` : ""}`}
                     onPointerDown={(event) => event.stopPropagation()}
                     onClick={() => {
-                      onPause();
+                      pauseTransport();
                       onScrub(marker.timeSeconds);
                       if (marker.endTimeSeconds != null) {
                         onSelectionChange(
@@ -1196,13 +1401,6 @@ export function LiveTimeline({
                     style={{ left: `${pct(marker.timeSeconds, maxTime)}%` }}
                   />
                 ))}
-              {!renderModalOpen && (
-                <Playhead
-                  percent={playheadPct}
-                  tall
-                  onScrub={(e) => beginDrag("scrub", e)}
-                />
-              )}
             </div>
 
             {/* Tracks stack — fixed track heights (Premiere-style) */}
@@ -1214,19 +1412,27 @@ export function LiveTimeline({
                 style={VIDEO_TRACK_STYLE}
                 onPointerDown={handleVideoTrackPointerDown}
               >
-              {/* Filmstrip */}
+              {/* Filmstrip — stretch each frame to the next (sparse OK) */}
               <div className="absolute inset-0 pointer-events-none">
                 {thumbnails.length > 0
-                  ? visibleThumbnails.map((thumb, index) => (
+                  ? visibleThumbnails.map((thumb, index) => {
+                      const nextFull = thumbnails.find(
+                        (t) => t.startTimeSeconds > thumb.startTimeSeconds
+                      );
+                      const stretchEnd = nextFull
+                        ? nextFull.startTimeSeconds
+                        : Math.max(thumb.endTimeSeconds, maxTime);
+                      const widthPct = Math.max(
+                        pct(stretchEnd - thumb.startTimeSeconds, maxTime),
+                        0.35
+                      );
+                      return (
                       <div
                         key={thumb.startTimeSeconds}
-                        className="absolute top-0 bottom-0 border-r border-[#000]/60 overflow-hidden"
+                        className="absolute top-0 bottom-0 border-r border-[#000]/40 overflow-hidden"
                         style={{
                           left: `${pct(thumb.startTimeSeconds, maxTime)}%`,
-                          width: `${Math.max(
-                            pct(thumb.endTimeSeconds - thumb.startTimeSeconds, maxTime),
-                            0.4
-                          )}%`,
+                          width: `${widthPct}%`,
                         }}
                       >
                         {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -1235,15 +1441,16 @@ export function LiveTimeline({
                           alt=""
                           className="h-full w-full object-cover"
                           draggable={false}
-                          loading={index < 80 ? "eager" : "lazy"}
+                          loading={index < 12 ? "eager" : "lazy"}
                           decoding="async"
-                          fetchPriority={index < 8 ? "high" : "auto"}
+                          fetchPriority={index < 4 ? "high" : "auto"}
                           onError={(event) => {
                             event.currentTarget.style.visibility = "hidden";
                           }}
                         />
                       </div>
-                    ))
+                      );
+                    })
                   : visibleSegments.map((seg) => (
                       <div
                         key={seg.id}
@@ -1319,7 +1526,7 @@ export function LiveTimeline({
                       start: segment.sourceStart,
                       end: segment.sourceEnd,
                     });
-                    onPause();
+                    pauseTransport();
                     onScrub(segment.sourceStart);
                   }}
                   className={cn(
@@ -1342,25 +1549,33 @@ export function LiveTimeline({
                 </button>
               ))}
 
-              {/* Active clip selection. */}
+              {/* Active clip selection — CapCut / RVE-style clip block */}
               <div
-                className="absolute top-0 bottom-0 z-[5] border-2 border-[var(--color-accent)]"
+                className="absolute top-1 bottom-1 z-[5] overflow-hidden rounded-md border-2 border-[var(--color-accent)] bg-[var(--color-accent)]/12 shadow-[0_0_0_1px_rgba(149,255,0,0.25)]"
                 style={{
                   left: `${selStartPct}%`,
                   width: `${Math.max(selWidthPct, 0.2)}%`,
                 }}
                 onPointerDown={(e) => e.stopPropagation()}
               >
+                <div className="pointer-events-none absolute inset-x-6 top-1 flex items-center gap-1.5">
+                  <span className="rounded bg-[#020302]/85 px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wide text-[var(--color-accent)]">
+                    Clip
+                  </span>
+                  <span className="truncate font-mono text-[9px] text-white/85">
+                    {formatDuration(selection.end - selection.start)}
+                  </span>
+                </div>
                 <div
-                  className="absolute left-0 top-0 bottom-0 w-2 -ml-1 bg-[var(--color-accent)] cursor-ew-resize z-10"
+                  className="absolute left-0 top-0 bottom-0 w-2.5 bg-[var(--color-accent)] cursor-ew-resize z-10"
                   onPointerDown={(e) => beginDrag("start", e)}
                 />
                 <div
-                  className="absolute inset-x-2 inset-y-0 cursor-grab active:cursor-grabbing"
+                  className="absolute inset-x-2.5 inset-y-0 cursor-grab active:cursor-grabbing"
                   onPointerDown={(e) => beginDrag("move", e)}
                 />
                 <div
-                  className="absolute right-0 top-0 bottom-0 w-2 -mr-1 bg-[var(--color-accent)] cursor-ew-resize z-10"
+                  className="absolute right-0 top-0 bottom-0 w-2.5 bg-[var(--color-accent)] cursor-ew-resize z-10"
                   onPointerDown={(e) => beginDrag("end", e)}
                 />
               </div>
@@ -1407,15 +1622,20 @@ export function LiveTimeline({
                 trackRef={captionTrackRef}
               />
             )}
+            </div>
 
+            {/* Single full-height playhead over ruler + tracks */}
             {!renderModalOpen && (
               <Playhead
                 percent={playheadPct}
                 tall
-                onScrub={(e) => beginDrag("scrub", e)}
+                needleRef={playheadElRef}
+                onScrub={(e) => {
+                  pauseTransport();
+                  beginDrag("scrub", e);
+                }}
               />
             )}
-            </div>
           </div>
         </div>
       </div>
@@ -1440,34 +1660,46 @@ function Playhead({
   percent,
   tall,
   onScrub,
+  needleRef,
 }: {
   percent: number;
   tall?: boolean;
   onScrub?: (e: React.PointerEvent) => void;
+  needleRef?: React.RefObject<HTMLDivElement | null>;
 }) {
   return (
     <div
+      ref={needleRef}
       data-timeline-playhead
       className="pointer-events-none absolute inset-y-0 top-0 z-[12]"
       style={{ left: `${percent}%` }}
     >
+      {/* Larger grab target for the head */}
       <div
         className={cn(
-          "absolute top-0 bottom-0 w-px bg-[var(--color-accent)] -translate-x-1/2 shadow-[0_0_12px_rgba(149,255,0,0.55)]",
+          "absolute left-1/2 z-20 -translate-x-1/2",
+          tall ? "-top-1" : "-top-0.5",
+          "flex h-5 w-4 items-start justify-center",
+          onScrub && "pointer-events-auto cursor-grab active:cursor-grabbing"
+        )}
+        onPointerDown={onScrub}
+      >
+        <div
+          className={cn(
+            "h-3.5 w-3.5 rotate-45 rounded-[2px] border border-black/40 bg-[var(--color-accent)] shadow-[0_0_10px_rgba(149,255,0,0.45)]"
+          )}
+        />
+      </div>
+      {/* Full-height needle with wide invisible hit area */}
+      <div
+        className={cn(
+          "absolute top-3 bottom-0 left-1/2 w-3 -translate-x-1/2",
           onScrub && "pointer-events-auto cursor-ew-resize"
         )}
         onPointerDown={onScrub}
-      />
-      <div
-        className={cn(
-          "absolute -translate-x-1/2 w-0 h-0",
-          tall ? "-top-0" : "top-0",
-          "border-l-[6px] border-r-[6px] border-t-[8px]",
-          "border-l-transparent border-r-transparent border-t-[var(--color-accent)]",
-          onScrub && "pointer-events-auto cursor-grab"
-        )}
-        onPointerDown={onScrub}
-      />
+      >
+        <div className="absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 bg-[var(--color-accent)] shadow-[0_0_12px_rgba(149,255,0,0.45)]" />
+      </div>
     </div>
   );
 }
@@ -1477,32 +1709,29 @@ function ToolBtn({
   onClick,
   title,
   disabled,
+  active,
 }: {
   children: React.ReactNode;
   onClick: () => void;
   title?: string;
   disabled?: boolean;
+  active?: boolean;
 }) {
-  const label =
-    title === "Play from In point"
-      ? "Play"
-      : title === "Pause"
-        ? "Pause"
-        : title === "Zoom out"
-          ? "-"
-          : title === "Zoom in (scroll wheel)"
-            ? "+"
-            : children;
-
   return (
     <button
       type="button"
       title={title}
+      aria-label={title}
       onClick={onClick}
       disabled={disabled}
-      className="h-7 min-w-7 px-2 flex items-center justify-center text-[10px] font-semibold uppercase text-[#9aa49a] border border-[#21301f] bg-[#070a07] hover:border-[var(--color-accent)] hover:text-white disabled:opacity-30 disabled:pointer-events-none transition-colors"
+      className={cn(
+        "flex h-7 min-w-7 items-center justify-center gap-0.5 px-1.5 text-[#9aa49a] transition-colors",
+        "hover:bg-[#121912] hover:text-white",
+        "disabled:pointer-events-none disabled:opacity-30",
+        active && "bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
+      )}
     >
-      {label}
+      {children}
     </button>
   );
 }

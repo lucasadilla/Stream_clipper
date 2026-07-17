@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:is(.dark *));
+
 @theme {
   --color-background: #0a0a0f;
   --color-foreground: #f4f4f5;
@@ -11,6 +13,25 @@
   --color-success: #22c55e;
   --color-danger: #ef4444;
   --color-warning: #f59e0b;
+
+  /* shadcn / prompt-kit tokens (map onto Clipper palette) */
+  --color-card-foreground: #f4f4f5;
+  --color-popover: #12121a;
+  --color-popover-foreground: #f4f4f5;
+  --color-primary: #95ff00;
+  --color-primary-foreground: #020302;
+  --color-secondary: #1a1f1a;
+  --color-secondary-foreground: #f4fff1;
+  --color-muted-foreground: #9aa49a;
+  --color-accent-foreground: #020302;
+  --color-destructive: #ef4444;
+  --color-border: #27272f;
+  --color-input: #27272f;
+  --color-ring: #95ff00;
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
 }
 
 body {
@@ -31,6 +52,17 @@ body {
   --color-muted: #9aa49a;
   --color-accent: #95ff00;
   --color-accent-hover: #b7ff3c;
+  --color-primary: #95ff00;
+  --color-primary-foreground: #020302;
+  --color-secondary: #0c120c;
+  --color-secondary-foreground: #f4fff1;
+  --color-muted-foreground: #9aa49a;
+  --color-border: #21301f;
+  --color-input: #21301f;
+  --color-ring: #95ff00;
+  --color-card-foreground: #f4fff1;
+  --color-popover: #0a0d0a;
+  --color-popover-foreground: #f4fff1;
 }
 
 .site-header {
@@ -110,6 +142,18 @@ body {
   --color-accent-hover: #b7ff3c;
   --color-success: #95ff00;
   --color-warning: #ffb84d;
+  --color-primary: #95ff00;
+  --color-primary-foreground: #020302;
+  --color-secondary: #0c120c;
+  --color-secondary-foreground: #f4fff1;
+  --color-muted-foreground: #9aa49a;
+  --color-border: #21301f;
+  --color-input: #21301f;
+  --color-ring: #95ff00;
+  --color-card-foreground: #f4fff1;
+  --color-popover: #050805;
+  --color-popover-foreground: #f4fff1;
+  --color-accent-foreground: #020302;
 }
 
 .marketing-home {

@@ -131,6 +131,33 @@ export async function fetchYtDlpMetadata(
   return mapYtDlpJson(parseYtDlpOutput(stdout, stderr), fallbackSourceId, embed);
 }
 
+/** Lightweight live/upcoming check — used before choosing VOD vs live capture. */
+export async function probeYtDlpLiveStatus(
+  url: string
+): Promise<"live" | "upcoming" | "post_live" | "completed" | "none" | null> {
+  const available = await isYtDlpAvailable();
+  if (!available) return null;
+
+  const { stdout, stderr } = await runYtDlp(
+    [
+      ...baseYtDlpArgs(),
+      "--dump-single-json",
+      "--skip-download",
+      "--no-warnings",
+    ],
+    url,
+    { retries: 1 }
+  );
+  const data = parseYtDlpOutput(stdout, stderr);
+  return mapYtDlpLiveStatus(data) as
+    | "live"
+    | "upcoming"
+    | "post_live"
+    | "completed"
+    | "none"
+    | null;
+}
+
 export async function fetchStreamPlatformMetadata(
   parsed: ParsedStreamUrl
 ): Promise<YtDlpStreamMetadata> {

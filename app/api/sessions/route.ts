@@ -1,16 +1,21 @@
 import { NextRequest } from "next/server";
 import { z } from "zod";
 import { createStreamSession } from "@/services/youtubeService";
-import { listSessionsWithStorage } from "@/services/sessionCleanupService";
+import {
+  listSessionsWithStorage,
+  replacePriorSessionsForAccount,
+} from "@/services/sessionCleanupService";
 import { parseStreamUrl } from "@/lib/streamPlatform";
 import { errorResponse, jsonResponse, parseRequestJson } from "@/lib/utils";
 import { canCreateStreamSession } from "@/services/usageService";
 import { getBillingAccountIdFromRequest } from "@/services/billingService";
 import { getPostHogClient } from "@/lib/posthog-server";
+import { SESSION_MODES } from "@/lib/sessionMode";
 
 const createSessionSchema = z.object({
   streamUrl: z.string().min(1).optional(),
   youtubeUrl: z.string().min(1).optional(),
+  mode: z.enum(SESSION_MODES).optional().default("timeline"),
 });
 
 export async function GET(request: NextRequest) {
@@ -61,15 +66,24 @@ export async function POST(request: NextRequest) {
     const session = await createStreamSession(
       rawUrl,
       billingAccountId,
-      usageGate.snapshot.entitlements?.maxSourceDurationSeconds
+      usageGate.snapshot.entitlements?.maxSourceDurationSeconds,
+      parsed.mode
     );
+
     if (billingAccountId) {
+      // One active session per account — clear prior workspaces in the background.
+      void replacePriorSessionsForAccount(billingAccountId, session.id).catch(
+        (err) => {
+          console.warn("[sessions] prior session cleanup failed:", err);
+        }
+      );
       getPostHogClient().capture({
         distinctId: billingAccountId,
         event: "session_created",
         properties: {
           platform: session.platform,
           live_status: session.liveStatus,
+          mode: session.mode,
         },
       });
     }
@@ -78,6 +92,7 @@ export async function POST(request: NextRequest) {
         session: {
           id: session.id,
           platform: session.platform,
+          mode: session.mode,
           youtubeVideoId: session.youtubeVideoId,
           title: session.title,
           liveStatus: session.liveStatus,

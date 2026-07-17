@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import posthog from "posthog-js";
@@ -10,6 +10,7 @@ import type { StreamPlayerHandle } from "@/types/streamPlayer";
 import type { StreamPlatform, StreamEmbedInfo } from "@/lib/streamPlatform";
 import { shouldPreferLocalVideoPreview } from "@/lib/streamPlatform";
 import { LiveTimeline, type ClipSelection } from "@/components/LiveTimeline";
+import { ChatPanel } from "@/components/ChatPanel";
 import { LIVE_TICK_MS, LIVE_SEGMENT_SECONDS } from "@/lib/timelineConstants";
 import { THUMB_POLL_MS } from "@/lib/thumbnailConstants";
 import {
@@ -44,10 +45,16 @@ import {
 } from "@/lib/timelineBounds";
 import type { MarkerKind, TimelineMarker } from "@/lib/editorState";
 import { SourceUploadFallback } from "@/components/SourceUploadFallback";
+import { EditorPreparingScreen } from "@/components/EditorPreparingScreen";
 import {
   beginPaneResize,
   useEditorLayoutPrefs,
 } from "@/lib/editorLayoutPrefs";
+import {
+  computeEditorReadiness,
+  readEditorPreparedFlag,
+  writeEditorPreparedFlag,
+} from "@/lib/editorReadiness";
 
 interface SessionData {
   id: string;
@@ -151,11 +158,47 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
     setPlayerDuration(sanitizeDurationSeconds(duration));
   }, []);
 
+  const currentTimeRef = useRef(0);
+  const timeUpdateRaf = useRef<number | null>(null);
+  const lastUiTimeFlush = useRef(0);
+  const scrubLockUntil = useRef(0);
+  const scrubTargetRef = useRef<number | null>(null);
+  /** While false, playhead is user-owned (paused/scrubbed) — ignore embed clock. */
+  const followPlayerClockRef = useRef(false);
+
   const handlePlayerTimeUpdate = useCallback((time: number) => {
+    if (!followPlayerClockRef.current) return;
+
+    const now = performance.now();
+    // Right after play-from-playhead, ignore stale embed ticks until seek settles.
+    if (now < scrubLockUntil.current) {
+      const target = scrubTargetRef.current;
+      if (target != null && Math.abs(time - target) > 0.5) {
+        return;
+      }
+      scrubLockUntil.current = 0;
+      scrubTargetRef.current = null;
+    }
+
+    currentTimeRef.current = time;
+    if (now - lastUiTimeFlush.current < 120) {
+      if (timeUpdateRaf.current == null) {
+        timeUpdateRaf.current = requestAnimationFrame(() => {
+          timeUpdateRaf.current = null;
+          lastUiTimeFlush.current = performance.now();
+          setCurrentTime(currentTimeRef.current);
+        });
+      }
+      return;
+    }
+    lastUiTimeFlush.current = now;
     setCurrentTime(time);
   }, []);
+
   const [liveClock, setLiveClock] = useState(() => Date.now());
   const [loading, setLoading] = useState(true);
+  const [editorReady, setEditorReady] = useState(false);
+  const [prepareClock, setPrepareClock] = useState(() => Date.now());
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [transcriptionError, setTranscriptionError] = useState<string | null>(null);
@@ -172,6 +215,10 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const {
     monitorHeight,
     setMonitorHeight,
+    chatWidth,
+    setChatWidth,
+    chatVisible,
+    toggleChatVisible,
   } = useEditorLayoutPrefs();
   const captionSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const playerRef = useRef<StreamPlayerHandle>(null);
@@ -179,53 +226,88 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const transcribeInFlight = useRef(false);
   const eventsInFlight = useRef(false);
   const audioSyncInFlight = useRef(false);
-  const thumbnailsInFlight = useRef(false);
+  const thumbnailsInFlight = useRef<Promise<void> | null>(null);
+  const eventsPromiseRef = useRef<Promise<void> | null>(null);
   const transcriptSignature = useRef("");
   const captionRebuildAttempted = useRef(false);
   const sessionLoadedOnce = useRef(false);
+  const prepareStartedAt = useRef<number | null>(null);
+  const previousSessionIdRef = useRef(sessionId);
+  const previouslyPreparedRef = useRef(readEditorPreparedFlag(sessionId));
 
-  const seekTo = useCallback((seconds: number) => {
-    playerRef.current?.seekTo(seconds, { play: true });
-    setCurrentTime(seconds);
+  const pinPlayhead = useCallback((seconds: number) => {
+    const t = sanitizeDurationSeconds(seconds);
+    followPlayerClockRef.current = false;
+    scrubTargetRef.current = t;
+    scrubLockUntil.current = performance.now() + 800;
+    currentTimeRef.current = t;
+    setCurrentTime(t);
+    return t;
   }, []);
 
-  const seekFromAssistant = useCallback((seconds: number) => {
-    seekTo(seconds);
-    setClipSelection({
-      start: seconds,
-      end: seconds + LIVE_SEGMENT_SECONDS,
-    });
-  }, [seekTo]);
+  const seekTo = useCallback(
+    (seconds: number) => {
+      const t = sanitizeDurationSeconds(seconds);
+      scrubTargetRef.current = t;
+      scrubLockUntil.current = performance.now() + 800;
+      currentTimeRef.current = t;
+      setCurrentTime(t);
+      // Follow the player only after we intentionally start playback.
+      followPlayerClockRef.current = true;
+      playerRef.current?.seekTo(t, { play: true });
+    },
+    []
+  );
 
-  const scrubTo = useCallback((seconds: number) => {
-    playerRef.current?.seekTo(seconds, { play: false });
-    setCurrentTime(seconds);
-  }, []);
+  const seekFromAssistant = useCallback(
+    (seconds: number) => {
+      seekTo(seconds);
+      setClipSelection({
+        start: seconds,
+        end: seconds + LIVE_SEGMENT_SECONDS,
+      });
+    },
+    [seekTo]
+  );
+
+  const scrubTo = useCallback(
+    (seconds: number) => {
+      const t = pinPlayhead(seconds);
+      playerRef.current?.seekTo(t, { play: false });
+    },
+    [pinPlayhead]
+  );
 
   const pausePlayback = useCallback(() => {
+    followPlayerClockRef.current = false;
     playerRef.current?.pause();
   }, []);
 
   async function loadThumbnails() {
-    if (thumbnailsInFlight.current) return;
-    thumbnailsInFlight.current = true;
-    try {
-      const res = await fetch(`/api/sessions/${sessionId}/timeline-thumbs`);
-      const data = await res.json();
-      if (!res.ok) return;
-      const next = (data.thumbnails ?? []) as typeof thumbnails;
-      setThumbnails((prev) => {
-        if (timelineThumbsEqual(prev, next)) return prev;
-        return next;
-      });
-    } catch {
-      // optional
-    } finally {
-      thumbnailsInFlight.current = false;
-    }
+    if (thumbnailsInFlight.current) return thumbnailsInFlight.current;
+    const request = (async () => {
+      try {
+        const res = await fetch(`/api/sessions/${sessionId}/timeline-thumbs`);
+        const data = await res.json();
+        if (!res.ok) return;
+        const next = (data.thumbnails ?? []) as typeof thumbnails;
+        setThumbnails((prev) => {
+          // Never wipe a populated filmstrip with an empty transient response.
+          if (next.length === 0 && prev.length > 0) return prev;
+          if (timelineThumbsEqual(prev, next)) return prev;
+          return next;
+        });
+      } catch {
+        // optional
+      }
+    })().finally(() => {
+      thumbnailsInFlight.current = null;
+    });
+    thumbnailsInFlight.current = request;
+    return request;
   }
 
-  async function loadSession() {
+  async function loadSession(options?: { holdLoading?: boolean }) {
     const isInitialLoad = !sessionLoadedOnce.current;
     try {
       const { ok, data } = await fetchJson<{ session?: SessionData; error?: string }>(
@@ -235,13 +317,16 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       if (!data.session) throw new Error("Session not found");
       setSession(data.session);
       sessionLoadedOnce.current = true;
+      if (prepareStartedAt.current == null) {
+        prepareStartedAt.current = Date.now();
+      }
     } catch (err) {
       // Background refresh failures (dev recompile blips) must not kill the editor.
       if (isInitialLoad) {
         setError(err instanceof Error ? err.message : "Failed to load");
       }
     } finally {
-      setLoading(false);
+      if (!options?.holdLoading) setLoading(false);
     }
   }
 
@@ -309,78 +394,88 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   );
 
   async function loadEvents() {
-    if (eventsInFlight.current) return;
-    eventsInFlight.current = true;
-    try {
-      if (!audioSyncInFlight.current) {
-        audioSyncInFlight.current = true;
-        void fetch(`/api/sessions/${sessionId}/audio/sync`, { method: "POST" })
-          .catch(() => {})
-          .finally(() => {
-            audioSyncInFlight.current = false;
-          });
-      }
-
-      const { ok, data } = await fetchJson<{
-        transcriptChunks?: typeof transcripts;
-        eventWindows?: Array<{
-          id: string;
-          startTimeSeconds: number;
-          endTimeSeconds: number;
-          type: string;
-          score: number;
-          summary?: string | null;
-        }>;
-        audioEvents?: Array<{
-          id: string;
-          startTimeSeconds: number;
-          endTimeSeconds: number;
-          type: string;
-          score: number;
-          summary?: string | null;
-          rawData?: unknown;
-        }>;
-      }>(`/api/sessions/${sessionId}/events`);
-      if (!ok) return;
-
-      const chunks = data.transcriptChunks ?? [];
-      setAiMarkers(
-        (data.eventWindows ?? []).map((event) => ({
-          id: `event-${event.id}`,
-          timeSeconds: event.startTimeSeconds,
-          endTimeSeconds: event.endTimeSeconds,
-          label: event.summary?.trim() || event.type.replace(/_/g, " "),
-          kind: markerKindFromEvent(event.type),
-          score: event.score,
-          source: "ai",
-        }))
-      );
-      setAudioSpikes(
-        selectAudioSpikesForTimeline(
-          buildAudioSpikeMarkers(data.audioEvents ?? [])
-        )
-      );
-
-      // Transcript text should paint independently of waveform generation.
-      const nextTranscriptSignature = transcriptRevision(chunks);
-      if (nextTranscriptSignature !== transcriptSignature.current) {
-        transcriptSignature.current = nextTranscriptSignature;
-        const arrived = new Set<string>();
-        for (const chunk of chunks) {
-          if (!prevTranscriptIds.current.has(chunk.id)) arrived.add(chunk.id);
+    if (eventsPromiseRef.current) return eventsPromiseRef.current;
+    const request = (async () => {
+      try {
+        if (!audioSyncInFlight.current) {
+          audioSyncInFlight.current = true;
+          void fetch(`/api/sessions/${sessionId}/audio/sync`, { method: "POST" })
+            .catch(() => {})
+            .finally(() => {
+              audioSyncInFlight.current = false;
+            });
         }
-        prevTranscriptIds.current = new Set(chunks.map((chunk) => chunk.id));
-        if (arrived.size > 0) {
-          setNewSegmentIds(arrived);
-          window.setTimeout(() => setNewSegmentIds(new Set()), 2500);
+
+        const { ok, data } = await fetchJson<{
+          transcriptChunks?: typeof transcripts;
+          eventWindows?: Array<{
+            id: string;
+            startTimeSeconds: number;
+            endTimeSeconds: number;
+            type: string;
+            score: number;
+            summary?: string | null;
+          }>;
+          audioEvents?: Array<{
+            id: string;
+            startTimeSeconds: number;
+            endTimeSeconds: number;
+            type: string;
+            score: number;
+            summary?: string | null;
+            rawData?: unknown;
+          }>;
+        }>(`/api/sessions/${sessionId}/events`);
+        if (!ok) return;
+
+        const chunks = data.transcriptChunks ?? [];
+        setAiMarkers(
+          (data.eventWindows ?? []).map((event) => ({
+            id: `event-${event.id}`,
+            timeSeconds: event.startTimeSeconds,
+            endTimeSeconds: event.endTimeSeconds,
+            label: event.summary?.trim() || event.type.replace(/_/g, " "),
+            kind: markerKindFromEvent(event.type),
+            score: event.score,
+            source: "ai",
+          }))
+        );
+        setAudioSpikes(
+          selectAudioSpikesForTimeline(
+            buildAudioSpikeMarkers(data.audioEvents ?? [])
+          )
+        );
+
+        // Never blank a loaded transcript with a transient empty poll
+        // (e.g. mid-rebuild wipe). Keep previous until nonempty data returns.
+        if (chunks.length === 0 && prevTranscriptIds.current.size > 0) {
+          return;
         }
-        setTranscripts(chunks);
+
+        const nextTranscriptSignature = transcriptRevision(chunks);
+        if (nextTranscriptSignature !== transcriptSignature.current) {
+          transcriptSignature.current = nextTranscriptSignature;
+          const arrived = new Set<string>();
+          for (const chunk of chunks) {
+            if (!prevTranscriptIds.current.has(chunk.id)) arrived.add(chunk.id);
+          }
+          prevTranscriptIds.current = new Set(chunks.map((chunk) => chunk.id));
+          if (arrived.size > 0) {
+            setNewSegmentIds(arrived);
+            window.setTimeout(() => setNewSegmentIds(new Set()), 2500);
+          }
+          setTranscripts(chunks);
+        }
+      } catch {
+        // non-fatal
       }
-    } catch {
-      // non-fatal
-    } finally {
+    })().finally(() => {
+      eventsPromiseRef.current = null;
       eventsInFlight.current = false;
-    }
+    });
+    eventsPromiseRef.current = request;
+    eventsInFlight.current = true;
+    return request;
   }
 
   useEffect(() => {
@@ -389,17 +484,63 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   }, []);
 
   useEffect(() => {
-    loadSession();
-    loadEvents();
-    void loadCaptionEdits();
-    void loadThumbnails();
+    let cancelled = false;
+
+    if (previousSessionIdRef.current !== sessionId) {
+      previousSessionIdRef.current = sessionId;
+      previouslyPreparedRef.current = readEditorPreparedFlag(sessionId);
+      setEditorReady(false);
+      prepareStartedAt.current = null;
+      sessionLoadedOnce.current = false;
+      sourceStarted.current = false;
+      captionRebuildAttempted.current = false;
+      transcriptSignature.current = "";
+      prevTranscriptIds.current = new Set();
+      thumbnailsInFlight.current = null;
+      eventsPromiseRef.current = null;
+      setPrepareClock(Date.now());
+      setError(null);
+      setTranscripts([]);
+      setThumbnails([]);
+      setSession(null);
+    }
+
+    setLoading(true);
+    void (async () => {
+      try {
+        await Promise.all([
+          loadSession({ holdLoading: true }),
+          loadEvents(),
+          loadCaptionEdits(),
+          loadThumbnails(),
+        ]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [sessionId]);
 
   useEffect(() => {
     if (!session) return;
-    const id = setInterval(() => void loadThumbnails(), THUMB_POLL_MS);
+    // Poll filmstrip faster while waiting to open the editor.
+    const ms = editorReady ? THUMB_POLL_MS : 1000;
+    const id = setInterval(() => void loadThumbnails(), ms);
     return () => clearInterval(id);
-  }, [sessionId, session?.id]);
+  }, [sessionId, session?.id, editorReady]);
+
+  useEffect(() => {
+    if (!session || editorReady) return;
+    const id = setInterval(() => {
+      void loadEvents();
+      void loadSession();
+      setPrepareClock(Date.now());
+    }, 1500);
+    return () => clearInterval(id);
+  }, [sessionId, session?.id, editorReady]);
 
   useEffect(() => {
     if (sourceStarted.current) return;
@@ -437,6 +578,21 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       .filter((t) => {
         const raw = t.rawJson as { whisper?: boolean; cursorOnly?: boolean } | null;
         return (
+          !raw?.cursorOnly &&
+          t.text !== "[silence]" &&
+          t.text !== "[processing error]"
+        );
+      })
+      .map((t) => t.endTimeSeconds)
+  );
+
+  /** Whisper-backed coverage — used for "behind" polling, not the prepare gate. */
+  const whisperTranscribedSeconds = Math.max(
+    0,
+    ...transcripts
+      .filter((t) => {
+        const raw = t.rawJson as { whisper?: boolean; cursorOnly?: boolean } | null;
+        return (
           raw?.whisper &&
           !raw?.cursorOnly &&
           t.text !== "[silence]" &&
@@ -453,7 +609,8 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   );
 
   const transcriptionBehind =
-    recordedSecondsForTx > 5 && transcribedSeconds < recordedSecondsForTx - 15;
+    recordedSecondsForTx > 5 &&
+    whisperTranscribedSeconds < recordedSecondsForTx - 15;
 
   function transcriptsNeedTimingRebuild(
     chunks: typeof transcripts
@@ -463,35 +620,56 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       return m?.whisper;
     });
     if (whisper.length === 0) return false;
-    // A mixed transcript can contain new word-timed chunks plus older
-    // OpenRouter/estimated chunks. Rebuild if *any* real speech chunk lacks
-    // word timestamps; checking whether any one chunk had words left the rest
-    // permanently approximate.
-    return whisper.some(
-      (c) => {
-        const meta = c.rawJson as {
-          words?: unknown[];
-          estimatedTiming?: boolean;
-          cursorOnly?: boolean;
-        } | null;
-        if (meta?.cursorOnly || c.text === "[silence]") return false;
-        return (
-          meta?.estimatedTiming === true ||
-          !Array.isArray(meta?.words) ||
-          meta.words.length === 0
-        );
-      }
-    );
+    // Segment-timed Whisper rows without word arrays are valid for captions.
+    // Only rebuild rows that were explicitly marked as estimated timing.
+    return whisper.some((c) => {
+      const meta = c.rawJson as {
+        words?: unknown[];
+        estimatedTiming?: boolean;
+        cursorOnly?: boolean;
+      } | null;
+      if (meta?.cursorOnly || c.text === "[silence]") return false;
+      return meta?.estimatedTiming === true;
+    });
   }
 
   useEffect(() => {
     if (captionRebuildAttempted.current || transcripts.length === 0) return;
     if (!transcriptsNeedTimingRebuild(transcripts)) return;
     captionRebuildAttempted.current = true;
+    // Persist so a refresh does not wipe + rebuild again in a loop.
+    try {
+      sessionStorage.setItem(`clipper:captionRebuild:${sessionId}`, "1");
+    } catch {
+      // ignore
+    }
     fetch(`/api/sessions/${sessionId}/transcribe?rebuild=1`, { method: "POST" })
-      .then(() => loadEvents())
-      .catch(() => {});
+      .then(async (res) => {
+        const data = (await res.json().catch(() => ({}))) as {
+          success?: boolean;
+          skipped?: boolean;
+        };
+        if (data.success === false || data.skipped) {
+          // Allow a later retry if wipe was blocked.
+          captionRebuildAttempted.current = false;
+          return;
+        }
+        await loadEvents();
+      })
+      .catch(() => {
+        captionRebuildAttempted.current = false;
+      });
   }, [sessionId, transcripts]);
+
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem(`clipper:captionRebuild:${sessionId}`) === "1") {
+        captionRebuildAttempted.current = true;
+      }
+    } catch {
+      // ignore
+    }
+  }, [sessionId]);
 
   useEffect(() => {
     if (!session) return;
@@ -501,7 +679,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         await fetch(`/api/sessions/${sessionId}/live-tick`, { method: "POST" });
         await loadSession();
         await loadEvents();
-        void loadThumbnails();
+        // Thumbnails: dedicated 2s poll owns filmstrip updates (avoids duplicate work).
       } catch {
         // non-fatal
       }
@@ -515,22 +693,38 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   useEffect(() => {
     if (!session) return;
 
+    let cancelled = false;
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+
     async function runTranscribe() {
-      if (transcribeInFlight.current) return;
+      if (transcribeInFlight.current || cancelled) return;
       transcribeInFlight.current = true;
       setTranscribingActive(true);
+      const abort = new AbortController();
+      // Never let a hung /transcribe (e.g. old blocking companion download)
+      // freeze the in-flight flag and stop all future polls.
+      const hangWatchdog = setTimeout(() => abort.abort(), 90_000);
       try {
         const { ok, data } = await fetchJson<{
           error?: string;
           reason?: string;
           skipped?: boolean;
           transcribedThrough?: number;
-        }>(`/api/sessions/${sessionId}/transcribe`, { method: "POST" });
+        }>(`/api/sessions/${sessionId}/transcribe`, {
+          method: "POST",
+          signal: abort.signal,
+        });
+
+        if (cancelled) return;
 
         if (!ok) {
           setTranscriptionError(data.error ?? "Transcription failed");
         } else if (data.reason === "no_file") {
           setTranscriptionError("Waiting for local recording to download...");
+        } else if (data.reason === "no_audio") {
+          setTranscriptionError(
+            "Waiting for audio track — video-only capture detected, fetching audio…"
+          );
         } else if (data.reason === "no_openai_key") {
           setTranscriptionError(
             "Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env"
@@ -538,7 +732,9 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         } else if (data.reason === "too_short") {
           setTranscriptionError("Waiting for enough audio to transcribe...");
         } else if (data.reason === "audio_not_ready") {
-          setTranscriptionError("Buffering capture — transcription will resume shortly");
+          setTranscriptionError(
+            "Buffering capture — transcription will resume shortly"
+          );
         } else if (data.reason === "provider_unavailable") {
           const detail = data.error?.trim();
           setTranscriptionError(
@@ -555,22 +751,36 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         await loadEvents();
         await loadSession();
       } catch (err) {
-        setTranscriptionError(
-          err instanceof Error ? err.message : "Transcription request failed"
-        );
+        if (cancelled) return;
+        if (err instanceof DOMException && err.name === "AbortError") {
+          setTranscriptionError(
+            "Transcription timed out — retrying automatically"
+          );
+        } else {
+          setTranscriptionError(
+            err instanceof Error ? err.message : "Transcription request failed"
+          );
+        }
       } finally {
+        clearTimeout(hangWatchdog);
         transcribeInFlight.current = false;
-        setTranscribingActive(false);
+        if (!cancelled) setTranscribingActive(false);
       }
     }
 
-    runTranscribe();
+    void runTranscribe();
     const ms = transcriptionBehind
       ? TRANSCRIPTION_FAST_TICK_MS
       : TRANSCRIPTION_SLOW_TICK_MS;
-    const interval = setInterval(runTranscribe, ms);
-    return () => clearInterval(interval);
-  }, [sessionId, session?.id, transcriptionBehind, transcribedSeconds]);
+    intervalId = setInterval(() => void runTranscribe(), ms);
+    return () => {
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
+    };
+    // Intentionally omit transcribedSeconds — changing it restarted this effect
+    // and could strand an in-flight request. Behind-ness only adjusts interval.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, session?.id, transcriptionBehind]);
 
   useEffect(() => {
     if (session?.liveStatus !== "live" && session?.liveStatus !== "upcoming") return;
@@ -603,14 +813,88 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
     }
   }
 
+  // Hooks must run before any early return (loading / error).
+  const segmentTranscripts = useMemo(
+    () =>
+      transcripts.filter((t) => {
+        const raw = t.rawJson as { cursorOnly?: boolean } | null;
+        return (
+          !raw?.cursorOnly &&
+          t.text !== "[silence]" &&
+          t.text !== "[processing error]"
+        );
+      }),
+    [transcripts]
+  );
+  const recordedSecondsForSegments = coalesceTimelineSeconds([
+    session?.liveRecording?.recordedSeconds,
+    session?.sourceMedia?.[0]?.durationSeconds,
+    ...transcripts.map((t) => t.endTimeSeconds),
+  ]);
+  const recordedBlockKey = Math.floor(
+    recordedSecondsForSegments / LIVE_SEGMENT_SECONDS
+  );
+  const liveSegments = useMemo(
+    () =>
+      buildLiveTimelineSegments(
+        segmentTranscripts,
+        recordedSecondsForSegments,
+        newSegmentIds
+      ),
+    // newSegmentIds identity changes often; key on size + recorded blocks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [segmentTranscripts, recordedBlockKey, newSegmentIds.size]
+  );
+
+  const editorReadiness = useMemo(
+    () =>
+      computeEditorReadiness({
+        recordedSeconds: Math.max(
+          recordedSecondsForTx,
+          recordedSecondsForSegments
+        ),
+        transcribedSeconds,
+        thumbnails,
+        prepareElapsedMs: prepareStartedAt.current
+          ? Math.max(0, prepareClock - prepareStartedAt.current)
+          : 0,
+        hasSourceError: Boolean(sourcePreparationError),
+        previouslyPrepared: previouslyPreparedRef.current,
+        transcriptionHint: transcriptionError,
+      }),
+    [
+      recordedSecondsForTx,
+      recordedSecondsForSegments,
+      transcribedSeconds,
+      thumbnails,
+      prepareClock,
+      sourcePreparationError,
+      transcriptionError,
+    ]
+  );
+
+  useEffect(() => {
+    if (!session || editorReady) return;
+    if (!editorReadiness.ready) return;
+    setEditorReady(true);
+    previouslyPreparedRef.current = true;
+    writeEditorPreparedFlag(sessionId, true);
+  }, [editorReady, editorReadiness.ready, session, sessionId]);
+
   if (loading) {
     return (
-      <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
-        <EditorHeader title="Editor" />
-        <div className="flex-1 flex items-center justify-center">
-          <p className="text-[var(--color-muted)] animate-pulse">Loading...</p>
-        </div>
-      </div>
+      <EditorPreparingScreen
+        readiness={{
+          ...computeEditorReadiness({
+            recordedSeconds: 0,
+            transcribedSeconds: 0,
+            thumbnails: [],
+            prepareElapsedMs: 0,
+          }),
+          statusMessage: "Loading session",
+          detailMessage: "Fetching stream details…",
+        }}
+      />
     );
   }
 
@@ -625,6 +909,15 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
           </Link>
         </div>
       </div>
+    );
+  }
+
+  if (!editorReady) {
+    return (
+      <EditorPreparingScreen
+        title={session.title ?? "Editor"}
+        readiness={editorReadiness}
+      />
     );
   }
 
@@ -646,11 +939,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
     durationSeconds: sourceMedia?.durationSeconds,
     knownStreamDuration: session.videoDurationSeconds,
   });
-  const recordedSeconds = coalesceTimelineSeconds([
-    session.liveRecording?.recordedSeconds,
-    sourceMedia?.durationSeconds,
-    ...transcripts.map((t) => t.endTimeSeconds),
-  ]);
+  const recordedSeconds = recordedSecondsForSegments;
 
   const streamStart = sanitizeStreamStartDate(
     session.actualStartTime ? new Date(session.actualStartTime) : null
@@ -679,15 +968,6 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         LIVE_SEGMENT_SECONDS,
       ]);
 
-  const liveSegments = buildLiveTimelineSegments(
-    transcripts.filter((t) => {
-      const raw = t.rawJson as { cursorOnly?: boolean } | null;
-      return !raw?.cursorOnly && t.text !== "[silence]" && t.text !== "[processing error]";
-    }),
-    recordedSeconds,
-    newSegmentIds
-  );
-
   const progressRecordedSeconds = coalesceTimelineSeconds([
     session.liveRecording?.recordedSeconds,
     sourceMedia?.durationSeconds,
@@ -703,6 +983,8 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         recordedSeconds={recordedSeconds}
         deleting={deleting}
         onDelete={handleDeleteSession}
+        chatVisible={chatVisible}
+        onToggleChat={toggleChatVisible}
       />
 
       <div className="relative flex-1 min-h-0">
@@ -725,39 +1007,76 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
             />
           )}
 
-          {/* Program monitor — resizable, 16:9 video inside */}
+          {/* Program monitor + optional chat (right of video) */}
           <div
-            className="shrink-0 border-b border-[var(--color-card-border)]"
+            className="flex shrink-0 border-b border-[var(--color-card-border)]"
             style={{ height: monitorHeight }}
           >
-            <VideoPreview
-              platform={platform}
-              sourceId={session.youtubeVideoId}
-              embed={streamEmbed}
-              playbackVideoUrl={
-                playbackVideoUrl
-                  ? `${playbackVideoUrl}${playbackVideoUrl.includes("?") ? "&" : "?"}v=${Math.floor(recordedSeconds / 12)}`
-                  : null
-              }
-              streamPageUrl={session.youtubeUrl}
-              recordedSeconds={recordedSeconds}
-              preferLocalVideo={preferLocalVideo}
-              playerRef={playerRef}
-              transcripts={transcripts}
-              captionsEnabled={captionsEnabled}
-              captionEdits={captionEdits}
-              captionAppearance={captionAppearance}
-              onCaptionsEnabledChange={(enabled) => {
-                setCaptionsEnabled(enabled);
-                writeCaptionsEnabledPreference(enabled);
-              }}
-              onCaptionAppearanceChange={(appearance) => {
-                setCaptionAppearance(appearance);
-                writeCaptionAppearancePreference(appearance);
-              }}
-              onTimeUpdate={handlePlayerTimeUpdate}
-              onDurationChange={handlePlayerDurationChange}
-            />
+            <div className="min-h-0 min-w-0 flex-1">
+              <VideoPreview
+                platform={platform}
+                sourceId={session.youtubeVideoId}
+                embed={streamEmbed}
+                playbackVideoUrl={playbackVideoUrl}
+                streamPageUrl={session.youtubeUrl}
+                recordedSeconds={recordedSeconds}
+                preferLocalVideo={preferLocalVideo}
+                playerRef={playerRef}
+                transcripts={transcripts}
+                captionsEnabled={captionsEnabled}
+                captionEdits={captionEdits}
+                captionAppearance={captionAppearance}
+                onCaptionsEnabledChange={(enabled) => {
+                  setCaptionsEnabled(enabled);
+                  writeCaptionsEnabledPreference(enabled);
+                }}
+                onCaptionAppearanceChange={(appearance) => {
+                  setCaptionAppearance(appearance);
+                  writeCaptionAppearancePreference(appearance);
+                }}
+                onTimeUpdate={handlePlayerTimeUpdate}
+                onDurationChange={handlePlayerDurationChange}
+              />
+            </div>
+
+            {chatVisible && (
+              <>
+                <div
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="Resize chat"
+                  title="Drag to resize chat"
+                  className="group relative z-10 hidden w-1.5 shrink-0 cursor-col-resize bg-[#0a100a] hover:bg-[var(--color-accent)]/40 md:block"
+                  onPointerDown={(event) =>
+                    beginPaneResize({
+                      axis: "col",
+                      startSize: chatWidth,
+                      onResize: setChatWidth,
+                      event,
+                      invert: true,
+                    })
+                  }
+                >
+                  <span className="pointer-events-none absolute inset-y-0 -left-1 -right-1" />
+                </div>
+
+                <div
+                  className="hidden min-h-0 shrink-0 border-l border-[var(--color-card-border)] md:block"
+                  style={{ width: chatWidth }}
+                >
+                  <ChatPanel
+                    sessionId={sessionId}
+                    hasLiveChat={Boolean(session.activeLiveChatId)}
+                    currentTime={currentTime}
+                    onSeek={seekTo}
+                    autoStart={Boolean(isLive && session.activeLiveChatId)}
+                    onChatStarted={() => {
+                      void loadEvents();
+                    }}
+                  />
+                </div>
+              </>
+            )}
           </div>
 
           <div
@@ -778,7 +1097,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
             <span className="pointer-events-none absolute inset-x-0 -top-1 -bottom-1" />
           </div>
 
-          {/* Timeline — primary work surface */}
+          {/* Timeline — full width */}
           <div className="min-h-0 flex-1">
             <LiveTimeline
               sessionId={sessionId}

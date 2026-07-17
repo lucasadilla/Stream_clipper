@@ -88,7 +88,8 @@ async function resolveSessionMetadata(
 export async function createStreamSession(
   streamUrl: string,
   billingAccountId?: string | null,
-  maxSourceDurationSeconds?: number | null
+  maxSourceDurationSeconds?: number | null,
+  mode: "timeline" | "agent" = "timeline"
 ) {
   const meta = await resolveSessionMetadata(streamUrl);
   if (
@@ -102,6 +103,7 @@ export async function createStreamSession(
   const session = await prisma.streamSession.create({
     data: {
       platform: meta.platform,
+      mode: mode === "agent" ? "agent" : "timeline",
       youtubeVideoId: meta.sourceId,
       youtubeUrl: meta.streamUrl,
       title: meta.title,

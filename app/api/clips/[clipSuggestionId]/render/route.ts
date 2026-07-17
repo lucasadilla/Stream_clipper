@@ -164,10 +164,14 @@ export async function POST(
       renderParams,
     });
 
-    // Nudge the in-process worker without blocking the HTTP response.
+    // Kick the worker without awaiting the cut. Awaiting blocked the HTTP
+    // response (and progress polling) for the whole ffmpeg run, and hit
+    // maxDuration before long cuts finished.
     void import("@/services/workerService")
       .then(({ runWorkerTick }) => runWorkerTick())
-      .catch(() => {});
+      .catch((err) => {
+        console.warn("[render] worker nudge failed:", err);
+      });
 
     if (billingAccountId) {
       getPostHogClient().capture({

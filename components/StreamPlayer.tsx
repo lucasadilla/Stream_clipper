@@ -1,6 +1,6 @@
 "use client";
 
-import { forwardRef } from "react";
+import { forwardRef, useEffect, useState } from "react";
 import { YouTubePlayer } from "@/components/YouTubePlayer";
 import { LocalVideoPlayer } from "@/components/LocalVideoPlayer";
 import { KickEmbedPlayer } from "@/components/KickEmbedPlayer";
@@ -39,6 +39,13 @@ export const StreamPlayer = forwardRef<StreamPlayerHandle, StreamPlayerProps>(
     },
     ref
   ) {
+    const [localFailed, setLocalFailed] = useState(false);
+
+    useEffect(() => {
+      setLocalFailed(false);
+    }, [playbackVideoUrl, preferLocalVideo, platform, sourceId]);
+
+    // YouTube always uses the embed so live + full VOD stay available.
     if (platform === "youtube") {
       return (
         <YouTubePlayer
@@ -51,36 +58,20 @@ export const StreamPlayer = forwardRef<StreamPlayerHandle, StreamPlayerProps>(
       );
     }
 
-    if (preferLocalVideo) {
-      if (playbackVideoUrl) {
-        return (
-          <LocalVideoPlayer
-            ref={ref}
-            src={playbackVideoUrl}
-            onTimeUpdate={onTimeUpdate}
-            onDurationChange={onDurationChange}
-            fillContainer={fillContainer}
-          />
-        );
-      }
+    const resolvedEmbed = resolveStreamEmbed(platform, sourceId, embed);
 
-      const resolvedEmbed = resolveStreamEmbed(platform, sourceId, embed);
-
+    if (preferLocalVideo && playbackVideoUrl && !localFailed) {
       return (
-        <StreamCapturePlaceholder
-          platform={platform}
-          streamPageUrl={streamPageUrl}
-          channel={
-            platform === "twitch"
-              ? resolvedEmbed.twitchChannel
-              : resolvedEmbed.kickChannel
-          }
-          recordedSeconds={recordedSeconds}
+        <LocalVideoPlayer
+          ref={ref}
+          src={playbackVideoUrl}
+          onTimeUpdate={onTimeUpdate}
+          onDurationChange={onDurationChange}
+          onError={() => setLocalFailed(true)}
+          fillContainer={fillContainer}
         />
       );
     }
-
-    const resolvedEmbed = resolveStreamEmbed(platform, sourceId, embed);
 
     if (platform === "kick" && resolvedEmbed.kickChannel) {
       return (
@@ -111,7 +102,7 @@ export const StreamPlayer = forwardRef<StreamPlayerHandle, StreamPlayerProps>(
       <StreamCapturePlaceholder
         platform={platform}
         streamPageUrl={streamPageUrl}
-        channel={resolvedEmbed.kickChannel}
+        channel={resolvedEmbed.kickChannel ?? resolvedEmbed.twitchChannel}
         recordedSeconds={recordedSeconds}
       />
     );

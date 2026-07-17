@@ -32,7 +32,7 @@ export function SessionStorageList() {
       const { ok, data } = await fetchJson<{
         sessions?: SessionRow[];
         signedIn?: boolean;
-      }>("/api/sessions?limit=20");
+      }>("/api/sessions?limit=5");
       if (ok) {
         setSessions(data.sessions ?? []);
         setSignedIn(data.signedIn ?? false);
@@ -80,93 +80,77 @@ export function SessionStorageList() {
 
   if (loading) {
     return (
-      <p className="text-sm text-[var(--color-muted)] text-center py-4 animate-pulse">
-        Loading saved sessions…
+      <p className="py-4 text-center text-sm text-[var(--color-muted)] animate-pulse">
+        Loading active session…
       </p>
     );
   }
 
   if (sessions.length === 0) {
     return (
-      <div className="w-full max-w-2xl mx-auto text-center py-6">
-        <h2 className="text-lg font-semibold mb-2">Your sessions</h2>
+      <div className="mx-auto w-full max-w-2xl py-6 text-center">
+        <h2 className="mb-2 text-lg font-semibold">Active session</h2>
         <p className="text-sm text-[var(--color-muted)]">
           {signedIn === false ? (
             <>
               <Link href="/login" className="text-[var(--color-accent)] hover:underline">
                 Sign in
               </Link>{" "}
-              to see sessions tied to your account.
+              to see your active session.
             </>
           ) : (
-            "No sessions yet — analyze a stream above to get started."
+            "No active session — paste a stream URL above to start. Starting a new one replaces any previous workspace."
           )}
         </p>
       </div>
     );
   }
 
-  const totalBytes = sessions.reduce((n, s) => n + s.storageBytes, 0);
-  const totalLabel = sessions[0]
-    ? formatTotalBytes(totalBytes)
-    : "0 B";
+  const active = sessions[0];
 
   return (
-    <div className="w-full max-w-2xl mx-auto">
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-sm font-semibold text-[var(--color-muted)]">
-          Your sessions
+    <div className="mx-auto w-full max-w-2xl">
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--color-accent)]">
+          Active session
         </h2>
         <span className="text-xs text-[var(--color-muted)]">
-          {totalLabel} on disk
+          {active.storageLabel} on disk
         </span>
       </div>
-      <ul className="rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] divide-y divide-[var(--color-card-border)] overflow-hidden">
-        {sessions.map((s) => (
-          <li
-            key={s.sessionId}
-            className="flex items-center gap-3 px-4 py-3 text-sm"
-          >
-            <div className="flex-1 min-w-0">
-              <Link
-                href={`/sessions/${s.sessionId}`}
-                className="font-medium truncate block hover:text-[var(--color-accent)]"
-              >
-                {s.title ?? s.youtubeVideoId}
-              </Link>
-              <p className="text-xs text-[var(--color-muted)] mt-0.5">
-                {platformLabel(s.platform ?? "youtube")} · {s.storageLabel}
-                {s.liveStatus === "live" && (
-                  <span className="text-red-400 ml-2">· LIVE</span>
-                )}
-              </p>
-            </div>
-            <button
-              type="button"
-              disabled={deletingId === s.sessionId}
-              onClick={() => deleteSession(s.sessionId, s.title)}
-              className={cn(
-                "text-xs px-3 py-1.5 rounded-lg border shrink-0",
-                "border-[var(--color-card-border)] text-[var(--color-muted)]",
-                "hover:border-red-500/50 hover:text-red-400",
-                "disabled:opacity-50"
-              )}
+      <div className="overflow-hidden border border-[var(--color-card-border)] bg-[var(--color-card-border)]">
+        <div className="flex items-center gap-3 bg-[#050805] px-4 py-3 text-sm">
+          <div className="min-w-0 flex-1">
+            <Link
+              href={`/sessions/${active.sessionId}`}
+              className="block truncate font-medium hover:text-[var(--color-accent)]"
             >
-              {deletingId === s.sessionId ? "Deleting…" : "Delete"}
-            </button>
-          </li>
-        ))}
-      </ul>
-      <p className="text-[10px] text-[var(--color-muted)] mt-2 text-center">
-        Deletes local recordings and clips from ./storage — frees disk space on your PC.
+              {active.title ?? active.youtubeVideoId}
+            </Link>
+            <p className="mt-0.5 text-xs text-[var(--color-muted)]">
+              {platformLabel(active.platform ?? "youtube")} · {active.storageLabel}
+              {active.liveStatus === "live" && (
+                <span className="ml-2 text-red-400">· LIVE</span>
+              )}
+            </p>
+          </div>
+          <button
+            type="button"
+            disabled={deletingId === active.sessionId}
+            onClick={() => deleteSession(active.sessionId, active.title)}
+            className={cn(
+              "shrink-0 border border-[var(--color-card-border)] px-3 py-1.5 text-xs text-[var(--color-muted)]",
+              "hover:border-red-500/50 hover:text-red-400",
+              "disabled:opacity-50"
+            )}
+          >
+            {deletingId === active.sessionId ? "Deleting…" : "Delete"}
+          </button>
+        </div>
+      </div>
+      <p className="mt-2 text-center text-[10px] text-[var(--color-muted)]">
+        Only one session at a time. Starting a new clip workspace replaces this one.
       </p>
     </div>
   );
-}
-
-function formatTotalBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 }

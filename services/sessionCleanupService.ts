@@ -10,6 +10,9 @@ import {
   waitForTranscriptionIdle,
 } from "@/services/transcriptionSyncService";
 
+/** Prior workspaces marked this way stay in DB for monthly usage accounting. */
+export const REPLACED_SESSION_STATUS = "replaced";
+
 export interface SessionDeleteResult {
   freedBytes: number;
   storageLabel: string;
@@ -33,8 +36,8 @@ async function prepareSessionForDeletion(streamSessionId: string) {
     }
 
     clearSessionTranscriptionState(streamSessionId);
-    await waitForTranscriptionIdle(streamSessionId, 3000);
-    await new Promise((r) => setTimeout(r, 400));
+    await waitForTranscriptionIdle(streamSessionId, 1500);
+    await new Promise((r) => setTimeout(r, 200));
   } catch (err) {
     console.warn("[delete] prepare failed, continuing:", err);
   }
@@ -65,7 +68,7 @@ export async function getSessionStorageInfo(
       createdAt: true,
     },
   });
-  if (!session) return null;
+  if (!session || session.liveStatus === REPLACED_SESSION_STATUS) return null;
 
   const storageBytes = await getSessionStorageBytes(streamSessionId);
   return {
@@ -87,7 +90,10 @@ export async function listSessionsWithStorage(
   if (!billingAccountId) return [];
 
   const sessions = await prisma.streamSession.findMany({
-    where: { billingAccountId },
+    where: {
+      billingAccountId,
+      NOT: { liveStatus: REPLACED_SESSION_STATUS },
+    },
     orderBy: { createdAt: "desc" },
     take: limit,
     select: {
@@ -163,4 +169,78 @@ export async function deleteStreamSession(
     fullyRemoved: storage.fullyRemoved,
     orphanedPaths: storage.orphanedPaths,
   };
+}
+
+/**
+ * Retire a workspace: free disk and hide it from the UI, but keep the DB row
+ * so monthly upload quotas still count.
+ */
+export async function retireStreamSession(
+  streamSessionId: string
+): Promise<SessionDeleteResult> {
+  const session = await prisma.streamSession.findUnique({
+    where: { id: streamSessionId },
+    select: { id: true, liveStatus: true },
+  });
+  if (!session) throw new Error("Session not found");
+  if (session.liveStatus === REPLACED_SESSION_STATUS) {
+    return {
+      freedBytes: 0,
+      storageLabel: formatBytes(0),
+      fullyRemoved: true,
+      orphanedPaths: [],
+    };
+  }
+
+  await prepareSessionForDeletion(streamSessionId);
+  const storage = await deleteSessionStorage(streamSessionId);
+
+  await prisma.streamSession.update({
+    where: { id: streamSessionId },
+    data: {
+      liveStatus: REPLACED_SESSION_STATUS,
+      activeLiveChatId: null,
+      concurrentViewers: null,
+    },
+  });
+
+  return {
+    freedBytes: storage.freedBytes,
+    storageLabel: formatBytes(storage.freedBytes),
+    fullyRemoved: storage.fullyRemoved,
+    orphanedPaths: storage.orphanedPaths,
+  };
+}
+
+/**
+ * One active workspace per account: retire every session except `keepSessionId`.
+ * Runs best-effort and should not block the new session response.
+ */
+export async function replacePriorSessionsForAccount(
+  billingAccountId: string,
+  keepSessionId: string
+): Promise<number> {
+  const prior = await prisma.streamSession.findMany({
+    where: {
+      billingAccountId,
+      id: { not: keepSessionId },
+      NOT: { liveStatus: REPLACED_SESSION_STATUS },
+    },
+    select: { id: true },
+    orderBy: { createdAt: "desc" },
+  });
+
+  let retired = 0;
+  for (const session of prior) {
+    try {
+      await retireStreamSession(session.id);
+      retired += 1;
+    } catch (err) {
+      console.warn(
+        `[sessions] failed to replace prior session ${session.id}:`,
+        err
+      );
+    }
+  }
+  return retired;
 }

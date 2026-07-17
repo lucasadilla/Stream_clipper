@@ -50,12 +50,30 @@ async function createMuxedLiveSegment(
   let videoPath: string | null = null;
   let audioPath: string | null = null;
 
+  // Prefer filename heuristics so we don't ffprobe multi-hour files first.
   for (const candidate of candidates) {
+    const name = path.basename(candidate).toLowerCase();
+    if (isSegmentFile(name)) continue;
+    // Common yt-dlp audio-only format ids.
+    if (/\.f(139|140|249|250|251)\./.test(name)) {
+      if (!audioPath) audioPath = candidate;
+      continue;
+    }
+    // Common yt-dlp video-only format ids (no audio).
+    if (/\.f(298|299|137|136|135|134|133|160|278|242|243|244|247)\./.test(name)) {
+      if (!videoPath) videoPath = candidate;
+      continue;
+    }
+  }
+
+  for (const candidate of candidates) {
+    if (videoPath && audioPath) break;
+    if (candidate === videoPath || candidate === audioPath) continue;
+    if (isSegmentFile(path.basename(candidate))) continue;
     try {
       const media = await probeMedia(candidate);
       if (!videoPath && media.videoCodec) videoPath = candidate;
       if (!audioPath && media.audioCodec) audioPath = candidate;
-      if (videoPath && audioPath) break;
     } catch {
       // Ignore incomplete candidates and continue looking for readable tracks.
     }
@@ -171,11 +189,11 @@ async function resolveFileDurationSeconds(
   isLiveRecording?: boolean,
   clipEndSeconds?: number
 ): Promise<number> {
-  if (
-    isLiveRecording &&
-    liveRecordedSeconds > 0 &&
-    (!clipEndSeconds || liveRecordedSeconds >= clipEndSeconds - 0.5)
-  ) {
+  // Growing live files often fail ffprobe; trust the recording counter.
+  if (isLiveRecording && liveRecordedSeconds > 0) {
+    if (!clipEndSeconds || liveRecordedSeconds >= clipEndSeconds - 0.5) {
+      return liveRecordedSeconds;
+    }
     return liveRecordedSeconds;
   }
 
@@ -278,39 +296,14 @@ export async function ensureClipSourceForRender(
 
   const liveRecordedSeconds = session.liveRecording?.recordedSeconds ?? 0;
   const uploadDir = getUploadDir(streamSessionId);
+  const activelyRecording = isActivelyRecordingLive(session);
 
   const allSources = await prisma.sourceMedia.findMany({
     where: { streamSessionId },
     orderBy: { createdAt: "desc" },
   });
 
-  // 1. A finalized clip muxed from live split video/audio tracks. This is the
-  // safest source while the main recording and preview are still growing.
-  const muxed = await createMuxedLiveSegment(
-    streamSessionId,
-    startTimeSeconds,
-    endTimeSeconds
-  ).catch((error) => {
-    console.warn("[render] Could not prepare split live capture:", error);
-    return null;
-  });
-  if (muxed) {
-    const muxedMedia = await ensureSourceMediaRow(streamSessionId, muxed.path, {
-      originalFilename: path.basename(muxed.path),
-      durationSeconds: muxed.duration,
-      isLiveRecording: false,
-    });
-    return {
-      sourceMediaId: muxedMedia.id,
-      renderStart: startTimeSeconds - Math.floor(startTimeSeconds),
-      renderEnd: Math.min(
-        endTimeSeconds - Math.floor(startTimeSeconds),
-        muxed.duration
-      ),
-    };
-  }
-
-  // 2. preview.mp4 — only use it after a successful structural probe. File
+  // 1. preview.mp4 — only use it after a successful structural probe. File
   // existence/size is insufficient because MP4 writes its moov atom at EOF.
   const previewPath = getPreviewMp4Path(streamSessionId);
   if (existsSync(previewPath)) {
@@ -335,7 +328,7 @@ export async function ensureClipSourceForRender(
     }
   }
 
-  // 3. Main on-disk recording (source.mkv / source.mp4)
+  // 2. Main on-disk recording (source.mkv / source.mp4)
   const mainAbsolute = await findBestSourceFileInDir(uploadDir);
   if (mainAbsolute && existsSync(mainAbsolute)) {
     const mainName = path.basename(mainAbsolute);
@@ -345,7 +338,7 @@ export async function ensureClipSourceForRender(
       (await ensureSourceMediaRow(streamSessionId, mainAbsolute, {
         originalFilename: mainName,
         durationSeconds: liveRecordedSeconds,
-        isLiveRecording: isActivelyRecordingLive(session),
+        isLiveRecording: activelyRecording,
       }));
 
     const duration = await resolveFileDurationSeconds(
@@ -411,7 +404,79 @@ export async function ensureClipSourceForRender(
     if (local) return local;
   }
 
-  // 4. Last resort: fetch segment from stream (slow)
+  // 4. Split live video/audio tracks — only when no usable combined file covers
+  // the range. Muxing a multi-hour capture is expensive; keep it as fallback.
+  if (activelyRecording || !mainAbsolute) {
+    const muxed = await createMuxedLiveSegment(
+      streamSessionId,
+      startTimeSeconds,
+      endTimeSeconds
+    ).catch((error) => {
+      console.warn("[render] Could not prepare split live capture:", error);
+      return null;
+    });
+    if (muxed) {
+      const muxedMedia = await ensureSourceMediaRow(streamSessionId, muxed.path, {
+        originalFilename: path.basename(muxed.path),
+        durationSeconds: muxed.duration,
+        isLiveRecording: false,
+      });
+      return {
+        sourceMediaId: muxedMedia.id,
+        renderStart: startTimeSeconds - Math.floor(startTimeSeconds),
+        renderEnd: Math.min(
+          endTimeSeconds - Math.floor(startTimeSeconds),
+          muxed.duration
+        ),
+      };
+    }
+  }
+
+  // 5. Last resort: fetch segment from stream (slow). Prefer failing clearly when
+  // a local live buffer exists but hasn't reached the clip end yet.
+  const localMainExists = Boolean(mainAbsolute && existsSync(mainAbsolute));
+  if (
+    localMainExists &&
+    liveRecordedSeconds > 0 &&
+    startTimeSeconds < liveRecordedSeconds - 0.25
+  ) {
+    if (endTimeSeconds > liveRecordedSeconds + 0.75) {
+      throw new Error(
+        "Recording has not reached the end of this clip yet. Wait for the live buffer to catch up, then save again."
+      );
+    }
+    // Trust recordedSeconds even if probe failed earlier on a growing file.
+    const existingMain =
+      allSources.find(
+        (s) =>
+          mainAbsolute &&
+          s.filePath === toRelativeStoragePath(mainAbsolute)
+      ) ??
+      (mainAbsolute
+        ? await ensureSourceMediaRow(streamSessionId, mainAbsolute, {
+            originalFilename: path.basename(mainAbsolute),
+            durationSeconds: liveRecordedSeconds,
+            isLiveRecording: activelyRecording,
+          })
+        : null);
+    if (existingMain) {
+      const local = localClipFromSource({
+        sourceMediaId: existingMain.id,
+        startTimeSeconds,
+        endTimeSeconds,
+        availableDuration: liveRecordedSeconds,
+      });
+      if (local) return local;
+    }
+  }
+
+  if (localMainExists || allSources.some((s) => fileExists(s.filePath))) {
+    console.warn(
+      "[render] Falling through to yt-dlp despite local media present",
+      { streamSessionId, startTimeSeconds, endTimeSeconds, liveRecordedSeconds }
+    );
+  }
+
   const ytDlpOk = await isYtDlpAvailable();
   if (!ytDlpOk) {
     throw new Error(

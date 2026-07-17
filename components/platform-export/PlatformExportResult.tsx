@@ -47,10 +47,12 @@ function CopyField({ label, value }: { label: string; value: string | null }) {
 
 export function PlatformExportResult({
   item,
+  clipId,
   onRegenerate,
   regenerating,
 }: {
   item: ExportResultPayload;
+  clipId?: string;
   onRegenerate: () => void;
   regenerating: boolean;
 }) {
@@ -114,6 +116,14 @@ export function PlatformExportResult({
               >
                 {copiedAll ? "Copied" : "Copy all"}
               </button>
+              {clipId && (
+                <a
+                  href={`/clips/${clipId}/publish`}
+                  className="border border-[#95ff00]/50 px-3 py-2 text-[10px] font-bold text-[#95ff00] hover:bg-[#95ff00]/10"
+                >
+                  Publish
+                </a>
+              )}
               {item.downloadUrl && (
                 <a href={item.downloadUrl} className="bg-[#95ff00] px-3 py-2 text-[10px] font-bold text-black hover:bg-[#b2ff48]">
                   Download MP4

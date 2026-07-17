@@ -98,14 +98,24 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
         player.seekTo(seconds, true);
         if (!play) {
           player.pauseVideo();
+          // Tell the editor the scrub target immediately — getCurrentTime() can
+          // lag or snap to live-edge before the seek settles.
+          onTimeUpdateRef.current?.(seconds);
         } else {
           void player.playVideo();
         }
         window.setTimeout(() => {
-          if (isYtPlayerReady(playerRef.current)) {
-            onTimeUpdateRef.current?.(playerRef.current.getCurrentTime());
+          if (!isYtPlayerReady(playerRef.current)) return;
+          const reported = playerRef.current.getCurrentTime();
+          if (!play) {
+            // Stay on the scrubbed time while paused.
+            onTimeUpdateRef.current?.(seconds);
+            return;
           }
-        }, 80);
+          onTimeUpdateRef.current?.(
+            Math.abs(reported - seconds) < 3 ? reported : seconds
+          );
+        }, 120);
       },
       []
     );

@@ -14,6 +14,7 @@ model StreamSession {
   id                     String    @id @default(cuid())
   billingAccountId       String?
   platform               String    @default("youtube") // youtube | twitch | kick
+  mode                   String    @default("timeline") // timeline | agent
   youtubeVideoId         String
   youtubeUrl             String
   title                  String?
@@ -90,9 +91,13 @@ model User {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  accounts       Account[]
-  sessions       Session[]
-  billingAccount BillingAccount?
+  accounts                    Account[]
+  sessions                    Session[]
+  billingAccount              BillingAccount?
+  connectedSocialAccounts     ConnectedSocialAccount[]
+  socialOAuthStates           SocialOAuthState[]
+  socialPublishingPreferences SocialPublishingPreference[]
+  socialPublishGroups         SocialPublishGroup[]
 }
 
 model Account {
@@ -408,9 +413,156 @@ model PlatformExport {
   clipSuggestion ClipSuggestion     @relation(fields: [clipSuggestionId], references: [id], onDelete: Cascade)
   renderJob      RenderJob?         @relation(fields: [renderJobId], references: [id], onDelete: SetNull)
   streamSession  StreamSession      @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+  socialPublishJobs SocialPublishJob[]
 
   @@unique([exportPackId, platform])
   @@index([status, createdAt])
   @@index([clipSuggestionId, createdAt])
   @@index([streamSessionId, status])
+}
+
+/// OAuth-connected destination for social publishing (separate from Auth.js login Account)
+model ConnectedSocialAccount {
+  id                   String    @id @default(cuid())
+  userId               String
+  platform             String // youtube | tiktok | instagram | facebook | x | reddit
+  platformAccountId    String
+  displayName          String?
+  username             String?
+  avatarUrl            String?
+  encryptedAccessToken String   @db.Text
+  encryptedRefreshToken String? @db.Text
+  tokenExpiresAt       DateTime?
+  grantedScopes        String?  @db.Text
+  accountMetadata      Json?
+  isActive             Boolean  @default(true)
+  isDefault            Boolean  @default(false)
+  lastValidatedAt      DateTime?
+  connectionError      String?  @db.Text
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  user                      User                        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  preferences               SocialPublishingPreference[]
+  publishJobs               SocialPublishJob[]
+
+  @@unique([userId, platform, platformAccountId])
+  @@index([userId, platform, isActive])
+}
+
+model SocialOAuthState {
+  id           String    @id @default(cuid())
+  userId       String
+  platform     String
+  stateHash    String    @unique
+  codeVerifier String?   @db.Text
+  redirectAfter String?
+  expiresAt    DateTime
+  consumedAt   DateTime?
+  createdAt    DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, platform])
+  @@index([expiresAt])
+}
+
+model SocialPublishingPreference {
+  id                       String   @id @default(cuid())
+  userId                   String
+  platform                 String? // null = global defaults
+  connectedSocialAccountId String?
+  autoPublishEnabled       Boolean  @default(false)
+  defaultDestination       String?
+  defaultPrivacy           String?
+  tone                     String   @default("natural")
+  emojiLevel               String   @default("low")
+  hashtagLevel             String   @default("minimal")
+  includeSourceUrl         Boolean  @default(true)
+  useTranscriptQuotes      Boolean  @default(true)
+  defaultHashtags          Json     @default("[]")
+  requiredTerms            Json     @default("[]")
+  blockedTerms             Json     @default("[]")
+  platformSettings         Json?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  user                   User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  connectedSocialAccount ConnectedSocialAccount? @relation(fields: [connectedSocialAccountId], references: [id], onDelete: SetNull)
+
+  @@index([userId, platform])
+  @@index([connectedSocialAccountId])
+}
+
+model SocialPublishGroup {
+  id               String    @id @default(cuid())
+  userId           String
+  clipSuggestionId String
+  status           String    @default("draft") // draft | awaiting_review | scheduled | publishing | partially_completed | completed | failed | cancelled
+  scheduledFor     DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  user User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobs SocialPublishJob[]
+
+  @@index([userId, createdAt])
+  @@index([clipSuggestionId, createdAt])
+  @@index([status, scheduledFor])
+}
+
+model SocialPublishJob {
+  id                       String    @id @default(cuid())
+  publishGroupId           String
+  connectedSocialAccountId String
+  platform                 String
+  destinationId            String?
+  status                   String    @default("draft") // draft | validating | awaiting_consent | queued | preparing_media | uploading | processing | publishing | completed | failed | cancelled | scheduled
+  attemptCount             Int       @default(0)
+  maxAttempts              Int       @default(5)
+  idempotencyKey           String    @unique
+  platformExportId         String?
+  videoPath                String?
+  generatedContent         Json?
+  editedContent            Json?
+  publishSettings          Json?
+  validationWarnings       Json      @default("[]")
+  platformUploadId         String?
+  platformMediaId          String?
+  platformPostId           String?
+  platformPostUrl          String?
+  scheduledFor             DateTime?
+  lockedAt                 DateTime?
+  lockedBy                 String?
+  startedAt                DateTime?
+  completedAt              DateTime?
+  failedAt                 DateTime?
+  errorCode                String?
+  errorMessage             String?   @db.Text
+  rawPlatformResponse      Json?
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+
+  publishGroup           SocialPublishGroup     @relation(fields: [publishGroupId], references: [id], onDelete: Cascade)
+  connectedSocialAccount ConnectedSocialAccount @relation(fields: [connectedSocialAccountId], references: [id], onDelete: Cascade)
+  platformExport         PlatformExport?        @relation(fields: [platformExportId], references: [id], onDelete: SetNull)
+  events                 SocialPublishEvent[]
+
+  @@index([status, createdAt])
+  @@index([publishGroupId, status])
+  @@index([connectedSocialAccountId])
+  @@index([scheduledFor, status])
+}
+
+model SocialPublishEvent {
+  id              String   @id @default(cuid())
+  publishJobId    String
+  type            String
+  message         String   @db.Text
+  safeMetadata    Json?
+  createdAt       DateTime @default(now())
+
+  publishJob SocialPublishJob @relation(fields: [publishJobId], references: [id], onDelete: Cascade)
+
+  @@index([publishJobId, createdAt])
 }

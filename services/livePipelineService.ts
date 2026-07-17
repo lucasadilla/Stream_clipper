@@ -1,6 +1,5 @@
 import { prisma } from "@/lib/db";
 import { syncLiveRecording } from "@/services/liveRecordingService";
-import { syncTimelineThumbnails, capturePriorityThumbs } from "@/services/timelineThumbnailService";
 import { refreshSessionLiveMetadata } from "@/services/youtubeService";
 
 function isLiveStatus(liveStatus: string | null | undefined): boolean {
@@ -25,8 +24,8 @@ function canAutoStartRecording(
 }
 
 /**
- * One live tick: sync recording, thumbnails, and metadata.
- * Called from the client every ~15s while a stream session is active.
+ * One live tick: sync recording and metadata.
+ * Filmstrip thumbs are owned by GET /timeline-thumbs (client poll).
  */
 export async function runLivePipeline(streamSessionId: string) {
   const results: Record<string, unknown> = {};
@@ -36,6 +35,8 @@ export async function runLivePipeline(streamSessionId: string) {
     include: { liveRecording: true },
   });
   if (!fresh) throw new Error("Session not found");
+
+  const skipThumbs = fresh.mode === "agent";
 
   try {
     if (isLiveStatus(fresh.liveStatus)) {
@@ -57,7 +58,6 @@ export async function runLivePipeline(streamSessionId: string) {
     results.metadataError = e instanceof Error ? e.message : String(e);
   }
 
-  // Sync growing recording file
   if (
     fresh.liveRecording?.status === "recording" ||
     fresh.liveStatus === "live" ||
@@ -88,24 +88,8 @@ export async function runLivePipeline(streamSessionId: string) {
       (await syncLiveRecording(streamSessionId));
   }
 
-  // Recording only — transcription runs on /transcribe (avoids 2min+ live-tick hangs)
-  const sourceMedia = await prisma.sourceMedia.findFirst({
-    where: { streamSessionId },
-    orderBy: { createdAt: "desc" },
-  });
-
-  if (sourceMedia && (sourceMedia.durationSeconds ?? 0) >= 3) {
-    const isLive = isLiveStatus(fresh.liveStatus);
-    await capturePriorityThumbs(streamSessionId, {
-      prioritizeTail: isLive,
-    }).catch((error) => {
-      results.thumbnailError =
-        error instanceof Error ? error.message : String(error);
-    });
-    void syncTimelineThumbnails(streamSessionId, { prioritizeTail: isLive }).catch(
-      () => {}
-    );
-    results.thumbnailsQueued = true;
+  if (skipThumbs) {
+    results.thumbnailsSkipped = "agent_mode";
   }
 
   return results;

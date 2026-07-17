@@ -351,16 +351,15 @@ export async function extractAudioSegment(
 export async function analyzeAudioVolume(
   inputPath: string
 ): Promise<Array<{ timeSeconds: number; volumeDb: number }>> {
-  // Resample into one-second frames before running astats. Printing metadata
-  // for every encoded audio frame creates enormous output for long streams and
-  // can exhaust a small Railway container's memory.
+  // Prefer an explicit audio map; optional (`?`) so video-only DASH parts
+  // (e.g. yt-dlp source.f299.mp4) return empty samples instead of throwing.
   const { stdout, stderr } = await runCommand(getFfmpegPath(), [
     "-hide_banner",
     "-nostats",
     "-i",
     inputPath,
     "-map",
-    "0:a:0",
+    "0:a:0?",
     "-vn",
     "-af",
     "aresample=8000,asetnsamples=n=8000:p=1,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
@@ -407,11 +406,12 @@ export async function extractFastTimelineFrame(
   width = 96,
   quality = 9
 ): Promise<void> {
-  const args = ["-y", "-ss", String(Math.max(0, timeSeconds))];
-  if (process.platform === "win32" || process.platform === "darwin") {
-    args.push("-hwaccel", "auto");
-  }
-  args.push(
+  // Soft decode only — hwaccel + mjpeg fails intermittently on FFmpeg 8
+  // ("Non full-range YUV" / ff_frame_thread_encoder_init).
+  const args = [
+    "-y",
+    "-ss",
+    String(Math.max(0, timeSeconds)),
     "-skip_frame",
     "nokey",
     "-i",
@@ -422,11 +422,42 @@ export async function extractFastTimelineFrame(
     "-frames:v",
     "1",
     "-vf",
-    `scale=${width}:-2:flags=fast_bilinear`,
+    `scale=${width}:-2:flags=fast_bilinear,format=yuvj420p`,
     "-q:v",
     String(quality),
-    outputPath
-  );
+    outputPath,
+  ];
+  await runCommand(getFfmpegPath(), args);
+}
+
+/**
+ * Higher-quality single still for filmstrip gap fills / first paint.
+ * Slower than the keyframe-only strip path, but one image is worth the cost.
+ */
+export async function extractSoloTimelineFrame(
+  inputPath: string,
+  outputPath: string,
+  timeSeconds: number,
+  width = 320,
+  quality = 3
+): Promise<void> {
+  const args = [
+    "-y",
+    "-ss",
+    String(Math.max(0, timeSeconds)),
+    "-i",
+    inputPath,
+    "-an",
+    "-sn",
+    "-dn",
+    "-frames:v",
+    "1",
+    "-vf",
+    `scale=${width}:-2:flags=lanczos,format=yuvj420p`,
+    "-q:v",
+    String(quality),
+    outputPath,
+  ];
   await runCommand(getFfmpegPath(), args);
 }
 
@@ -443,17 +474,13 @@ export async function extractThumbnailStrip(
   intervalSeconds: number,
   width = 96
 ): Promise<void> {
+  // Soft decode only — see extractFastTimelineFrame note on FFmpeg 8 + mjpeg.
   const args = [
     "-y",
     "-ss",
     String(Math.max(0, startSeconds)),
     "-t",
     String(Math.max(1, durationSeconds)),
-  ];
-  if (process.platform === "win32" || process.platform === "darwin") {
-    args.push("-hwaccel", "auto");
-  }
-  args.push(
     "-skip_frame",
     "nokey",
     "-i",
@@ -464,13 +491,13 @@ export async function extractThumbnailStrip(
     "-threads",
     "0",
     "-vf",
-    `fps=1/${intervalSeconds},scale=${width}:-2:flags=fast_bilinear`,
+    `fps=1/${intervalSeconds},scale=${width}:-2:flags=fast_bilinear,format=yuvj420p`,
     "-q:v",
     "9",
     "-fps_mode",
     "vfr",
-    outputPattern
-  );
+    outputPattern,
+  ];
   await runCommand(getFfmpegPath(), args);
 }
 

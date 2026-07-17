@@ -35,6 +35,10 @@ import {
 } from "@/services/whisperTranscription";
 import { ensureLocalSourceMedia } from "@/services/sourceMediaRepairService";
 import { resolveSourceRecordedSeconds, canAttemptTranscription } from "@/services/liveRecordingService";
+import {
+  clearCompanionAudioState,
+  ensureCompanionAudioTrack,
+} from "@/services/companionAudioService";
 
 const MIN_SEGMENT_SECONDS = 3;
 /** Give a failing range this many tries before permanently skipping it. */
@@ -48,6 +52,7 @@ const AUDIO_SOURCE_CACHE_MS = 5 * 60 * 1000;
 const activeSyncs = new Set<string>();
 
 export function clearSessionTranscriptionState(streamSessionId: string) {
+  clearCompanionAudioState(streamSessionId);
   audioSourceCache.delete(streamSessionId);
 }
 
@@ -181,7 +186,8 @@ async function getLastTranscribedEnd(streamSessionId: string): Promise<number> {
  */
 async function resolveSourceForTranscription(
   streamSessionId: string,
-  sourceMedia: { id: string; filePath: string }
+  sourceMedia: { id: string; filePath: string },
+  options?: { isLive?: boolean }
 ): Promise<string | null> {
   const cached = audioSourceCache.get(streamSessionId);
   if (
@@ -226,6 +232,27 @@ async function resolveSourceForTranscription(
       });
     }
   }
+
+  // Video-only DASH: fetch / start a companion bestaudio track for Whisper.
+  const session = await prisma.streamSession.findUnique({
+    where: { id: streamSessionId },
+    select: { youtubeUrl: true },
+  });
+  if (session?.youtubeUrl) {
+    const companion = await ensureCompanionAudioTrack(
+      streamSessionId,
+      session.youtubeUrl,
+      { isLive: options?.isLive }
+    );
+    if (companion) {
+      audioSourceCache.set(streamSessionId, {
+        path: companion,
+        checkedAt: Date.now(),
+      });
+      return companion;
+    }
+  }
+
   return null;
 }
 
@@ -748,16 +775,28 @@ async function runSyncTranscription(
 
   let inputPath = await resolveSourceForTranscription(
     streamSessionId,
-    sourceMedia
+    sourceMedia,
+    { isLive: options.isLive }
   );
   if (!inputPath) {
     const repairedSourceMedia = await ensureLocalSourceMedia(streamSessionId);
     inputPath = repairedSourceMedia
-      ? await resolveSourceForTranscription(streamSessionId, repairedSourceMedia)
+      ? await resolveSourceForTranscription(streamSessionId, repairedSourceMedia, {
+          isLive: options.isLive,
+        })
       : null;
   }
   if (!inputPath) {
-    return { skipped: true, reason: "no_file", recordedSeconds: 0 };
+    const uploadDir = getUploadDir(streamSessionId);
+    const candidates = await listSourceCandidateFiles(uploadDir);
+    const hasVideoOnly = candidates.length > 0;
+    return {
+      skipped: true,
+      reason: hasVideoOnly ? "no_audio" : "no_file",
+      recordedSeconds: hasVideoOnly
+        ? await resolveSourceRecordedSeconds(streamSessionId)
+        : 0,
+    };
   }
 
   const recorded = await resolveSourceRecordedSeconds(streamSessionId);

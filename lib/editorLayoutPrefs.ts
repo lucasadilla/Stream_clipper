@@ -9,9 +9,12 @@ import {
 
 /** Bump key when default sizing changes so old prefs don't stick. */
 const MONITOR_HEIGHT_KEY = "clipper.editor.monitorHeightPx.v2";
+const CHAT_WIDTH_KEY = "clipper.editor.chatWidthPx.v1";
+const CHAT_VISIBLE_KEY = "clipper.editor.chatVisible.v1";
 
 const PROGRAM_CHROME_PX = 32;
 const ASPECT = 16 / 9;
+const DEFAULT_CHAT_WIDTH = 300;
 
 function readStoredNumber(key: string, fallback: number): number {
   if (typeof window === "undefined") return fallback;
@@ -33,6 +36,26 @@ function writeStoredNumber(key: string, value: number) {
   }
 }
 
+function readStoredBoolean(key: string, fallback: boolean): boolean {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw === "1" || raw === "true") return true;
+    if (raw === "0" || raw === "false") return false;
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStoredBoolean(key: string, value: boolean) {
+  try {
+    window.localStorage.setItem(key, value ? "1" : "0");
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
 /** Default monitor height so a centered 16:9 frame fits without eating the timeline. */
 export function defaultMonitorHeight(): number {
   if (typeof window === "undefined") return 380;
@@ -48,19 +71,51 @@ export function useEditorLayoutPrefs() {
   const [monitorHeight, setMonitorHeightState] = useState(() =>
     readStoredNumber(MONITOR_HEIGHT_KEY, defaultMonitorHeight())
   );
+  const [chatWidth, setChatWidthState] = useState(() =>
+    readStoredNumber(CHAT_WIDTH_KEY, DEFAULT_CHAT_WIDTH)
+  );
+  const [chatVisible, setChatVisibleState] = useState(() =>
+    readStoredBoolean(CHAT_VISIBLE_KEY, true)
+  );
 
   useEffect(() => {
     writeStoredNumber(MONITOR_HEIGHT_KEY, monitorHeight);
   }, [monitorHeight]);
+
+  useEffect(() => {
+    writeStoredNumber(CHAT_WIDTH_KEY, chatWidth);
+  }, [chatWidth]);
+
+  useEffect(() => {
+    writeStoredBoolean(CHAT_VISIBLE_KEY, chatVisible);
+  }, [chatVisible]);
 
   const setMonitorHeight = useCallback((next: number) => {
     const max = Math.max(260, window.innerHeight - 200);
     setMonitorHeightState(Math.round(Math.min(max, Math.max(200, next))));
   }, []);
 
+  const setChatWidth = useCallback((next: number) => {
+    const max = Math.max(220, Math.round(window.innerWidth * 0.42));
+    setChatWidthState(Math.round(Math.min(max, Math.max(220, next))));
+  }, []);
+
+  const setChatVisible = useCallback((next: boolean) => {
+    setChatVisibleState(next);
+  }, []);
+
+  const toggleChatVisible = useCallback(() => {
+    setChatVisibleState((prev) => !prev);
+  }, []);
+
   return {
     monitorHeight,
     setMonitorHeight,
+    chatWidth,
+    setChatWidth,
+    chatVisible,
+    setChatVisible,
+    toggleChatVisible,
   };
 }
 

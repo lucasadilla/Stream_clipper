@@ -57,23 +57,29 @@ export function buildLiveTimelineSegments(
     }));
   }
 
-  const blockCount = Math.max(
+  const blockSeconds = LIVE_SEGMENT_SECONDS;
+  const rawCount = Math.max(
     0,
-    Math.floor(
-      sanitizeDurationSeconds(recordedSeconds) / LIVE_SEGMENT_SECONDS
-    )
+    Math.floor(sanitizeDurationSeconds(recordedSeconds) / blockSeconds)
   );
+  // Cap synthetic blocks for multi-hour live so React isn't handed 1000+ nodes.
+  const maxBlocks = 480;
+  const stride = rawCount > maxBlocks ? Math.ceil(rawCount / maxBlocks) : 1;
+  const step = blockSeconds * stride;
   const segments: LiveTimelineSegment[] = [];
 
-  for (let i = 0; i < blockCount; i++) {
-    const start = i * LIVE_SEGMENT_SECONDS;
-    const end = start + LIVE_SEGMENT_SECONDS;
+  for (let start = 0; start + blockSeconds <= recordedSeconds + 0.001; start += step) {
+    const end = Math.min(
+      sanitizeDurationSeconds(recordedSeconds),
+      start + step
+    );
+    if (end <= start) break;
     const id = `synthetic-${start}`;
     segments.push({
       id,
       startTimeSeconds: start,
       endTimeSeconds: end,
-      label: `${start}s–${end}s`,
+      label: `${Math.round(start)}s–${Math.round(end)}s`,
       isNew: newIds.has(id),
     });
   }

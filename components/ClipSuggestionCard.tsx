@@ -6,6 +6,7 @@ import { formatSeconds, formatDuration } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import { clipDownloadUrl } from "@/lib/downloadUrls";
 import { triggerFileDownload } from "@/lib/clientDownload";
+import type { CaptionAppearance } from "@/lib/captionAppearance";
 
 export interface ClipSuggestionData {
   id: string;
@@ -22,8 +23,10 @@ interface ClipSuggestionCardProps {
   clip: ClipSuggestionData;
   canRender: boolean;
   renderHint?: string;
-  onSeek: (seconds: number) => void;
+  onSeek?: (seconds: number) => void;
   onUpdate: (clip: ClipSuggestionData) => void;
+  includeCaptions?: boolean;
+  captionAppearance?: CaptionAppearance;
 }
 
 export function ClipSuggestionCard({
@@ -32,6 +35,8 @@ export function ClipSuggestionCard({
   renderHint,
   onSeek,
   onUpdate,
+  includeCaptions = false,
+  captionAppearance,
 }: ClipSuggestionCardProps) {
   const [loading, setLoading] = useState(false);
   const [rendered, setRendered] = useState(clip.status === "rendered");
@@ -52,7 +57,10 @@ export function ClipSuggestionCard({
       const res = await fetch(`/api/clips/${clip.id}/render`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ includeCaptions: false }),
+        body: JSON.stringify({
+          includeCaptions,
+          captionAppearance,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Render failed");
@@ -124,12 +132,14 @@ export function ClipSuggestionCard({
         </button>
       ) : (
         <div className="flex gap-2">
-          <button
-            onClick={() => onSeek(clip.startTimeSeconds)}
-            className="text-xs px-3 py-2 rounded-lg border border-[var(--color-card-border)] hover:border-[var(--color-accent)]"
-          >
-            Preview
-          </button>
+          {onSeek && (
+            <button
+              onClick={() => onSeek(clip.startTimeSeconds)}
+              className="text-xs px-3 py-2 rounded-lg border border-[var(--color-card-border)] hover:border-[var(--color-accent)]"
+            >
+              Preview
+            </button>
+          )}
           {canRender && clip.status !== "rejected" && (
             <button
               onClick={handleRender}

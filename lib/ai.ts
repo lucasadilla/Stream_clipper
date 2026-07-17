@@ -246,34 +246,47 @@ export async function findClipAI(
   userMessage: string,
   contextResults: RagSearchResult[],
   streamTitle?: string
-): Promise<AiResponse & { clipSuggestions: [ClipSuggestionInput] }> {
+): Promise<AiResponse> {
   const client = getAiClient();
-  const context = buildContextBlock(contextResults);
+  const transcriptCtx = getTranscriptContext(contextResults);
+  const context = buildContextBlock(
+    transcriptCtx.length > 0 ? transcriptCtx : contextResults
+  );
 
-  const systemPrompt = `You find ONE specific clip moment from a livestream based on what the user describes.
+  const systemPrompt = `You find ONE specific clip moment from a livestream using ONLY the numbered context excerpts.
 
 Stream: ${streamTitle ?? "Unknown"}
 
-Return JSON:
+Return valid JSON only (no markdown). Prefer apostrophes over double quotes inside strings.
+
+When you CAN match the user's request to an excerpt:
 {
+  "found": true,
   "answer": "1 sentence confirming what you found",
   "clipSuggestions": [{
-    "title": "Short catchy title using REAL quotes from chat/transcript (max 60 chars)",
+    "title": "Short catchy title (max 60 chars) using words from the excerpt",
     "startTimeSeconds": 840,
     "endTimeSeconds": 875,
-    "reason": "2-3 sentences. MUST quote exact chat messages or transcript from context. Say WHAT happened specifically — never say 'high activity' or 'hype moment' without quoting chat.",
-    "confidence": 0.9,
+    "reason": "2-3 sentences explaining why this matches. Quote transcript/chat text from context.",
+    "confidence": 0.85,
     "suggestedLayout": "center_crop"
   }]
 }
 
+When you CANNOT match (nothing relevant in the excerpts):
+{
+  "found": false,
+  "answer": "Brief reason — e.g. that moment is not in the available transcript yet, or no excerpt matches.",
+  "clipSuggestions": []
+}
+
 STRICT RULES:
-- Return exactly 1 clip in clipSuggestions
-- title must use actual words from chat/transcript when available (e.g. "Chat: CLIP IT NO WAY")
-- reason MUST include quoted chat lines like: Chat yelled "CLIP IT", "OMG NO WAY"
-- Clip 20-45 seconds, tight around the moment
-- Pick timestamps from context that match the user's description
-- If user describes a specific event (goal, fail, joke), find the closest matching timestamp`;
+- Timestamps MUST come from the provided excerpts (use the bracketed times)
+- Clip length 20-45 seconds, tight around the moment
+- Prefer transcript/chat_window excerpts over metadata
+- Do NOT invent dialogue that is not in the excerpts
+- Chat quotes are nice-to-have, not required — transcript-only matches are fine
+- If multiple excerpts fit, pick the strongest match to the user's wording`;
 
   const response = await client.chat.completions.create({
     model: getChatModel(),
@@ -285,18 +298,65 @@ STRICT RULES:
       },
     ],
     response_format: { type: "json_object" },
-    temperature: 0.4,
+    temperature: 0.3,
   });
 
   const content = response.choices[0]?.message?.content;
   if (!content) throw new Error("No AI response");
 
   const parsed = parseModelJson(content);
-  const result = aiResponseSchema.parse(parsed);
-  if (!result.clipSuggestions?.[0]) {
-    throw new Error("Could not find a matching moment — try describing it differently.");
+  return aiResponseSchema.parse(parsed);
+}
+
+/** Ground AI clip timestamps in retrieved excerpts; soft-fail if ungrounded. */
+export function validateFindClipResponse(
+  raw: AiResponse,
+  context: RagSearchResult[]
+): { found: false; answer: string } | { found: true; answer: string; clip: ClipSuggestionInput } {
+  if (raw.found === false || !raw.clipSuggestions?.[0]) {
+    return {
+      found: false,
+      answer:
+        raw.answer?.trim() ||
+        "I couldn't find that moment in the transcript available so far. Try different wording, or wait for more audio to be transcribed.",
+    };
   }
-  return { ...result, clipSuggestions: [result.clipSuggestions[0]] };
+
+  const clip = raw.clipSuggestions[0];
+  const transcriptCtx = getTranscriptContext(context);
+  const mid = (clip.startTimeSeconds + clip.endTimeSeconds) / 2;
+
+  const grounded =
+    transcriptCtx.length === 0 ||
+    timestampInContext(mid, transcriptCtx) ||
+    timestampInContext(clip.startTimeSeconds, transcriptCtx);
+
+  if (!grounded) {
+    return {
+      found: false,
+      answer:
+        "I couldn't confidently match that description to a timestamp in the transcript. Try more specific words from what was said.",
+    };
+  }
+
+  const duration = clip.endTimeSeconds - clip.startTimeSeconds;
+  const normalized = {
+    ...clip,
+    startTimeSeconds: Math.max(0, clip.startTimeSeconds),
+    endTimeSeconds:
+      duration < 15
+        ? clip.startTimeSeconds + 25
+        : duration > 60
+          ? clip.startTimeSeconds + 45
+          : clip.endTimeSeconds,
+    suggestedLayout: clip.suggestedLayout ?? "center_crop",
+  };
+
+  return {
+    found: true,
+    answer: raw.answer,
+    clip: normalized,
+  };
 }
 
 export async function askStreamAI(

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Instrument_Serif } from "next/font/google";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import "./globals.css";
 
 const instrumentSerif = Instrument_Serif({
@@ -79,7 +80,7 @@ export default function RootLayout({
         className="min-h-screen antialiased site-body"
         suppressHydrationWarning
       >
-        {children}
+        <TooltipProvider delayDuration={200}>{children}</TooltipProvider>
       </body>
     </html>
   );

@@ -366,8 +366,8 @@ function sourceMaxHeight(): number {
 function sourceFormatChains(): string[] {
   const height = sourceMaxHeight();
   return [
-    `best[height<=${height}][ext=mp4]/best[height<=${height}]/bestvideo[height<=${height}]+bestaudio`,
     `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]`,
+    `best[height<=${height}][ext=mp4]/best[height<=${height}]`,
     "bestvideo+bestaudio/best",
     "best",
   ];

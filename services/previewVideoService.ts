@@ -1,5 +1,5 @@
 import path from "path";
-import { existsSync } from "fs";
+import { existsSync, statSync } from "fs";
 import { rename, stat, unlink } from "fs/promises";
 import {
   getFfmpegPath,
@@ -10,6 +10,7 @@ import {
 import {
   getUploadDir,
   toRelativeStoragePath,
+  resolveStoragePath,
   fileExists,
   listSourceCandidateFiles,
 } from "@/lib/storage";
@@ -34,7 +35,8 @@ export async function previewMp4Ready(
     const s = await stat(full);
     if (s.size < MIN_PREVIEW_BYTES) return false;
     const probe = await probeMediaDurationBestEffort(full);
-    return probe >= 1;
+    // Require a real playable stretch — 1s stubs looked "ready" then played black.
+    return probe >= 3;
   } catch {
     return false;
   }
@@ -158,7 +160,14 @@ export async function syncPreviewMp4(
 
 export function buildPreviewVideoUrl(relativePath: string | null): string | null {
   if (!relativePath || !fileExists(relativePath)) return null;
-  return `/api/storage/${relativePath.replace(/\\/g, "/")}?inline=1`;
+  let version = Date.now();
+  try {
+    // mtime changes when remux rewrites preview.mp4 — bust browser cache.
+    version = Math.floor(statSync(resolveStoragePath(relativePath)).mtimeMs);
+  } catch {
+    // keep Date.now()
+  }
+  return `/api/storage/${relativePath.replace(/\\/g, "/")}?inline=1&v=${version}`;
 }
 
 export function resolvePlaybackVideoUrl(options: {

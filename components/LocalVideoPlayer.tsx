@@ -13,54 +13,92 @@ interface LocalVideoPlayerProps {
   src: string;
   onTimeUpdate?: (time: number) => void;
   onDurationChange?: (duration: number) => void;
+  onError?: () => void;
   fillContainer?: boolean;
+}
+
+/** Strip cache-bust query params so the same file identity is stable. */
+function mediaIdentity(src: string): string {
+  try {
+    const url = new URL(src, "http://local");
+    url.searchParams.delete("v");
+    return `${url.pathname}${url.search}`;
+  } catch {
+    return src.split("?")[0] || src;
+  }
 }
 
 export const LocalVideoPlayer = forwardRef<
   StreamPlayerHandle,
   LocalVideoPlayerProps
 >(function LocalVideoPlayer(
-  { src, onTimeUpdate, onDurationChange, fillContainer },
+  { src, onTimeUpdate, onDurationChange, onError, fillContainer },
   ref
 ) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const loadedIdentityRef = useRef<string | null>(null);
+  const onTimeUpdateRef = useRef(onTimeUpdate);
+  const onDurationChangeRef = useRef(onDurationChange);
+  const onErrorRef = useRef(onError);
+  onTimeUpdateRef.current = onTimeUpdate;
+  onDurationChangeRef.current = onDurationChange;
+  onErrorRef.current = onError;
 
   const seekTo = useCallback(
     (seconds: number, options?: { play?: boolean }) => {
       const video = videoRef.current;
       if (!video) return;
-      video.currentTime = Math.max(0, seconds);
+      const duration = Number.isFinite(video.duration) ? video.duration : Infinity;
+      video.currentTime = Math.max(0, Math.min(seconds, Math.max(0, duration - 0.05)));
       if (options?.play === false) {
         void video.pause();
       } else {
         void video.play().catch(() => {});
       }
-      onTimeUpdate?.(video.currentTime);
+      onTimeUpdateRef.current?.(video.currentTime);
     },
-    [onTimeUpdate]
+    []
   );
 
   useImperativeHandle(ref, () => ({
     seekTo,
-    play: () => void videoRef.current?.play(),
+    play: () => void videoRef.current?.play().catch(() => {}),
     pause: () => videoRef.current?.pause(),
     getCurrentTime: () => videoRef.current?.currentTime ?? 0,
     getDuration: () => videoRef.current?.duration ?? 0,
   }));
 
+  // Only remount/load when the underlying media path changes — not on live
+  // duration growth or cache-bust query churn.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-
+    const identity = mediaIdentity(src);
+    if (loadedIdentityRef.current === identity && video.getAttribute("src")) {
+      if (Number.isFinite(video.duration) && video.duration > 0) {
+        onDurationChangeRef.current?.(video.duration);
+      }
+      return;
+    }
     const previousTime = video.currentTime;
     const wasPaused = video.paused;
+    loadedIdentityRef.current = identity;
+    video.setAttribute("src", src);
     video.load();
-    if (previousTime > 0 && Number.isFinite(previousTime)) {
-      video.currentTime = previousTime;
-    }
-    if (!wasPaused) {
-      void video.play().catch(() => {});
-    }
+    const restore = () => {
+      if (previousTime > 0.25 && Number.isFinite(previousTime)) {
+        try {
+          video.currentTime = previousTime;
+        } catch {
+          // ignore seek before ready
+        }
+      }
+      if (!wasPaused) {
+        void video.play().catch(() => {});
+      }
+    };
+    video.addEventListener("loadeddata", restore, { once: true });
+    return () => video.removeEventListener("loadeddata", restore);
   }, [src]);
 
   useEffect(() => {
@@ -69,26 +107,41 @@ export const LocalVideoPlayer = forwardRef<
 
     const onLoaded = () => {
       if (Number.isFinite(video.duration) && video.duration > 0) {
-        onDurationChange?.(video.duration);
+        onDurationChangeRef.current?.(video.duration);
       }
     };
-    const onTime = () => onTimeUpdate?.(video.currentTime);
+    const onTime = () => onTimeUpdateRef.current?.(video.currentTime);
     const onDuration = () => {
       if (Number.isFinite(video.duration) && video.duration > 0) {
-        onDurationChange?.(video.duration);
+        onDurationChangeRef.current?.(video.duration);
+      }
+    };
+    const onMediaError = () => {
+      onErrorRef.current?.();
+    };
+    const onStalled = () => {
+      // Empty/corrupt preview often stalls with no frames — fall back after a beat.
+      if (video.readyState < 2 && video.networkState === HTMLMediaElement.NETWORK_IDLE) {
+        window.setTimeout(() => {
+          if (video.readyState < 2) onErrorRef.current?.();
+        }, 2500);
       }
     };
 
     video.addEventListener("loadedmetadata", onLoaded);
     video.addEventListener("durationchange", onDuration);
     video.addEventListener("timeupdate", onTime);
+    video.addEventListener("error", onMediaError);
+    video.addEventListener("stalled", onStalled);
 
     return () => {
       video.removeEventListener("loadedmetadata", onLoaded);
       video.removeEventListener("durationchange", onDuration);
       video.removeEventListener("timeupdate", onTime);
+      video.removeEventListener("error", onMediaError);
+      video.removeEventListener("stalled", onStalled);
     };
-  }, [src, onTimeUpdate, onDurationChange]);
+  }, [src]);
 
   return (
     <div
@@ -104,7 +157,7 @@ export const LocalVideoPlayer = forwardRef<
         className="absolute inset-0 w-full h-full object-contain bg-black"
         controls
         playsInline
-        preload="metadata"
+        preload="auto"
       />
     </div>
   );

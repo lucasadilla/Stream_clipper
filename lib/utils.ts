@@ -1,4 +1,5 @@
 import type { Prisma } from "@prisma/client";
+export { cn } from "@/lib/cn";
 
 function jsonReplacer(_key: string, value: unknown): unknown {
   if (typeof value === "bigint") return value.toString();

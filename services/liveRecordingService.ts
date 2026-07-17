@@ -33,7 +33,9 @@ function liveFormat(): string {
       : process.env.NODE_ENV === "production"
         ? 480
         : 1080;
-  return `best[height<=${height}][ext=mp4]/best[height<=${height}]/bestvideo[height<=${height}]+bestaudio/best`;
+  // Prefer an explicit video+audio merge. Putting `best[ext=mp4]` first often
+  // selects YouTube DASH video-only (e.g. f299) and leaves Whisper with no audio.
+  return `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/best`;
 }
 
 const MIN_RECORDED_SECONDS = 3;
@@ -287,6 +289,19 @@ async function startLiveRecordingAttempt(
   });
   proc.unref();
   activeRecordings.set(streamSessionId, proc);
+
+  // YouTube live DASH often writes video-only until merge; start bestaudio now
+  // so Whisper does not wait for the first failed /transcribe poll.
+  try {
+    const { startCompanionAudioForSession } = await import(
+      "@/services/companionAudioService"
+    );
+    startCompanionAudioForSession(streamSessionId, session.youtubeUrl, {
+      isLive: true,
+    });
+  } catch {
+    // non-fatal — transcription path will retry
+  }
 
   await prisma.liveRecordingState.upsert({
     where: { streamSessionId },
@@ -573,18 +588,40 @@ async function acquireSourceMediaOnce(streamSessionId: string) {
     // continue with cached metadata
   }
 
-  const session = await prisma.streamSession.findUnique({
+  let session = await prisma.streamSession.findUnique({
     where: { id: streamSessionId },
     include: { sourceMedia: { take: 1 }, liveRecording: true },
   });
   if (!session) throw new Error("Session not found");
 
-  const useLiveRecording =
+  let useLiveRecording =
     shouldUseLiveRecording(session.liveStatus) ||
     (!!session.actualStartTime &&
       session.liveStatus !== "post_live" &&
       session.liveStatus !== "completed" &&
       session.liveStatus !== "none");
+
+  if (!useLiveRecording) {
+    // Data API liveStatus can lag or be missing; yt-dlp is authoritative for
+    // "is this URL currently live?" — otherwise we hang forever on a VOD-style
+    // bestvideo+bestaudio download of an endless stream (video-only f303, no
+    // Whisper audio, and /transcribe never completes).
+    try {
+      const { probeYtDlpLiveStatus } = await import(
+        "@/services/ytDlpMetadataService"
+      );
+      const probed = await probeYtDlpLiveStatus(session.youtubeUrl);
+      if (probed === "live" || probed === "upcoming") {
+        await prisma.streamSession.update({
+          where: { id: streamSessionId },
+          data: { liveStatus: probed },
+        });
+        useLiveRecording = true;
+      }
+    } catch {
+      // fall through to VOD download
+    }
+  }
 
   if (useLiveRecording) {
     return startLiveRecording(streamSessionId);
@@ -597,6 +634,17 @@ async function acquireSourceMediaOnce(streamSessionId: string) {
   const { downloadSourceFromYouTube } = await import(
     "@/services/youtubeDownloadService"
   );
+  // Start companion audio in parallel — mid-download DASH is often video-only.
+  try {
+    const { startCompanionAudioForSession } = await import(
+      "@/services/companionAudioService"
+    );
+    startCompanionAudioForSession(streamSessionId, session.youtubeUrl, {
+      isLive: false,
+    });
+  } catch {
+    // non-fatal
+  }
   const media = await downloadSourceFromYouTube(streamSessionId);
   return {
     status: "completed" as const,
