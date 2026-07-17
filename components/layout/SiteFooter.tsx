@@ -14,6 +14,10 @@ const FOOTER_LINKS = {
     { href: "/#features", label: "Timeline editor" },
     { href: "/#features", label: "Transcript search" },
   ],
+  Legal: [
+    { href: "/terms", label: "Terms of Service" },
+    { href: "/privacy", label: "Privacy Policy" },
+  ],
 };
 
 export function SiteFooter() {
@@ -22,7 +26,7 @@ export function SiteFooter() {
   return (
     <footer className="mt-auto border-t border-[var(--color-card-border)] bg-[#020302]">
       <div className="mx-auto max-w-[1440px] px-4 py-12 sm:px-6 lg:px-8">
-        <div className="grid grid-cols-1 gap-10 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid grid-cols-1 gap-10 sm:grid-cols-2 lg:grid-cols-5">
           <div className="sm:col-span-2 lg:col-span-1">
             <SiteLogo />
             <p className="mt-4 max-w-xs text-sm leading-relaxed text-[var(--color-muted)]">
@@ -38,7 +42,7 @@ export function SiteFooter() {
               </h3>
               <ul className="space-y-2">
                 {links.map((link) => (
-                  <li key={link.label}>
+                  <li key={`${title}-${link.label}`}>
                     <Link
                       href={link.href}
                       className="text-sm text-[var(--color-foreground)]/80 transition-colors hover:text-[var(--color-accent)]"
@@ -67,7 +71,15 @@ export function SiteFooter() {
 
         <div className="mt-10 flex flex-col items-center justify-between gap-3 border-t border-[var(--color-card-border)] pt-6 text-xs text-[var(--color-muted)] sm:flex-row">
           <p>Copyright {year} Clipper. Built for creators.</p>
-          <p>Files stored locally in ./storage on your machine.</p>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <Link href="/terms" className="hover:text-[var(--color-accent)]">
+              Terms
+            </Link>
+            <Link href="/privacy" className="hover:text-[var(--color-accent)]">
+              Privacy
+            </Link>
+            <span>Files stored locally in ./storage on your machine.</span>
+          </div>
         </div>
       </div>
     </footer>
