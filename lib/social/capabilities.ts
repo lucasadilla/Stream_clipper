@@ -150,9 +150,6 @@ export function capabilityBanner(platform: SocialPlatform): string | null {
   if (platform === "facebook" && status !== "not_configured") {
     return "Facebook publishing targets Pages you manage, not personal profiles.";
   }
-  if (status === "not_configured") {
-    return `${platform} publishing is not configured yet.`;
-  }
   if (status === "temporarily_disabled") {
     return `${platform} publishing is temporarily disabled.`;
   }

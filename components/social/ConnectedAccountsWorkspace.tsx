@@ -1,9 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { SiteLogo } from "@/components/layout/SiteLogo";
+import { Check, ChevronRight, Loader2 } from "lucide-react";
+import {
+  AccountSettingsPanel,
+  AccountSettingsPanels,
+  AccountSettingsShell,
+} from "@/components/account/AccountSettingsShell";
+import { SocialPlatformIcon } from "@/components/social/SocialPlatformIcon";
 import { cn } from "@/lib/cn";
 import type { SocialCapabilityStatus, SocialPlatform } from "@/lib/social/types";
 
@@ -31,25 +36,56 @@ interface PlatformOverview {
   accounts: AccountCard[];
 }
 
-const PLATFORM_META: Record<
-  SocialPlatform,
-  { name: string; short: string; color: string }
-> = {
-  youtube: { name: "YouTube", short: "YT", color: "border-red-500/40" },
-  tiktok: { name: "TikTok", short: "TT", color: "border-[#21301f]" },
-  instagram: { name: "Instagram", short: "IG", color: "border-pink-500/40" },
-  facebook: { name: "Facebook", short: "FB", color: "border-blue-500/40" },
-  x: { name: "X", short: "X", color: "border-[#21301f]" },
-  reddit: { name: "Reddit", short: "RD", color: "border-orange-500/40" },
+const PLATFORM_NAME: Record<SocialPlatform, string> = {
+  youtube: "YouTube",
+  tiktok: "TikTok",
+  instagram: "Instagram",
+  facebook: "Facebook",
+  x: "X",
+  reddit: "Reddit",
 };
+
+const PLATFORM_HINT: Partial<Record<SocialPlatform, string>> = {
+  tiktok: "Posts may stay private until TikTok approves your app.",
+  x: "Requires X API access with media and tweet permissions.",
+  instagram: "Professional account linked to a Facebook Page required.",
+  facebook: "Publishes to Pages you manage.",
+  youtube: "Uploads may stay private until Google verifies your project.",
+};
+
+function statusLabel(item: PlatformOverview) {
+  if (item.accounts.length > 0) {
+    return item.accounts.length === 1
+      ? "Connected"
+      : `${item.accounts.length} accounts`;
+  }
+  if (item.capability === "production_ready") return "Ready to connect";
+  if (item.capability === "private_test_only") return "Private test mode";
+  if (item.capability === "development_only") return "Development mode";
+  if (item.capability === "awaiting_review") return "Awaiting review";
+  return "Not connected";
+}
+
+function PlatformSkeleton() {
+  return (
+    <div className="animate-pulse border border-[var(--color-card-border)] bg-[#020302] p-4">
+      <div className="flex items-center gap-4">
+        <div className="h-12 w-12 rounded-lg bg-white/10" />
+        <div className="flex-1 space-y-2">
+          <div className="h-4 w-28 bg-white/10" />
+          <div className="h-3 w-48 bg-white/5" />
+        </div>
+        <div className="h-10 w-24 rounded-lg bg-white/10" />
+      </div>
+    </div>
+  );
+}
 
 export function ConnectedAccountsWorkspace() {
   const searchParams = useSearchParams();
   const [platforms, setPlatforms] = useState<PlatformOverview[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(
-    searchParams.get("error")
-  );
+  const [error, setError] = useState<string | null>(searchParams.get("error"));
   const [message, setMessage] = useState<string | null>(
     searchParams.get("connected")
       ? `Connected ${searchParams.get("connected")} successfully.`
@@ -112,191 +148,179 @@ export function ConnectedAccountsWorkspace() {
     }
   }
 
+  const visiblePlatforms = platforms.filter(
+    (item) => item.canConnect || item.accounts.length > 0
+  );
+
   return (
-    <div className="marketing-shell min-h-screen bg-[var(--color-background)] text-white">
-      <header className="border-b border-[var(--color-card-border)] bg-[#020302] px-4 py-3">
-        <div className="mx-auto flex max-w-5xl items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <SiteLogo />
-            <div>
-              <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8f9b89]">
-                Settings
-              </p>
-              <h1 className="text-lg font-bold">Connected Accounts</h1>
+    <AccountSettingsShell
+      title="Connected accounts"
+      description="Link the platforms you publish to. OAuth tokens are encrypted and stored on the server — never in the browser."
+      message={message}
+      error={error}
+    >
+      <AccountSettingsPanels>
+        <AccountSettingsPanel title="Destinations">
+          {loading ? (
+            <div className="space-y-3">
+              {Array.from({ length: 2 }).map((_, i) => (
+                <PlatformSkeleton key={i} />
+              ))}
             </div>
-          </div>
-          <div className="flex gap-2">
-            <Link
-              href="/settings/publishing"
-              className="border border-[#21301f] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-[#9aa49a] hover:border-[var(--color-accent)] hover:text-white"
-            >
-              Publishing
-            </Link>
-            <Link
-              href="/profile"
-              className="border border-[#21301f] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-[#9aa49a] hover:border-[var(--color-accent)] hover:text-white"
-            >
-              Back to profile
-            </Link>
-          </div>
-        </div>
-      </header>
+          ) : visiblePlatforms.length === 0 ? (
+            <p className="text-sm text-[var(--color-muted)]">
+              No publishing destinations are available on this deployment yet.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {visiblePlatforms.map((item) => {
+                const name = PLATFORM_NAME[item.platform];
+                const hasAccounts = item.accounts.length > 0;
+                const hint = PLATFORM_HINT[item.platform];
 
-      <main className="mx-auto max-w-5xl space-y-6 px-4 py-8">
-        <p className="max-w-2xl text-sm leading-6 text-[#9aa49a]">
-          Connect social destinations once with official OAuth. Clipper stores
-          tokens encrypted and never exposes them to the browser. YouTube,
-          TikTok, X, Instagram, and Facebook are available when their app
-          credentials are set; Instagram and Facebook share one Meta app.
-        </p>
-
-        {message && (
-          <div className="border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 px-3 py-2 text-sm text-[var(--color-accent)]">
-            {message}
-          </div>
-        )}
-        {error && (
-          <div className="border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
-            {error}
-          </div>
-        )}
-
-        {loading ? (
-          <p className="text-sm text-[#7d8877]">Loading connected accounts…</p>
-        ) : (
-          <div className="grid gap-4 md:grid-cols-2">
-            {platforms.map((item) => {
-              const meta = PLATFORM_META[item.platform];
-              const hasAccounts = item.accounts.length > 0;
-              return (
-                <section
-                  key={item.platform}
-                  className={cn(
-                    "border bg-[#050705] p-4",
-                    meta.color,
-                    "border-[var(--color-card-border)]"
-                  )}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                      <span className="flex h-10 w-10 items-center justify-center border border-[#21301f] bg-[#070a07] text-xs font-bold text-[var(--color-accent)]">
-                        {meta.short}
-                      </span>
-                      <div>
-                        <h2 className="text-base font-bold">{meta.name}</h2>
-                        <p className="text-[11px] text-[#7d8877]">
-                          {hasAccounts
-                            ? `${item.accounts.length} connected`
-                            : "Not connected"}{" "}
-                          · {item.capabilityLabel}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-
-                  {item.capabilityBanner && (
-                    <p className="mt-3 border border-[#21301f] bg-[#020302] px-2 py-1.5 text-[11px] leading-4 text-[#9aa49a]">
-                      {item.capabilityBanner}
-                    </p>
-                  )}
-
-                  {hasAccounts ? (
-                    <div className="mt-4 space-y-4">
-                      {item.accounts.map((account) => (
-                        <div key={account.id} className="space-y-3 border-t border-[#21301f] pt-3 first:border-t-0 first:pt-0">
-                          <div className="flex items-center gap-3">
-                            {account.avatarUrl ? (
-                              // eslint-disable-next-line @next/next/no-img-element
-                              <img
-                                src={account.avatarUrl}
-                                alt=""
-                                className="h-9 w-9 rounded-full object-cover"
-                              />
-                            ) : (
-                              <span className="flex h-9 w-9 items-center justify-center rounded-full bg-[#142114] text-[10px] font-bold">
-                                {meta.short}
-                              </span>
-                            )}
-                            <div className="min-w-0">
-                              <p className="truncate text-sm font-semibold">
-                                {account.displayName || "Connected account"}
-                                {account.isDefault ? (
-                                  <span className="ml-2 text-[10px] uppercase text-[var(--color-accent)]">
-                                    Default
-                                  </span>
-                                ) : null}
-                              </p>
-                              <p className="truncate text-[11px] text-[#7d8877]">
-                                {account.username || account.platformAccountId}
-                              </p>
-                              <p className="text-[10px] text-[#5f6b5c]">
-                                Connected{" "}
-                                {new Date(account.connectedAt).toLocaleDateString()}{" "}
-                                · {account.health}
-                              </p>
-                            </div>
+                return (
+                  <div
+                    key={item.platform}
+                    className="border border-[var(--color-card-border)] bg-[#020302]"
+                  >
+                    <div className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
+                      <div className="flex min-w-0 items-center gap-4">
+                        <SocialPlatformIcon
+                          platform={item.platform}
+                          size="md"
+                          className="rounded-lg"
+                        />
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h2 className="text-base font-semibold text-white">
+                              {name}
+                            </h2>
+                            <span
+                              className={cn(
+                                "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium",
+                                hasAccounts
+                                  ? "bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
+                                  : "bg-white/5 text-white/50"
+                              )}
+                            >
+                              {hasAccounts ? (
+                                <Check className="h-3 w-3" aria-hidden />
+                              ) : null}
+                              {statusLabel(item)}
+                            </span>
                           </div>
-                          {account.connectionError && (
-                            <p className="text-[11px] text-red-300">
-                              {account.connectionError}
+                          {hint && item.canConnect ? (
+                            <p className="mt-1 text-sm text-white/50">
+                              {hint}
                             </p>
-                          )}
-                          <div className="flex flex-wrap gap-2">
-                            {!account.isDefault && (
+                          ) : null}
+                        </div>
+                      </div>
+
+                      {!hasAccounts && item.canConnect ? (
+                        <a
+                          href={`/api/social/accounts/${item.platform}/connect`}
+                          className="inline-flex h-10 shrink-0 items-center justify-center gap-1 rounded-lg bg-[var(--color-accent)] px-5 text-sm font-semibold text-black transition-colors hover:bg-[var(--color-accent-hover)]"
+                        >
+                          Connect
+                          <ChevronRight className="h-4 w-4" aria-hidden />
+                        </a>
+                      ) : null}
+                    </div>
+
+                    {hasAccounts ? (
+                      <div className="border-t border-[var(--color-card-border)]">
+                        {item.accounts.map((account) => (
+                          <div
+                            key={account.id}
+                            className="flex flex-col gap-4 border-b border-[var(--color-card-border)] px-4 py-4 last:border-b-0 sm:flex-row sm:items-center sm:justify-between sm:px-5"
+                          >
+                            <div className="flex min-w-0 items-center gap-3">
+                              {account.avatarUrl ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img
+                                  src={account.avatarUrl}
+                                  alt=""
+                                  className="h-10 w-10 rounded-full object-cover"
+                                />
+                              ) : (
+                                <SocialPlatformIcon
+                                  platform={item.platform}
+                                  size="sm"
+                                  className="rounded-md"
+                                />
+                              )}
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-medium text-white">
+                                  {account.displayName || "Connected account"}
+                                </p>
+                                <p className="truncate text-xs text-white/45">
+                                  {account.username ||
+                                    account.platformAccountId}
+                                </p>
+                                {account.isDefault ? (
+                                  <p className="mt-0.5 text-[11px] font-medium text-[var(--color-accent)]">
+                                    Default account
+                                  </p>
+                                ) : null}
+                                {account.connectionError ? (
+                                  <p className="mt-1 text-xs text-red-300">
+                                    {account.connectionError}
+                                  </p>
+                                ) : null}
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap gap-2 sm:justify-end">
+                              {!account.isDefault ? (
+                                <button
+                                  type="button"
+                                  disabled={busyId === account.id}
+                                  onClick={() => void setDefault(account.id)}
+                                  className="inline-flex h-9 items-center rounded-lg border border-[var(--color-card-border)] px-3 text-xs font-medium text-white/70 transition-colors hover:border-white/30 hover:text-white disabled:opacity-50"
+                                >
+                                  {busyId === account.id ? (
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  ) : (
+                                    "Set default"
+                                  )}
+                                </button>
+                              ) : null}
                               <button
                                 type="button"
                                 disabled={busyId === account.id}
-                                onClick={() => void setDefault(account.id)}
-                                className="border border-[#21301f] px-2 py-1 text-[10px] font-semibold uppercase text-[#9aa49a] hover:border-[var(--color-accent)] hover:text-white disabled:opacity-50"
+                                onClick={() => void disconnect(account.id)}
+                                className="inline-flex h-9 items-center rounded-lg border border-red-500/40 px-3 text-xs font-medium text-red-400 transition-colors hover:border-red-500 hover:bg-red-500/10 disabled:opacity-50"
                               >
-                                Set default
+                                Disconnect
                               </button>
-                            )}
-                            <button
-                              type="button"
-                              disabled={busyId === account.id}
-                              onClick={() => void disconnect(account.id)}
-                              className="border border-red-500/40 px-2 py-1 text-[10px] font-semibold uppercase text-red-200 hover:bg-red-500/10 disabled:opacity-50"
-                            >
-                              Disconnect
-                            </button>
+                            </div>
                           </div>
-                        </div>
-                      ))}
-                      {item.canConnect && (
-                        <a
-                          href={`/api/social/accounts/${item.platform}/connect`}
-                          className="inline-flex border border-[#21301f] px-2 py-1 text-[10px] font-semibold uppercase text-[#9aa49a] hover:border-[var(--color-accent)] hover:text-white"
-                        >
-                          {item.platform === "facebook" ||
-                          item.platform === "instagram"
-                            ? "Add / refresh Pages"
-                            : "Reconnect"}
-                        </a>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="mt-4">
-                      {item.canConnect ? (
-                        <a
-                          href={`/api/social/accounts/${item.platform}/connect`}
-                          className="inline-flex bg-[var(--color-accent)] px-3 py-2 text-[11px] font-bold uppercase tracking-wide text-black hover:bg-[var(--color-accent-hover)]"
-                        >
-                          Connect {meta.name}
-                        </a>
-                      ) : (
-                        <p className="text-[11px] text-[#7d8877]">
-                          Publishing for {meta.name} is not configured yet.
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </section>
-              );
-            })}
-          </div>
-        )}
-      </main>
-    </div>
+                        ))}
+
+                        {item.canConnect ? (
+                          <div className="border-t border-[var(--color-card-border)] px-4 py-3 sm:px-5">
+                            <a
+                              href={`/api/social/accounts/${item.platform}/connect`}
+                              className="inline-flex items-center gap-1 text-sm font-medium text-[var(--color-accent)] hover:underline"
+                            >
+                              {item.platform === "facebook" ||
+                              item.platform === "instagram"
+                                ? "Add or refresh Pages"
+                                : "Connect another account"}
+                              <ChevronRight className="h-4 w-4" aria-hidden />
+                            </a>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </AccountSettingsPanel>
+      </AccountSettingsPanels>
+    </AccountSettingsShell>
   );
 }

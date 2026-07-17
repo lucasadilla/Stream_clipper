@@ -10,9 +10,9 @@ import {
   type PublishingPreferencesView,
 } from "@/services/social/socialPublishingPreferenceService";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const userId = await requireAuthUserId();
+    const userId = await requireAuthUserId(request);
     const preferences = await getPublishingPreferences(userId);
     return jsonResponse({ preferences });
   } catch (error) {
@@ -25,7 +25,7 @@ export async function GET() {
 
 export async function PUT(request: NextRequest) {
   try {
-    const userId = await requireAuthUserId();
+    const userId = await requireAuthUserId(request);
     const body = (await request.json()) as Partial<PublishingPreferencesView>;
     const preferences = await upsertPublishingPreferences(userId, body);
     return jsonResponse({ preferences });

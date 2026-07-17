@@ -11,7 +11,7 @@ export default function MarketingLayout({
     <AuthSessionProvider>
       <div className="marketing-shell min-h-screen flex flex-col">
         <SiteHeader />
-        <main className="flex-1">{children}</main>
+        <main className="flex-1 pt-[var(--site-header-height)]">{children}</main>
         <SiteFooter />
       </div>
     </AuthSessionProvider>

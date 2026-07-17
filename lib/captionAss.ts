@@ -72,24 +72,54 @@ function animationOverride(
   }
 }
 
-function karaokeText(
+function karaokeLineBody(
+  words: CaptionWord[],
+  activeIndex: number | null,
+  capitalization: CaptionAppearance["capitalization"],
+  baseColor: string,
+  highlightColor: string
+): string {
+  const baseAss = hexToAssColor(baseColor);
+  const highlightAss = hexToAssColor(highlightColor);
+
+  return words
+    .map((word, index) => {
+      const piece = applyCaptionCapitalization(word.word.trim(), capitalization);
+      if (!piece) return "";
+      const color = index === activeIndex ? highlightAss : baseAss;
+      return `{\\1c${color}}${escapeAssText(piece)}`;
+    })
+    .filter(Boolean)
+    .join(" ");
+}
+
+function karaokeDialogueSegments(
   words: CaptionWord[],
   cueStart: number,
-  capitalization: CaptionAppearance["capitalization"]
-): string {
-  const parts: string[] = [];
-  for (let i = 0; i < words.length; i++) {
-    const word = words[i]!;
-    const next = words[i + 1];
-    const start = Math.max(cueStart, word.start);
-    const end = next ? Math.max(start, Math.min(word.end, next.start)) : Math.max(start, word.end);
-    const centis = Math.max(1, Math.round((end - start) * 100));
-    const piece = applyCaptionCapitalization(word.word.trim(), capitalization);
-    if (!piece) continue;
-    const spacer = i < words.length - 1 ? " " : "";
-    parts.push(`{\\k${centis}}${escapeAssText(piece)}${spacer}`);
+  cueEnd: number
+): Array<{ start: number; end: number; activeIndex: number | null }> {
+  const segments: Array<{ start: number; end: number; activeIndex: number | null }> = [];
+  let cursor = cueStart;
+
+  for (let index = 0; index < words.length; index++) {
+    const word = words[index]!;
+    const wordStart = Math.max(cueStart, word.start);
+    const wordEnd = Math.min(cueEnd, Math.max(wordStart, word.end));
+    if (wordEnd <= wordStart) continue;
+
+    if (wordStart > cursor) {
+      segments.push({ start: cursor, end: wordStart, activeIndex: null });
+    }
+
+    segments.push({ start: wordStart, end: wordEnd, activeIndex: index });
+    cursor = wordEnd;
   }
-  return parts.join("");
+
+  if (cursor < cueEnd) {
+    segments.push({ start: cursor, end: cueEnd, activeIndex: null });
+  }
+
+  return segments;
 }
 
 /** Build a full ASS script matching CaptionAppearance for libass burn-in. */
@@ -105,12 +135,8 @@ export function generateAss(options: GenerateAssOptions): string {
     ? Math.max(1, Math.round(fontSize * 0.14) + app.outlineWidth)
     : app.outlineWidth;
   const alignment = assAlignment(app.vertical, app.horizontal);
-  const primary = app.karaokeEnabled
-    ? hexToAssColor(app.highlightColor)
-    : hexToAssColor(app.color);
-  const secondary = app.karaokeEnabled
-    ? hexToAssColor(app.color)
-    : hexToAssColor(app.color);
+  const primary = hexToAssColor(app.color);
+  const secondary = hexToAssColor(app.color);
 
   const styleLine = [
     "Style: Default",
@@ -176,15 +202,31 @@ export function generateAss(options: GenerateAssOptions): string {
         ? cue.words
         : null;
 
-    let body: string;
     if (words) {
-      body = karaokeText(words, cue.startTimeSeconds, app.capitalization);
-    } else {
-      body = escapeAssText(
-        applyCaptionCapitalization(cue.text, app.capitalization)
+      const segments = karaokeDialogueSegments(
+        words,
+        cue.startTimeSeconds,
+        cue.endTimeSeconds
       );
+      const override = anim ? `{${anim}}` : "";
+      for (const segment of segments) {
+        const body = karaokeLineBody(
+          words,
+          segment.activeIndex,
+          app.capitalization,
+          app.color,
+          app.highlightColor
+        );
+        dialogueLines.push(
+          `Dialogue: 0,${formatAssTime(segment.start)},${formatAssTime(segment.end)},Default,,0,0,0,,${override}${body}`
+        );
+      }
+      continue;
     }
 
+    const body = escapeAssText(
+      applyCaptionCapitalization(cue.text, app.capitalization)
+    );
     const override = anim ? `{${anim}}` : "";
     dialogueLines.push(
       `Dialogue: 0,${start},${end},Default,,0,0,0,,${override}${body}`

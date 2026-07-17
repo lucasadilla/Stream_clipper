@@ -148,7 +148,6 @@ export function CaptionTrackLayer({
               ? activeCue.words!.map((word, index) => {
                   const active =
                     playhead >= word.start && playhead < word.end;
-                  const past = playhead >= word.end;
                   const label = applyCaptionCapitalization(
                     word.word,
                     appearance.capitalization
@@ -157,10 +156,9 @@ export function CaptionTrackLayer({
                     <span key={`${activeCue.id}-${index}`}>
                       <span
                         style={{
-                          color:
-                            active || past
-                              ? appearance.highlightColor
-                              : appearance.color,
+                          color: active
+                            ? appearance.highlightColor
+                            : appearance.color,
                           transition: "color 60ms linear",
                         }}
                       >

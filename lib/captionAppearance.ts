@@ -59,22 +59,22 @@ export const CAPTION_FONT_PRESETS = [
 
 export const DEFAULT_CAPTION_APPEARANCE: CaptionAppearance = {
   fontFamily: "Arial",
-  fontSize: 28,
+  fontSize: 56,
   color: "#FFFFFF",
   vertical: "bottom",
   horizontal: "center",
-  verticalOffsetPercent: 10,
+  verticalOffsetPercent: 13,
   backgroundColor: "#000000",
-  backgroundOpacity: 0.5,
+  backgroundOpacity: 0,
   outlineWidth: 0,
   outlineColor: "#000000",
-  shadow: 2,
-  fontWeight: "bold",
+  shadow: 6,
+  fontWeight: "normal",
   italic: false,
   capitalization: "none",
-  karaokeEnabled: false,
-  highlightColor: "#95FF00",
-  animation: "none",
+  karaokeEnabled: true,
+  highlightColor: "#FFFF00",
+  animation: "pop",
 };
 
 export function readCaptionAppearancePreference(): CaptionAppearance {

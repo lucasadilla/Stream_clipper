@@ -12,7 +12,7 @@ export async function GET(
   context: { params: Promise<{ platform: string }> }
 ) {
   try {
-    const userId = await requireAuthUserId();
+    const userId = await requireAuthUserId(request);
     const { platform } = await context.params;
     if (!isSocialPlatform(platform)) {
       return jsonResponse({ error: "Unsupported platform" }, 400);

@@ -4,9 +4,13 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import posthog from "posthog-js";
+import {
+  AccountSettingsPanel,
+  AccountSettingsPanels,
+  AccountSettingsShell,
+} from "@/components/account/AccountSettingsShell";
 import { fetchJson } from "@/lib/apiClient";
 import { getPricingPlan } from "@/lib/pricing";
-import { cn } from "@/lib/cn";
 import type {
   BillingAccountSummary,
   StripeBillingDetails,
@@ -187,11 +191,14 @@ export default function ProfilePage() {
 
   if (loading) {
     return (
-      <section className="min-h-[calc(100svh-3.5rem)] border-b border-[var(--color-card-border)] bg-[#020302]">
-        <div className="mx-auto flex max-w-[900px] items-center justify-center px-4 py-24">
+      <AccountSettingsShell
+        title="Profile"
+        description="Update your details, manage your subscription, and review usage."
+      >
+        <div className="mt-10 border border-[var(--color-card-border)] bg-[#050805] p-8">
           <p className="text-[var(--color-muted)] animate-pulse">Loading profile…</p>
         </div>
-      </section>
+      </AccountSettingsShell>
     );
   }
 
@@ -238,81 +245,44 @@ export default function ProfilePage() {
     (account.plan === "creator" || account.plan === "pro");
 
   return (
-    <section className="relative isolate min-h-[calc(100svh-3.5rem)] overflow-hidden border-b border-[var(--color-card-border)] bg-[#020302]">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(149,255,0,0.08),transparent_42%),radial-gradient(circle_at_bottom_right,rgba(149,255,0,0.05),transparent_36%)]" />
+    <AccountSettingsShell
+      title="Profile"
+      description="Update your details, manage your subscription, and review usage."
+      message={message}
+      error={error}
+    >
+      {isCreatorBeta && (
+        <div className="mt-7 border-l-2 border-[var(--color-accent)] bg-[#0a1008] px-5 py-4">
+          <p className="text-sm font-bold text-[var(--color-accent)]">
+            Creator Beta: Active
+          </p>
+          <div className="mt-3 grid gap-2 text-sm text-white/80 sm:grid-cols-2">
+            <p>Renders used this month: {exportsUsed} / 25</p>
+            <p>Uploads used this month: {uploadsUsed} / 10</p>
+          </div>
+        </div>
+      )}
 
-      <div className="relative mx-auto max-w-[900px] px-4 py-14 sm:px-6 lg:px-8 lg:py-20">
-        <p className="text-xs font-semibold uppercase text-[var(--color-accent)] sm:text-sm">
-          Clipper / account
-        </p>
-        <h1 className="marketing-display-title mt-4 font-semibold text-white">
-          Profile
-        </h1>
-        <p className="mt-4 max-w-2xl text-lg leading-8 text-white/74">
-          Update your details, manage your subscription, and connect social
-          publishing accounts.
-        </p>
-        <div className="mt-5 flex flex-wrap gap-2">
+      {usage?.nearLimit && canUpgrade && (
+        <div className="mt-6 border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 px-5 py-4">
+          <p className="text-sm font-semibold text-[var(--color-accent)]">
+            You&apos;re near your plan limits
+          </p>
+          <p className="mt-1 text-sm text-white/75">
+            Upgrade to keep processing and exporting without interruption.
+          </p>
           <Link
-            href="/settings/connected-accounts"
-            className="inline-flex border border-[var(--color-accent)]/50 bg-[var(--color-accent)]/10 px-4 py-2 text-sm font-semibold text-[var(--color-accent)] hover:bg-[var(--color-accent)]/20"
+            href="/#pricing"
+            className="mt-3 inline-flex rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-black hover:bg-[var(--color-accent-hover)]"
           >
-            Connected Accounts
-          </Link>
-          <Link
-            href="/settings/publishing"
-            className="inline-flex border border-[#21301f] px-4 py-2 text-sm font-semibold text-[#9aa49a] hover:border-[var(--color-accent)] hover:text-white"
-          >
-            Publishing settings
+            Upgrade plan
           </Link>
         </div>
+      )}
 
-        {isCreatorBeta && (
-          <div className="mt-7 border-l-2 border-[var(--color-accent)] bg-[#0a1008] px-5 py-4">
-            <p className="text-sm font-bold text-[var(--color-accent)]">
-              Creator Beta: Active
-            </p>
-            <div className="mt-3 grid gap-2 text-sm text-white/80 sm:grid-cols-2">
-              <p>Renders used this month: {exportsUsed} / 25</p>
-              <p>Uploads used this month: {uploadsUsed} / 10</p>
-            </div>
-          </div>
-        )}
-
-        {(error || message) && (
-          <p
-            className={cn(
-              "mt-6 text-sm",
-              error ? "text-[#ffb84d]" : "text-[var(--color-accent)]"
-            )}
-          >
-            {error ?? message}
-          </p>
-        )}
-
-        {usage?.nearLimit && canUpgrade && (
-          <div className="mt-6 border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 px-5 py-4">
-            <p className="text-sm font-semibold text-[var(--color-accent)]">
-              You&apos;re near your plan limits
-            </p>
-            <p className="mt-1 text-sm text-white/75">
-              Upgrade to keep processing and exporting without interruption.
-            </p>
-            <Link
-              href="/#pricing"
-              className="mt-3 inline-flex rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-black hover:bg-[var(--color-accent-hover)]"
-            >
-              Upgrade plan
-            </Link>
-          </div>
-        )}
-
-        <div className="mt-10 grid gap-px overflow-hidden border border-[var(--color-card-border)] bg-[var(--color-card-border)]">
-          <div className="bg-[#050805] p-6 sm:p-8">
-            <p className="text-xs font-semibold uppercase text-[var(--color-accent)]">
-              Profile
-            </p>
-            <form onSubmit={handleSaveProfile} className="mt-6 space-y-5">
+      <AccountSettingsPanels>
+        <AccountSettingsPanel title="Profile">
+            <form onSubmit={handleSaveProfile} className="space-y-5">
               <div>
                 <label
                   htmlFor="email"
@@ -358,13 +328,12 @@ export default function ProfilePage() {
                 {saving ? "Saving…" : "Save profile"}
               </button>
             </form>
-          </div>
+        </AccountSettingsPanel>
 
-          <div className="bg-[#050805] p-6 sm:p-8">
-            <p className="text-xs font-semibold uppercase text-[var(--color-accent)]">
-              {isCreatorBeta ? "Creator Beta access" : "Subscription"}
-            </p>
-            <div className="mt-6 grid gap-4 sm:grid-cols-2">
+        <AccountSettingsPanel
+          title={isCreatorBeta ? "Creator Beta access" : "Subscription"}
+        >
+            <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <p className="text-xs uppercase text-white/50">Plan</p>
                 <p className="mt-1 text-lg font-semibold text-white">
@@ -475,14 +444,11 @@ export default function ProfilePage() {
                 customer portal.
               </p>
             )}
-          </div>
+        </AccountSettingsPanel>
 
-          <div className="bg-[#050805] p-6 sm:p-8">
-            <p className="text-xs font-semibold uppercase text-[var(--color-accent)]">
-              Usage this month
-            </p>
+        <AccountSettingsPanel title="Usage this month">
             {isCreatorBeta ? (
-              <div className="mt-6 grid gap-4 sm:grid-cols-2">
+              <div className="grid gap-4 sm:grid-cols-2">
                 <div className="border border-[var(--color-card-border)] bg-[#020302] px-4 py-4">
                   <p className="text-xs uppercase text-white/50">Rendered clips</p>
                   <p className="mt-2 text-xl font-semibold text-white">
@@ -497,7 +463,7 @@ export default function ProfilePage() {
                 </div>
               </div>
             ) : (
-            <div className="mt-6 grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-4 sm:grid-cols-2">
               <div className="border border-[var(--color-card-border)] bg-[#020302] px-4 py-4">
                 <p className="text-xs uppercase text-white/50">Processing</p>
                 <p className="mt-2 text-xl font-semibold text-white">
@@ -520,9 +486,10 @@ export default function ProfilePage() {
               </div>
             </div>
             )}
-          </div>
+        </AccountSettingsPanel>
 
-          <div className="flex flex-wrap items-center justify-between gap-4 bg-[#050805] p-6 sm:p-8">
+        <AccountSettingsPanel>
+          <div className="flex flex-wrap items-center justify-between gap-4">
             <Link
               href="/#analyze"
               className="text-sm text-[var(--color-accent)] hover:underline"
@@ -547,8 +514,8 @@ export default function ProfilePage() {
               </button>
             </div>
           </div>
-        </div>
-      </div>
-    </section>
+        </AccountSettingsPanel>
+      </AccountSettingsPanels>
+    </AccountSettingsShell>
   );
 }

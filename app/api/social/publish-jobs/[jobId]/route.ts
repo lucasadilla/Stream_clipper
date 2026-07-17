@@ -16,7 +16,7 @@ export async function PATCH(
   context: { params: Promise<{ jobId: string }> }
 ) {
   try {
-    const userId = await requireAuthUserId();
+    const userId = await requireAuthUserId(request);
     const { jobId } = await context.params;
     const body = (await request.json()) as {
       editedContent?: SocialGeneratedContent;
@@ -40,7 +40,7 @@ export async function POST(
   context: { params: Promise<{ jobId: string }> }
 ) {
   try {
-    const userId = await requireAuthUserId();
+    const userId = await requireAuthUserId(request);
     const { jobId } = await context.params;
     const body = (await request.json()) as { action?: "regenerate" | "retry" };
     if (body.action === "regenerate") {

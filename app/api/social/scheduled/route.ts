@@ -9,9 +9,9 @@ import {
   unschedulePublishGroup,
 } from "@/services/social/socialPublishingService";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const userId = await requireAuthUserId();
+    const userId = await requireAuthUserId(request);
     const scheduled = await listScheduledPublishGroups(userId);
     return jsonResponse({ scheduled });
   } catch (error) {
@@ -24,7 +24,7 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
-    const userId = await requireAuthUserId();
+    const userId = await requireAuthUserId(request);
     const body = (await request.json()) as {
       action?: "unschedule";
       groupId?: string;

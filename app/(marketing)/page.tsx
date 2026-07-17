@@ -170,9 +170,10 @@ export default function HomePage() {
         }}
       />
       <section
+        id="clip-now"
         data-scroll-hero
-        className="relative isolate overflow-hidden border-b border-[var(--color-card-border)] bg-[#020302]"
-        style={{ minHeight: "calc(86svh - 4rem)" }}
+        className="relative isolate scroll-mt-24 overflow-hidden border-b border-[var(--color-card-border)] bg-[#020302]"
+        style={{ minHeight: "86svh" }}
       >
         <ParticleEditingHero />
         <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(90deg,#020302_0%,rgba(2,3,2,0.97)_28%,rgba(2,3,2,0.16)_64%,rgba(2,3,2,0.34)_100%)]" />
@@ -182,9 +183,9 @@ export default function HomePage() {
 
         <div
           className="relative mx-auto grid max-w-[1440px] px-4 sm:px-6 lg:grid-cols-[1.15fr_0.85fr] lg:px-8"
-          style={{ minHeight: "calc(86svh - 4rem)" }}
+          style={{ minHeight: "86svh" }}
         >
-          <div className="marketing-hero-copy z-10 flex max-w-5xl flex-col justify-center py-10 sm:py-12 lg:py-14">
+          <div className="marketing-hero-copy relative z-[1] flex max-w-5xl flex-col justify-center py-10 sm:py-12 lg:py-14">
             <p data-scroll-reveal="hero" className="mb-4 text-xs font-semibold uppercase text-[var(--color-accent)] sm:text-sm">
               Clipper / live editing system
             </p>
@@ -198,7 +199,7 @@ export default function HomePage() {
               everyone else starts looking.
             </p>
 
-            <div id="analyze" data-scroll-reveal="hero" className="mt-7 max-w-2xl scroll-mt-24">
+            <div id="analyze" data-scroll-reveal="hero" className="mt-7 max-w-2xl">
               <StreamUrlInput />
             </div>
 

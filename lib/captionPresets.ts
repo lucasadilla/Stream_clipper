@@ -22,6 +22,26 @@ export const CAPTION_PRESET_ID_STORAGE_KEY = "stream-clipper-caption-preset-id";
 
 export const BUILT_IN_CAPTION_PRESETS: CaptionPreset[] = [
   {
+    id: "karaoke-yellow",
+    name: "Karaoke yellow",
+    builtIn: true,
+    appearance: normalizeCaptionAppearance({
+      fontFamily: "Arial",
+      fontSize: 56,
+      color: "#FFFFFF",
+      vertical: "bottom",
+      horizontal: "center",
+      verticalOffsetPercent: 13,
+      backgroundOpacity: 0,
+      outlineWidth: 0,
+      shadow: 6,
+      fontWeight: "normal",
+      karaokeEnabled: true,
+      highlightColor: "#FFFF00",
+      animation: "pop",
+    }),
+  },
+  {
     id: "tiktok-bold",
     name: "TikTok bold",
     builtIn: true,

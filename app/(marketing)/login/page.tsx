@@ -10,12 +10,15 @@ import { cn } from "@/lib/cn";
 import type { BillingAccountSummary } from "@/services/billingService";
 
 type ProviderInfo = { id: string; name: string };
+type Mode = "signin" | "signup";
 
 function LoginPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [creatorCode, setCreatorCode] = useState("");
+  const [mode, setMode] = useState<Mode>("signin");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [emailSent, setEmailSent] = useState(false);
@@ -27,8 +30,6 @@ function LoginPageInner() {
 
   useEffect(() => {
     void (async () => {
-      // Prefer our app route so the button list never depends on Auth.js's
-      // /api/auth/providers shape (which next-auth/react signIn() also needs).
       try {
         const { data } = await fetchJson<{
           providers: ProviderInfo[];
@@ -40,7 +41,7 @@ function LoginPageInner() {
           return;
         }
       } catch {
-        // fall through to Auth.js getProviders()
+        // fall through
       }
 
       try {
@@ -84,12 +85,13 @@ function LoginPageInner() {
     setError(
       authError === "OAuthAccountNotLinked"
         ? "That email is already linked to another sign-in method. Use the original provider."
-        : "Sign-in failed. Try another provider or email magic link."
+        : "Sign-in failed. Try another provider or email and password."
     );
   }, [authError]);
 
   const oauthProviders = useMemo(
-    () => providers.filter((p) => p.id !== "resend"),
+    () =>
+      providers.filter((p) => p.id !== "resend" && p.id !== "credentials"),
     [providers]
   );
 
@@ -114,50 +116,102 @@ function LoginPageInner() {
     }
   }
 
-  async function handleEmail(event: React.FormEvent) {
+  async function finishAuthSession() {
+    // Prefer an explicit sync so the billing cookie is set on this response
+    // and we refuse to navigate if the Auth.js session cookie never landed.
+    const synced = await fetchJson<{
+      account?: BillingAccountSummary;
+      error?: string;
+    }>("/api/auth/session-sync", { method: "POST" });
+
+    if (!synced.ok || !synced.data.account) {
+      throw new Error(
+        synced.data.error ??
+          "Signed up, but the session cookie was not saved. On local dev set AUTH_URL=http://localhost:3000 (not the production URL), restart, and try again."
+      );
+    }
+
+    posthog.identify(synced.data.account.id, {
+      email: synced.data.account.email,
+    });
+    posthog.capture("user_signed_in", {
+      unlimited_access: synced.data.account.unlimitedAccess ?? false,
+    });
+    setAccount(synced.data.account);
+    router.push("/welcome");
+    router.refresh();
+  }
+
+  async function handlePasswordSubmit(event: React.FormEvent) {
     event.preventDefault();
     setLoading(true);
     setError(null);
     setEmailSent(false);
     try {
       await stashCreatorCode();
-      if (emailEnabled) {
-        const result = await signIn("resend", {
-          email,
-          redirect: false,
-          callbackUrl: "/welcome",
-        });
-        if (result?.error) throw new Error(result.error);
-        setEmailSent(true);
-        return;
+
+      if (mode === "signup") {
+        const { ok, data } = await fetchJson<{ error?: string }>(
+          "/api/auth/register",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, password }),
+          }
+        );
+        if (!ok) {
+          throw new Error(data.error ?? "Could not create account");
+        }
       }
 
-      const { ok, data } = await fetchJson<{
-        account?: BillingAccountSummary;
-        error?: string;
-      }>("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email,
-          inviteCode: creatorCode.trim() || undefined,
-        }),
+      const result = await signIn("credentials", {
+        email,
+        password,
+        redirect: false,
+        callbackUrl: "/welcome",
       });
-      if (!ok || !data.account) {
-        throw new Error(
-          data.error ??
-            "Email magic link is not configured. Use Google, Twitch, or Kick — or set AUTH_RESEND_KEY."
-        );
+
+      if (result?.error) {
+        const detail =
+          typeof (result as { code?: string }).code === "string" &&
+          (result as { code?: string }).code &&
+          (result as { code?: string }).code !== "credentials"
+            ? (result as { code: string }).code
+            : null;
+        throw new Error(detail || "Incorrect email or password");
       }
-      posthog.identify(data.account.id, { email: data.account.email });
-      posthog.capture("user_signed_in", {
-        unlimited_access: data.account.unlimitedAccess ?? false,
-      });
-      setAccount(data.account);
-      router.push("/welcome");
-      router.refresh();
+
+      await finishAuthSession();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleMagicLink() {
+    if (!emailEnabled) {
+      setError("Magic-link email is not configured.");
+      return;
+    }
+    if (!email.trim()) {
+      setError("Enter your email first");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setEmailSent(false);
+    try {
+      await stashCreatorCode();
+      const result = await signIn("resend", {
+        email,
+        redirect: false,
+        callbackUrl: "/welcome",
+      });
+      if (result?.error) throw new Error(result.error);
+      setEmailSent(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not send email");
     } finally {
       setLoading(false);
     }
@@ -182,15 +236,14 @@ function LoginPageInner() {
             Clipper / account
           </p>
           <h1 className="marketing-display-title mt-4 font-semibold text-white">
-            Sign in securely
+            Sign in
           </h1>
           <p className="mt-5 text-lg leading-8 text-white/74 sm:text-xl sm:leading-9">
-            Use Google, Twitch, Kick, or a magic-link email. Optionally enter a
-            Creator Program code during signup, then subscribe if you need a paid
-            plan.
+            Use Google, Twitch, Kick, or email and password — same as other
+            sites. Optionally enter a Creator Program code during signup.
           </p>
           <ul className="mt-8 space-y-3 text-sm leading-6 text-[var(--color-muted)]">
-            <li>OAuth sign-in — no shared passwords stored by Clipper</li>
+            <li>OAuth or email/password — your choice</li>
             <li>Creator codes unlock beta seats for select creators</li>
             <li>After sign-in you can subscribe to Creator, Pro, or Studio</li>
           </ul>
@@ -235,10 +288,10 @@ function LoginPageInner() {
               </div>
 
               <div className="grid gap-2">
-                {oauthProviders.length === 0 && !emailEnabled && (
+                {oauthProviders.length === 0 && (
                   <p className="text-sm text-[var(--color-danger)]">
                     No OAuth providers configured. Add AUTH_GOOGLE_*,
-                    AUTH_TWITCH_*, AUTH_KICK_*, and/or AUTH_RESEND_KEY.
+                    AUTH_TWITCH_*, and/or AUTH_KICK_*.
                   </p>
                 )}
                 {oauthProviders.map((provider) => (
@@ -258,7 +311,45 @@ function LoginPageInner() {
                 or email
               </div>
 
-              <form onSubmit={(e) => void handleEmail(e)} className="space-y-4">
+              <div className="flex gap-2 rounded border border-[var(--color-card-border)] p-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode("signin");
+                    setError(null);
+                    setEmailSent(false);
+                  }}
+                  className={cn(
+                    "h-9 flex-1 text-xs font-semibold uppercase tracking-wide",
+                    mode === "signin"
+                      ? "bg-[var(--color-accent)] text-black"
+                      : "text-[var(--color-muted)] hover:text-white"
+                  )}
+                >
+                  Sign in
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode("signup");
+                    setError(null);
+                    setEmailSent(false);
+                  }}
+                  className={cn(
+                    "h-9 flex-1 text-xs font-semibold uppercase tracking-wide",
+                    mode === "signup"
+                      ? "bg-[var(--color-accent)] text-black"
+                      : "text-[var(--color-muted)] hover:text-white"
+                  )}
+                >
+                  Create account
+                </button>
+              </div>
+
+              <form
+                onSubmit={(e) => void handlePasswordSubmit(e)}
+                className="space-y-4"
+              >
                 <label className="block space-y-2">
                   <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
                     Email
@@ -266,9 +357,33 @@ function LoginPageInner() {
                   <input
                     type="email"
                     required
+                    autoComplete="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="you@example.com"
+                    className={cn(
+                      "h-12 w-full border border-[var(--color-card-border)] bg-[#020302]/92 px-4 text-sm text-white",
+                      "placeholder:text-[var(--color-muted)] focus:border-[var(--color-accent)] focus:outline-none"
+                    )}
+                  />
+                </label>
+
+                <label className="block space-y-2">
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+                    Password
+                  </span>
+                  <input
+                    type="password"
+                    required
+                    minLength={8}
+                    autoComplete={
+                      mode === "signup" ? "new-password" : "current-password"
+                    }
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder={
+                      mode === "signup" ? "At least 8 characters" : "Your password"
+                    }
                     className={cn(
                       "h-12 w-full border border-[var(--color-card-border)] bg-[#020302]/92 px-4 text-sm text-white",
                       "placeholder:text-[var(--color-muted)] focus:border-[var(--color-accent)] focus:outline-none"
@@ -308,11 +423,22 @@ function LoginPageInner() {
                 >
                   {loading
                     ? "Working…"
-                    : emailEnabled
-                      ? "Email me a magic link"
-                      : "Sign in with email"}
+                    : mode === "signup"
+                      ? "Create account"
+                      : "Sign in"}
                 </button>
               </form>
+
+              {emailEnabled && (
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={() => void handleMagicLink()}
+                  className="w-full text-center text-xs text-[var(--color-muted)] underline-offset-2 hover:text-[var(--color-accent)] hover:underline disabled:opacity-50"
+                >
+                  Email me a magic link instead
+                </button>
+              )}
 
               <p className="text-xs leading-5 text-[var(--color-muted)]">
                 Prefer plans first?{" "}

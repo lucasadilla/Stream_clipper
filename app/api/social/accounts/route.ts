@@ -10,9 +10,9 @@ import {
   setDefaultAccount,
 } from "@/services/social/socialConnectionService";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const userId = await requireAuthUserId();
+    const userId = await requireAuthUserId(request);
     const overview = await getConnectedAccountsOverview(userId);
     return jsonResponse(overview);
   } catch (error) {
@@ -28,7 +28,7 @@ export async function GET() {
 
 export async function DELETE(request: NextRequest) {
   try {
-    const userId = await requireAuthUserId();
+    const userId = await requireAuthUserId(request);
     const { searchParams } = new URL(request.url);
     const accountId = searchParams.get("accountId");
     if (!accountId) {
@@ -49,7 +49,7 @@ export async function DELETE(request: NextRequest) {
 
 export async function PATCH(request: NextRequest) {
   try {
-    const userId = await requireAuthUserId();
+    const userId = await requireAuthUserId(request);
     const body = (await request.json()) as { accountId?: string; action?: string };
     if (!body.accountId) {
       return jsonResponse({ error: "accountId required" }, 400);

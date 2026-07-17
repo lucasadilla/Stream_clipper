@@ -13,11 +13,11 @@ import {
 } from "@/services/social/socialPublishingService";
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   context: { params: Promise<{ id: string }> }
 ) {
   try {
-    const userId = await requireAuthUserId();
+    const userId = await requireAuthUserId(request);
     const { id } = await context.params;
     const group = await getPublishGroup(id, userId);
     if (!group) return jsonResponse({ error: "Not found" }, 404);
@@ -35,7 +35,7 @@ export async function POST(
   context: { params: Promise<{ id: string }> }
 ) {
   try {
-    const userId = await requireAuthUserId();
+    const userId = await requireAuthUserId(request);
     const { id } = await context.params;
     const body = (await request.json()) as {
       action?: "validate" | "publish" | "schedule" | "cancel" | "unschedule";

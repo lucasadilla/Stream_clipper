@@ -8,19 +8,41 @@ import { getBillingAccountIdFromRequest } from "@/services/billingService";
 
 export { SessionAccessError };
 
-export async function requireAuthUserId(): Promise<string> {
+/**
+ * Resolve the signed-in Auth.js user id.
+ * Prefers the Auth.js session; falls back to the billing-account cookie
+ * (same signal the site header uses) so email/password logins that set the
+ * cookie but briefly miss a JWT still work for social settings.
+ */
+export async function requireAuthUserId(
+  request?: Request
+): Promise<string> {
   const session = await auth();
-  if (!session?.user?.id) {
-    throw new SessionAccessError("Sign in required", 401);
+  if (session?.user?.id) {
+    return session.user.id;
   }
-  return session.user.id;
+
+  if (request) {
+    const billingAccountId = getBillingAccountIdFromRequest(request);
+    if (billingAccountId) {
+      const billing = await prisma.billingAccount.findUnique({
+        where: { id: billingAccountId },
+        select: { userId: true },
+      });
+      if (billing?.userId) {
+        return billing.userId;
+      }
+    }
+  }
+
+  throw new SessionAccessError("Sign in required", 401);
 }
 
 export async function requireClipAccessForUser(
   request: Request,
   clipSuggestionId: string
 ) {
-  const userId = await requireAuthUserId();
+  const userId = await requireAuthUserId(request);
   const clip = await prisma.clipSuggestion.findUnique({
     where: { id: clipSuggestionId },
     select: {
@@ -54,7 +76,6 @@ export async function requireClipAccessForUser(
     getBillingAccountIdFromRequest(request)
   );
 
-  // Also allow if the billing account is linked to this user
   const billing = await prisma.billingAccount.findFirst({
     where: { userId },
     select: { id: true },
@@ -64,7 +85,7 @@ export async function requireClipAccessForUser(
     clip.streamSession.billingAccountId &&
     clip.streamSession.billingAccountId !== billing.id
   ) {
-    // ensureSessionBillingAccess already checked cookie/account — keep as secondary guard
+    // ensureSessionBillingAccess already checked cookie/account
   }
 
   return { userId, clip };

@@ -3,6 +3,7 @@ import { SiteLogo } from "@/components/layout/SiteLogo";
 
 const FOOTER_LINKS = {
   Product: [
+    { href: "/#clip-now", label: "Clip now" },
     { href: "/#features", label: "System" },
     { href: "/#how-it-works", label: "Workflow" },
     { href: "/#pricing", label: "Pricing" },
@@ -26,17 +27,17 @@ export function SiteFooter() {
   return (
     <footer className="mt-auto border-t border-[var(--color-card-border)] bg-[#020302]">
       <div className="mx-auto max-w-[1440px] px-4 py-12 sm:px-6 lg:px-8">
-        <div className="grid grid-cols-1 gap-10 sm:grid-cols-2 lg:grid-cols-5">
-          <div className="sm:col-span-2 lg:col-span-1">
+        <div className="flex flex-col gap-10 lg:flex-row lg:items-start lg:justify-between lg:gap-8">
+          <div className="min-w-0 lg:max-w-[220px] lg:flex-1">
             <SiteLogo />
-            <p className="mt-4 max-w-xs text-sm leading-relaxed text-[var(--color-muted)]">
+            <p className="mt-4 text-sm leading-relaxed text-[var(--color-muted)]">
               Live streams into searchable timelines, captioned cuts, and native
               or vertical exports.
             </p>
           </div>
 
           {Object.entries(FOOTER_LINKS).map(([title, links]) => (
-            <div key={title}>
+            <div key={title} className="min-w-0 lg:flex-1">
               <h3 className="mb-3 text-xs font-semibold uppercase text-[var(--color-muted)]">
                 {title}
               </h3>
@@ -55,7 +56,7 @@ export function SiteFooter() {
             </div>
           ))}
 
-          <div>
+          <div className="min-w-0 lg:flex-1">
             <h3 className="mb-3 text-xs font-semibold uppercase text-[var(--color-muted)]">
               Export
             </h3>
@@ -71,15 +72,7 @@ export function SiteFooter() {
 
         <div className="mt-10 flex flex-col items-center justify-between gap-3 border-t border-[var(--color-card-border)] pt-6 text-xs text-[var(--color-muted)] sm:flex-row">
           <p>Copyright {year} Clipper. Built for creators.</p>
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-            <Link href="/terms" className="hover:text-[var(--color-accent)]">
-              Terms
-            </Link>
-            <Link href="/privacy" className="hover:text-[var(--color-accent)]">
-              Privacy
-            </Link>
-            <span>Files stored locally in ./storage on your machine.</span>
-          </div>
+          <p>Files stored locally in ./storage on your machine.</p>
         </div>
       </div>
     </footer>
