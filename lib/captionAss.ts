@@ -6,7 +6,12 @@ import {
   normalizeCaptionAppearance,
   type CaptionAppearance,
 } from "@/lib/captionAppearance";
-import type { CaptionCue, CaptionWord } from "@/lib/captionTrack";
+import { maxCharsPerCaptionLine } from "@/lib/captionStyles";
+import {
+  resolveCaptionOverlaps,
+  type CaptionCue,
+  type CaptionWord,
+} from "@/lib/captionTrack";
 
 export interface GenerateAssOptions {
   cues: Array<
@@ -17,6 +22,8 @@ export interface GenerateAssOptions {
   appearance: CaptionAppearance;
   width: number;
   height: number;
+  /** Used to wrap karaoke lines like the editor (vertical ≈ 28 chars). */
+  format?: "native" | "vertical";
   overlays?: Array<{
     startTimeSeconds: number;
     endTimeSeconds: number;
@@ -39,22 +46,37 @@ function formatAssTime(seconds: number): string {
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = Math.floor(s % 60);
-  const cs = Math.round((s - Math.floor(s)) * 100);
-  const csClamped = cs === 100 ? 99 : cs;
-  return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}.${String(csClamped).padStart(2, "0")}`;
+  let cs = Math.round((s - Math.floor(s)) * 100);
+  if (cs === 100) {
+    return formatAssTime(Math.floor(s) + 1);
+  }
+  return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
 }
 
+function toKaraokeCs(seconds: number): number {
+  return Math.max(1, Math.round(Math.max(0, seconds) * 100));
+}
+
+/**
+ * Entrance animations tuned to match the editor CSS.
+ * Applied once per cue (not per karaoke syllable).
+ */
 function animationOverride(
   animation: CaptionAppearance["animation"],
   width: number,
   height: number,
-  appearance: CaptionAppearance
+  appearance: CaptionAppearance,
+  fontSize: number
 ): string {
   switch (animation) {
     case "fade":
-      return "\\fad(180,120)";
+      return "\\fad(220,0)";
     case "pop":
-      return "\\fscx100\\fscy100\\t(0,160,\\fscx118\\fscy118)\\t(160,280,\\fscx100\\fscy100)";
+      return (
+        "\\fscx86\\fscy86\\alpha&HFF&" +
+        "\\t(0,192,\\fscx106\\fscy106\\alpha&H00&)" +
+        "\\t(192,320,\\fscx100\\fscy100)"
+      );
     case "slideUp": {
       const marginV = Math.round((appearance.verticalOffsetPercent / 100) * height);
       const marginH = Math.round(width * 0.05);
@@ -64,105 +86,154 @@ function animationOverride(
       let y = height - marginV;
       if (appearance.vertical === "top") y = marginV;
       if (appearance.vertical === "center") y = height / 2;
-      const fromY = Math.round(y + Math.max(24, height * 0.03));
-      return `\\move(${Math.round(x)},${fromY},${Math.round(x)},${Math.round(y)},0,280)`;
+      const fromY = Math.round(y + Math.max(12, fontSize * 0.7));
+      return `\\move(${Math.round(x)},${fromY},${Math.round(x)},${Math.round(y)},0,280)\\fad(120,0)`;
     }
     default:
       return "";
   }
 }
 
-function karaokeLineBody(
-  words: CaptionWord[],
-  activeIndex: number | null,
-  capitalization: CaptionAppearance["capitalization"],
-  baseColor: string,
-  highlightColor: string
-): string {
-  const baseAss = hexToAssColor(baseColor);
-  const highlightAss = hexToAssColor(highlightColor);
+/**
+ * Map the editor's soft CSS text-shadow to ASS edges.
+ * Raw ASS Shadow=N is a hard opaque duplicate of every glyph ("text on text").
+ * A thin outline + small blurred shadow reads much closer to the preview.
+ */
+function readabilityOverrides(
+  app: CaptionAppearance,
+  fontSize: number
+): { bord: number; shad: number; blur: number; backColour: string } {
+  if (app.backgroundOpacity > 0) {
+    return {
+      bord: Math.max(1, Math.round(fontSize * 0.14) + app.outlineWidth),
+      shad: app.shadow,
+      blur: 0,
+      backColour: hexToAssColorWithAlpha(app.backgroundColor, app.backgroundOpacity),
+    };
+  }
 
-  return words
-    .map((word, index) => {
-      const piece = applyCaptionCapitalization(word.word.trim(), capitalization);
-      if (!piece) return "";
-      const color = index === activeIndex ? highlightAss : baseAss;
-      return `{\\1c${color}}${escapeAssText(piece)}`;
-    })
-    .filter(Boolean)
-    .join(" ");
+  const bord =
+    app.outlineWidth > 0
+      ? app.outlineWidth
+      : app.shadow > 0
+        ? Math.max(2, Math.round(fontSize * 0.055))
+        : 0;
+  const shad =
+    app.shadow > 0 ? Math.min(3, Math.max(1, Math.round(app.shadow / 2))) : 0;
+  const blur = app.shadow > 0 ? 0.7 : 0;
+  const backColour =
+    app.shadow > 0
+      ? hexToAssColorWithAlpha("#000000", 0.85)
+      : hexToAssColorWithAlpha(app.backgroundColor, 0);
+
+  return { bord, shad, blur, backColour };
 }
 
-function karaokeDialogueSegments(
+/**
+ * Karaoke body with \\k timings and soft line wraps matching the editor.
+ */
+function karaokeAssBody(
   words: CaptionWord[],
   cueStart: number,
-  cueEnd: number
-): Array<{ start: number; end: number; activeIndex: number | null }> {
-  const segments: Array<{ start: number; end: number; activeIndex: number | null }> = [];
+  cueEnd: number,
+  capitalization: CaptionAppearance["capitalization"],
+  maxChars: number
+): string {
+  const usable = words
+    .map((word) => {
+      const start = Math.max(cueStart, word.start);
+      const end = Math.min(cueEnd, Math.max(start, word.end));
+      return { ...word, start, end };
+    })
+    .filter((word) => word.end > word.start && word.word.trim().length > 0);
+
+  if (usable.length === 0) return "";
+
+  const parts: string[] = [];
   let cursor = cueStart;
+  let lineLen = 0;
+  let linesUsed = 1;
+  const maxLines = 2;
 
-  for (let index = 0; index < words.length; index++) {
-    const word = words[index]!;
-    const wordStart = Math.max(cueStart, word.start);
-    const wordEnd = Math.min(cueEnd, Math.max(wordStart, word.end));
-    if (wordEnd <= wordStart) continue;
-
-    if (wordStart > cursor) {
-      segments.push({ start: cursor, end: wordStart, activeIndex: null });
+  for (let index = 0; index < usable.length; index++) {
+    const word = usable[index]!;
+    if (word.start > cursor) {
+      parts.push(`{\\k${toKaraokeCs(word.start - cursor)}}`);
     }
-
-    segments.push({ start: wordStart, end: wordEnd, activeIndex: index });
-    cursor = wordEnd;
+    const piece = applyCaptionCapitalization(word.word.trim(), capitalization);
+    const addLen = lineLen > 0 ? piece.length + 1 : piece.length;
+    if (lineLen > 0 && linesUsed < maxLines && addLen + lineLen > maxChars) {
+      parts.push("\\N");
+      lineLen = 0;
+      linesUsed += 1;
+    }
+    const spacer = index < usable.length - 1 ? " " : "";
+    parts.push(
+      `{\\k${toKaraokeCs(word.end - word.start)}}${escapeAssText(piece)}${spacer}`
+    );
+    lineLen = lineLen > 0 ? lineLen + 1 + piece.length : piece.length;
+    cursor = word.end;
   }
 
-  if (cursor < cueEnd) {
-    segments.push({ start: cursor, end: cueEnd, activeIndex: null });
-  }
-
-  return segments;
+  return parts.join("");
 }
 
 /** Build a full ASS script matching CaptionAppearance for libass burn-in. */
 export function generateAss(options: GenerateAssOptions): string {
   const app = normalizeCaptionAppearance(options.appearance);
-  const { width, height, cues } = options;
+  const { width, height } = options;
+  const maxChars = maxCharsPerCaptionLine(options.format ?? "vertical");
+
+  // Editor only shows one cue; de-overlap so ASS does the same.
+  const cues = resolveCaptionOverlaps(options.cues);
 
   const fontSize = Math.max(1, Math.round((app.fontSize * height) / 1080));
   const marginV = Math.round((app.verticalOffsetPercent / 100) * height);
   const marginH = Math.round(width * 0.05);
   const useBox = app.backgroundOpacity > 0;
-  const outline = useBox
-    ? Math.max(1, Math.round(fontSize * 0.14) + app.outlineWidth)
-    : app.outlineWidth;
+  const edge = readabilityOverrides(app, fontSize);
   const alignment = assAlignment(app.vertical, app.horizontal);
-  const primary = hexToAssColor(app.color);
-  const secondary = hexToAssColor(app.color);
 
-  const styleLine = [
-    "Style: Default",
-    app.fontFamily,
-    fontSize,
-    primary,
-    secondary,
-    hexToAssColor(app.outlineColor),
-    hexToAssColorWithAlpha(app.backgroundColor, app.backgroundOpacity),
-    app.fontWeight === "bold" ? -1 : 0,
-    app.italic ? -1 : 0,
-    0, // Underline
-    0, // StrikeOut
-    100, // ScaleX
-    100, // ScaleY
-    0, // Spacing
-    0, // Angle
-    useBox ? 3 : 1,
-    outline,
-    app.shadow,
-    alignment,
-    marginH,
-    marginH,
-    marginV,
-    1, // Encoding
-  ].join(",");
+  const baseColor = hexToAssColor(app.color);
+  const highlightColor = hexToAssColor(app.highlightColor);
+  const primary = app.karaokeEnabled ? highlightColor : baseColor;
+  const secondary = baseColor;
+
+  const styleFields = (
+    name: string,
+    primaryColour: string,
+    secondaryColour: string
+  ) =>
+    [
+      `Style: ${name}`,
+      app.fontFamily,
+      fontSize,
+      primaryColour,
+      secondaryColour,
+      hexToAssColor(app.outlineColor),
+      edge.backColour,
+      app.fontWeight === "bold" ? -1 : 0,
+      app.italic ? -1 : 0,
+      0,
+      0,
+      100,
+      100,
+      0,
+      0,
+      useBox ? 3 : 1,
+      edge.bord,
+      edge.shad,
+      alignment,
+      marginH,
+      marginH,
+      marginV,
+      1,
+    ].join(",");
+
+  const styleLine = styleFields("Default", primary, secondary);
+  const plainStyleLine = app.karaokeEnabled
+    ? styleFields("Plain", baseColor, baseColor)
+    : null;
 
   const overlayStyleLine = [
     "Style: Overlay",
@@ -190,7 +261,8 @@ export function generateAss(options: GenerateAssOptions): string {
     1,
   ].join(",");
 
-  const anim = animationOverride(app.animation, width, height, app);
+  const anim = animationOverride(app.animation, width, height, app, fontSize);
+  const blurTag = edge.blur > 0 ? `\\blur${edge.blur.toFixed(2)}` : "";
   const dialogueLines: string[] = [];
 
   for (const cue of cues) {
@@ -202,34 +274,39 @@ export function generateAss(options: GenerateAssOptions): string {
         ? cue.words
         : null;
 
+    const overrideParts = [anim, blurTag].filter(Boolean).join("");
+    const override = overrideParts ? `{${overrideParts}}` : "";
+
     if (words) {
-      const segments = karaokeDialogueSegments(
+      const body = karaokeAssBody(
         words,
         cue.startTimeSeconds,
-        cue.endTimeSeconds
+        cue.endTimeSeconds,
+        app.capitalization,
+        maxChars
       );
-      const override = anim ? `{${anim}}` : "";
-      for (const segment of segments) {
-        const body = karaokeLineBody(
-          words,
-          segment.activeIndex,
-          app.capitalization,
-          app.color,
-          app.highlightColor
+      if (!body) {
+        const fallback = escapeAssText(
+          applyCaptionCapitalization(cue.text, app.capitalization)
         );
+        const style = plainStyleLine ? "Plain" : "Default";
         dialogueLines.push(
-          `Dialogue: 0,${formatAssTime(segment.start)},${formatAssTime(segment.end)},Default,,0,0,0,,${override}${body}`
+          `Dialogue: 0,${start},${end},${style},,0,0,0,,${override}${fallback}`
         );
+        continue;
       }
+      dialogueLines.push(
+        `Dialogue: 0,${start},${end},Default,,0,0,0,,${override}${body}`
+      );
       continue;
     }
 
     const body = escapeAssText(
       applyCaptionCapitalization(cue.text, app.capitalization)
     );
-    const override = anim ? `{${anim}}` : "";
+    const style = plainStyleLine ? "Plain" : "Default";
     dialogueLines.push(
-      `Dialogue: 0,${start},${end},Default,,0,0,0,,${override}${body}`
+      `Dialogue: 0,${start},${end},${style},,0,0,0,,${override}${body}`
     );
   }
 
@@ -251,10 +328,15 @@ export function generateAss(options: GenerateAssOptions): string {
   };
 
   for (const overlay of options.overlays ?? []) {
-    if (!overlay.text.trim() || overlay.endTimeSeconds <= overlay.startTimeSeconds) continue;
+    if (!overlay.text.trim() || overlay.endTimeSeconds <= overlay.startTimeSeconds) {
+      continue;
+    }
     const start = formatAssTime(overlay.startTimeSeconds);
     const end = formatAssTime(overlay.endTimeSeconds);
-    const size = overlay.kind === "lower-third" ? Math.round(height * 0.048) : Math.round(height * 0.06);
+    const size =
+      overlay.kind === "lower-third"
+        ? Math.round(height * 0.048)
+        : Math.round(height * 0.06);
     const align = alignmentForPosition(overlay.position);
     const body = escapeAssText(overlay.text.trim());
     dialogueLines.push(
@@ -273,6 +355,7 @@ export function generateAss(options: GenerateAssOptions): string {
     "[V4+ Styles]",
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
     styleLine,
+    ...(plainStyleLine ? [plainStyleLine] : []),
     overlayStyleLine,
     "",
     "[Events]",

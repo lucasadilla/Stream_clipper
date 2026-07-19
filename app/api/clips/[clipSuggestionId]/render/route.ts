@@ -15,6 +15,8 @@ import {
   normalizeEditorState,
   sequenceDuration,
 } from "@/lib/editorState";
+import { parseVerticalLayoutRequest } from "@/lib/verticalLayout";
+import { saveVerticalLayoutConfiguration } from "@/services/verticalLayoutService";
 
 interface ClientCaptionCue {
   startTimeSeconds: number;
@@ -103,6 +105,11 @@ export async function POST(
     const editorState = normalizeEditorState(
       (body as { editorState?: unknown }).editorState
     );
+    const verticalLayout = parseVerticalLayoutRequest(
+      (body as { verticalLayout?: unknown }).verticalLayout
+    );
+    const preview =
+      (body as { preview?: unknown }).preview === true && format === "vertical";
 
     const clip = await prisma.clipSuggestion.findUnique({
       where: { id: clipSuggestionId },
@@ -124,22 +131,36 @@ export async function POST(
       editorState.segments.length > 0
         ? sequenceDuration(editorState.segments)
         : clip.endTimeSeconds - clip.startTimeSeconds;
-    const usageGate = await canRenderExport(
-      billingAccountId,
-      1,
-      outputDuration
-    );
-    if (!usageGate.allowed) {
-      return errorResponse(
-        usageGate.message ?? "Plan limit reached",
-        usageGate.status ?? 402
+    // Low-res 5s previews do not count against the export quota.
+    if (!preview) {
+      const usageGate = await canRenderExport(
+        billingAccountId,
+        1,
+        outputDuration
       );
+      if (!usageGate.allowed) {
+        return errorResponse(
+          usageGate.message ?? "Plan limit reached",
+          usageGate.status ?? 402
+        );
+      }
     }
 
     const sourceMedia = await prisma.sourceMedia.findFirst({
       where: { streamSessionId: clip.streamSessionId },
       orderBy: { createdAt: "desc" },
     });
+
+    // Persist the chosen vertical layout so reopening the clip restores it.
+    if (verticalLayout && format === "vertical") {
+      await saveVerticalLayoutConfiguration({
+        streamSessionId: clip.streamSessionId,
+        clipSuggestionId: clip.id,
+        request: verticalLayout,
+      }).catch((err) => {
+        console.warn("[render] failed to save vertical layout config:", err);
+      });
+    }
 
     const renderParams = {
       streamSessionId: clip.streamSessionId,
@@ -153,13 +174,18 @@ export async function POST(
       captionAppearance,
       captionCues,
       editorState,
+      verticalLayout: verticalLayout ?? undefined,
+      preview,
     };
 
     const jobId = await createRenderJobRecord({
       streamSessionId: clip.streamSessionId,
       clipSuggestionId: clip.id,
       sourceMediaId: sourceMedia?.id,
-      layout: clip.suggestedLayout,
+      layout:
+        verticalLayout && format === "vertical"
+          ? verticalLayout.layout
+          : clip.suggestedLayout,
       includeCaptions,
       renderParams,
     });

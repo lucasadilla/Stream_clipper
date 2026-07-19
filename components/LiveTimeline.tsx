@@ -319,7 +319,7 @@ export function LiveTimeline({
     (cueId: string, patch: CaptionPatch) => {
       if (!onCaptionEdit) return;
       const cue = applyCaptionEdits(
-        buildCaptionTrack(captionChunks, "native"),
+        buildCaptionTrack(captionChunks, "vertical"),
         captionEdits
       ).find((item) => item.id === cueId);
       if (!cue) {
@@ -428,7 +428,9 @@ export function LiveTimeline({
     viewportWidth > 0 ? viewportWidth * normalizeZoom(zoom) : 0;
 
   const baseCaptionCues = useMemo(
-    () => (includeCaptions ? buildCaptionTrack(captionChunks, "native") : []),
+    // Match CaptionTrackLayer: when captions are on, the program monitor builds
+    // the vertical wrap track — export must send the same cue/word groups.
+    () => (includeCaptions ? buildCaptionTrack(captionChunks, "vertical") : []),
     [captionChunks, includeCaptions]
   );
 

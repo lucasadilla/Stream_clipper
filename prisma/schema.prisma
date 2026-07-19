@@ -45,6 +45,8 @@ model StreamSession {
   renderJobs          RenderJob[]
   platformExportPacks PlatformExportPack[]
   platformExports     PlatformExport[]
+  faceAnalysisJobs    FaceAnalysisJob[]
+  verticalLayouts     VerticalLayoutConfiguration[]
   chatTracking        ChatTrackingState?
   liveRecording       LiveRecordingState?
   billingAccount      BillingAccount?      @relation(fields: [billingAccountId], references: [id], onDelete: SetNull)
@@ -300,8 +302,68 @@ model ClipSuggestion {
   renderJobs          RenderJob[]
   platformExportPacks PlatformExportPack[]
   platformExports     PlatformExport[]
+  faceAnalysisJobs    FaceAnalysisJob[]
+  verticalLayout      VerticalLayoutConfiguration?
 
   @@index([streamSessionId, status])
+}
+
+/// Background face-detection analysis for a clip range (or whole source).
+/// Detailed tracks/candidates live in resultJson; scalar columns exist for
+/// cheap status polling and cache lookups.
+model FaceAnalysisJob {
+  id               String    @id @default(cuid())
+  streamSessionId  String
+  sourceMediaId    String?
+  clipSuggestionId String?
+  scope            String    @default("clip") // clip | source
+  status           String    @default("queued") // queued | extracting_frames | detecting_faces | tracking_faces | classifying_layout | completed | failed
+  progress         Float     @default(0)
+  startSeconds     Float     @default(0)
+  endSeconds       Float     @default(0)
+  sampleFps        Float     @default(4)
+  classification   String?
+  confidence       Float?
+  resultJson       Json?
+  errorMessage     String?   @db.Text
+  attempts         Int       @default(0)
+  maxAttempts      Int       @default(2)
+  lockedAt         DateTime?
+  lockedBy         String?
+  startedAt        DateTime?
+  completedAt      DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  streamSession  StreamSession   @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+  clipSuggestion ClipSuggestion? @relation(fields: [clipSuggestionId], references: [id], onDelete: SetNull)
+
+  @@index([streamSessionId, status])
+  @@index([streamSessionId, startSeconds, endSeconds])
+  @@index([status, lockedAt])
+  @@index([status, createdAt])
+}
+
+/// The vertical layout a user chose for a clip export (layout, face selection,
+/// manual overrides and layout-specific settings). One per clip; re-saved on
+/// each vertical render so re-opening a clip retains the last configuration.
+model VerticalLayoutConfiguration {
+  id                String   @id @default(cuid())
+  streamSessionId   String
+  clipSuggestionId  String   @unique
+  faceAnalysisJobId String?
+  layout            String   @default("auto")
+  faceSelectionMode String   @default("auto") // auto | manual
+  selectedTrackId   String?
+  manualFaceRect    Json?
+  settingsJson      Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  streamSession  StreamSession  @relation(fields: [streamSessionId], references: [id], onDelete: Cascade)
+  clipSuggestion ClipSuggestion @relation(fields: [clipSuggestionId], references: [id], onDelete: Cascade)
+
+  @@index([streamSessionId])
 }
 
 model CreatorBetaCode {

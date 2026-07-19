@@ -180,19 +180,83 @@ export function lookupCueAtTime(
 ): CaptionCue | null {
   if (track.length === 0) return null;
 
-  let lo = 0;
-  let hi = track.length - 1;
-
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    const cue = track[mid]!;
-    if (timeSeconds < cue.startTimeSeconds) {
-      hi = mid - 1;
-    } else if (timeSeconds >= cue.endTimeSeconds) {
-      lo = mid + 1;
-    } else {
-      return cue;
+  // Prefer the latest-started cue that covers this instant — matches what
+  // viewers expect when Whisper segments overlap (editor shows one line).
+  let best: CaptionCue | null = null;
+  for (const cue of track) {
+    if (timeSeconds < cue.startTimeSeconds) break;
+    if (timeSeconds < cue.endTimeSeconds) {
+      if (
+        !best ||
+        cue.startTimeSeconds > best.startTimeSeconds ||
+        (cue.startTimeSeconds === best.startTimeSeconds &&
+          cue.endTimeSeconds > best.endTimeSeconds)
+      ) {
+        best = cue;
+      }
     }
   }
-  return null;
+  return best;
+}
+
+/**
+ * Trim cues so at most one is visible at any time — the editor only ever
+ * shows a single active cue, but ASS burns every overlapping Dialogue at
+ * once (which stacks text on text).
+ *
+ * When two cues overlap, the earlier one ends at the later one's start
+ * (with a tiny gap so libass doesn't draw both on the same frame).
+ */
+export function resolveCaptionOverlaps<
+  T extends {
+    startTimeSeconds: number;
+    endTimeSeconds: number;
+    words?: CaptionWord[];
+  },
+>(cues: T[], minGapSeconds = 0.04): T[] {
+  if (cues.length <= 1) return cues;
+
+  const sorted = [...cues].sort(
+    (a, b) =>
+      a.startTimeSeconds - b.startTimeSeconds ||
+      a.endTimeSeconds - b.endTimeSeconds
+  );
+
+  const resolved: T[] = [];
+  for (const cue of sorted) {
+    const previous = resolved[resolved.length - 1];
+    if (!previous) {
+      resolved.push({ ...cue });
+      continue;
+    }
+
+    if (cue.startTimeSeconds < previous.endTimeSeconds) {
+      const trimmedEnd = Math.max(
+        previous.startTimeSeconds,
+        cue.startTimeSeconds - minGapSeconds
+      );
+      if (trimmedEnd - previous.startTimeSeconds < 0.05) {
+        // Previous cue is too short after trim — drop it in favor of the newer one.
+        resolved.pop();
+      } else {
+        previous.endTimeSeconds = trimmedEnd;
+        if (previous.words) {
+          previous.words = previous.words
+            .map((word) => ({
+              ...word,
+              end: Math.min(word.end, trimmedEnd),
+              start: Math.min(word.start, trimmedEnd),
+            }))
+            .filter((word) => word.end > word.start && word.word.trim().length > 0);
+        }
+      }
+    }
+
+    resolved.push({
+      ...cue,
+      words: cue.words ? cue.words.map((word) => ({ ...word })) : cue.words,
+    });
+  }
+
+  return resolved.filter((cue) => cue.endTimeSeconds - cue.startTimeSeconds >= 0.05);
 }

@@ -1,7 +1,13 @@
 import path from "path";
 import { existsSync } from "fs";
 import { prisma } from "@/lib/db";
-import { getFfmpegPath, hasVideoStream, probeMedia, runCommand } from "@/lib/ffmpeg";
+import {
+  getFfmpegPath,
+  hasAudioStream,
+  hasVideoStream,
+  probeMedia,
+  runCommand,
+} from "@/lib/ffmpeg";
 import { toJsonValue } from "@/lib/utils";
 import { MIN_CLIP_SECONDS } from "@/lib/clipConstants";
 import {
@@ -94,7 +100,12 @@ async function createMuxedLiveSegment(
   if (existsSync(outputPath)) {
     try {
       const probe = await probeMedia(outputPath);
-      if (probe.videoCodec && probe.durationSeconds >= MIN_CLIP_SECONDS) {
+      // Require audio — older silent caches from video-only DASH must be remuxed.
+      if (
+        probe.videoCodec &&
+        probe.audioCodec &&
+        probe.durationSeconds >= MIN_CLIP_SECONDS
+      ) {
         return { path: outputPath, duration: probe.durationSeconds };
       }
     } catch {
@@ -134,7 +145,11 @@ async function createMuxedLiveSegment(
     ]);
 
     const probe = await probeMedia(tempPath);
-    if (!probe.videoCodec || probe.durationSeconds < MIN_CLIP_SECONDS) {
+    if (
+      !probe.videoCodec ||
+      !probe.audioCodec ||
+      probe.durationSeconds < MIN_CLIP_SECONDS
+    ) {
       throw new Error("Captured video range is not readable yet");
     }
     await fs.rename(tempPath, outputPath);
@@ -142,6 +157,75 @@ async function createMuxedLiveSegment(
   } finally {
     await fs.unlink(tempPath).catch(() => {});
   }
+}
+
+async function muxedClipSourceForRange(
+  streamSessionId: string,
+  startTimeSeconds: number,
+  endTimeSeconds: number
+): Promise<{
+  sourceMediaId: string;
+  renderStart: number;
+  renderEnd: number;
+} | null> {
+  const muxed = await createMuxedLiveSegment(
+    streamSessionId,
+    startTimeSeconds,
+    endTimeSeconds
+  ).catch((error) => {
+    console.warn("[render] Could not mux companion audio for clip:", error);
+    return null;
+  });
+  if (!muxed) return null;
+
+  const muxedMedia = await ensureSourceMediaRow(streamSessionId, muxed.path, {
+    originalFilename: path.basename(muxed.path),
+    durationSeconds: muxed.duration,
+    isLiveRecording: false,
+  });
+  return {
+    sourceMediaId: muxedMedia.id,
+    renderStart: startTimeSeconds - Math.floor(startTimeSeconds),
+    renderEnd: Math.min(
+      endTimeSeconds - Math.floor(startTimeSeconds),
+      muxed.duration
+    ),
+  };
+}
+
+/**
+ * Prefer a covering local clip, but if that file is video-only (common YouTube
+ * DASH), mux companion audio into a clip-range segment first so exports aren't silent.
+ */
+async function preferAudibleClipSource(
+  streamSessionId: string,
+  absolutePath: string,
+  local: {
+    sourceMediaId: string;
+    renderStart: number;
+    renderEnd: number;
+  },
+  startTimeSeconds: number,
+  endTimeSeconds: number
+): Promise<{
+  sourceMediaId: string;
+  renderStart: number;
+  renderEnd: number;
+}> {
+  if (await hasAudioStream(absolutePath)) return local;
+
+  const muxed = await muxedClipSourceForRange(
+    streamSessionId,
+    startTimeSeconds,
+    endTimeSeconds
+  );
+  if (muxed) return muxed;
+
+  console.warn(
+    "[render] Using video-only source; no companion audio found for mux",
+    { streamSessionId, file: path.basename(absolutePath) }
+  );
+  return local;
 }
 
 /** Best known duration: local video, live buffer, transcripts, or chat timestamps. */
@@ -321,7 +405,15 @@ export async function ensureClipSourceForRender(
           endTimeSeconds,
           availableDuration: previewProbe.durationSeconds,
         });
-        if (local) return local;
+        if (local) {
+          return preferAudibleClipSource(
+            streamSessionId,
+            previewPath,
+            local,
+            startTimeSeconds,
+            endTimeSeconds
+          );
+        }
       }
     } catch {
       // Unfinalized live preview; continue to other sources.
@@ -354,7 +446,15 @@ export async function ensureClipSourceForRender(
       endTimeSeconds,
       availableDuration: duration,
     });
-    if (local) return local;
+    if (local) {
+      return preferAudibleClipSource(
+        streamSessionId,
+        mainAbsolute,
+        local,
+        startTimeSeconds,
+        endTimeSeconds
+      );
+    }
   }
 
   // 3. Other DB sources — main files before segments
@@ -401,35 +501,26 @@ export async function ensureClipSourceForRender(
       endTimeSeconds,
       availableDuration: duration,
     });
-    if (local) return local;
+    if (local) {
+      return preferAudibleClipSource(
+        streamSessionId,
+        absolutePath,
+        local,
+        startTimeSeconds,
+        endTimeSeconds
+      );
+    }
   }
 
-  // 4. Split live video/audio tracks — only when no usable combined file covers
-  // the range. Muxing a multi-hour capture is expensive; keep it as fallback.
-  if (activelyRecording || !mainAbsolute) {
-    const muxed = await createMuxedLiveSegment(
+  // 4. Split live video/audio tracks — mux companion audio into a clip-range MP4
+  // when no covering A/V file exists yet (or earlier steps only had video-only).
+  {
+    const muxed = await muxedClipSourceForRange(
       streamSessionId,
       startTimeSeconds,
       endTimeSeconds
-    ).catch((error) => {
-      console.warn("[render] Could not prepare split live capture:", error);
-      return null;
-    });
-    if (muxed) {
-      const muxedMedia = await ensureSourceMediaRow(streamSessionId, muxed.path, {
-        originalFilename: path.basename(muxed.path),
-        durationSeconds: muxed.duration,
-        isLiveRecording: false,
-      });
-      return {
-        sourceMediaId: muxedMedia.id,
-        renderStart: startTimeSeconds - Math.floor(startTimeSeconds),
-        renderEnd: Math.min(
-          endTimeSeconds - Math.floor(startTimeSeconds),
-          muxed.duration
-        ),
-      };
-    }
+    );
+    if (muxed) return muxed;
   }
 
   // 5. Last resort: fetch segment from stream (slow). Prefer failing clearly when
@@ -466,6 +557,15 @@ export async function ensureClipSourceForRender(
         endTimeSeconds,
         availableDuration: liveRecordedSeconds,
       });
+      if (local && mainAbsolute) {
+        return preferAudibleClipSource(
+          streamSessionId,
+          mainAbsolute,
+          local,
+          startTimeSeconds,
+          endTimeSeconds
+        );
+      }
       if (local) return local;
     }
   }

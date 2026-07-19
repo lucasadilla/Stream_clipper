@@ -41,6 +41,15 @@ import {
   type EditorOverlay,
   type EditorState,
 } from "@/lib/editorState";
+import {
+  captionSafeZoneForLayout,
+  parseVerticalLayoutRequest,
+  type VerticalLayoutRequest,
+} from "@/lib/verticalLayout";
+import { resolveVerticalLayout } from "@/services/verticalLayoutService";
+
+const PREVIEW_MAX_SECONDS = 5;
+const PREVIEW_HEIGHT = 640;
 
 export interface RenderShortParams {
   streamSessionId: string;
@@ -59,6 +68,10 @@ export interface RenderShortParams {
     words?: CaptionWord[];
   }>;
   editorState?: EditorState;
+  /** Facecam-aware vertical layout selection (validated client request). */
+  verticalLayout?: VerticalLayoutRequest;
+  /** Render a short low-resolution preview instead of the final export. */
+  preview?: boolean;
 }
 
 export function parseRenderJobParams(value: unknown): RenderShortParams | null {
@@ -94,6 +107,8 @@ export function parseRenderJobParams(value: unknown): RenderShortParams | null {
       ? (raw.captionCues as RenderShortParams["captionCues"])
       : undefined,
     editorState: normalizeEditorState(raw.editorState),
+    verticalLayout: parseVerticalLayoutRequest(raw.verticalLayout) ?? undefined,
+    preview: raw.preview === true,
   };
 }
 
@@ -167,14 +182,22 @@ export async function executeRenderJob(
     captionAppearance = DEFAULT_CAPTION_APPEARANCE,
     captionCues: clientCaptionCues,
     editorState: rawEditorState,
+    verticalLayout: verticalLayoutRequest,
+    preview = false,
   } = params;
 
-  const appearance = normalizeCaptionAppearance(captionAppearance);
-  const editorState = normalizeEditorState(rawEditorState);
+  let appearance = normalizeCaptionAppearance(captionAppearance);
+  // Previews always render as a single short cut, never a full sequence.
+  const editorState = preview
+    ? normalizeEditorState(undefined)
+    : normalizeEditorState(rawEditorState);
   const sequenceSegments = editorState.segments;
-  const bounds = sequenceBounds(sequenceSegments);
+  const bounds = preview ? null : sequenceBounds(normalizeEditorState(rawEditorState).segments);
   const effectiveStart = bounds?.start ?? startTimeSeconds;
-  const effectiveEnd = bounds?.end ?? endTimeSeconds;
+  let effectiveEnd = bounds?.end ?? endTimeSeconds;
+  if (preview) {
+    effectiveEnd = Math.min(effectiveEnd, effectiveStart + PREVIEW_MAX_SECONDS);
+  }
 
   const ffmpegOk = await isFfmpegAvailable();
   if (!ffmpegOk) {
@@ -212,18 +235,77 @@ export async function executeRenderJob(
   const rendersDir = getRendersDir(streamSessionId);
   await ensureDir(rendersDir);
 
-  const outputFilename = `clip-${clipId}-${format}.mp4`;
+  const outputFilename = preview
+    ? `clip-${clipId}-preview-${jobId.slice(-8)}.mp4`
+    : `clip-${clipId}-${format}.mp4`;
   const outputPath = path.join(rendersDir, outputFilename);
   const relativeOutput = toRelativeStoragePath(outputPath);
 
   const inputPath = resolveStoragePath(renderSource.filePath);
   let subtitlePath: string | undefined;
-  const outputHeight =
-    format === "vertical"
+  const outputHeight = preview
+    ? PREVIEW_HEIGHT
+    : format === "vertical"
       ? Math.max(720, Number.parseInt(process.env.RENDER_VERTICAL_HEIGHT || "1920", 10) || 1920)
       : 1080;
   const outputWidth =
-    format === "vertical" ? Math.round((outputHeight * 9) / 16) : 1920;
+    format === "vertical"
+      ? Math.round((outputHeight * 9) / 16)
+      : preview
+        ? Math.round((outputHeight * 16) / 9)
+        : 1920;
+
+  // Resolve the facecam-aware vertical layout (auto recommendation, manual
+  // rect, candidate selection). Falls back to center crop internally, so a
+  // failed or missing face analysis can never block the export.
+  let resolvedVerticalLayout:
+    | Awaited<ReturnType<typeof resolveVerticalLayout>>
+    | null = null;
+  if (format === "vertical" && verticalLayoutRequest) {
+    try {
+      resolvedVerticalLayout = await resolveVerticalLayout(verticalLayoutRequest, {
+        streamSessionId,
+        clipStartSeconds: effectiveStart,
+        clipEndSeconds: effectiveEnd,
+        outputWidth,
+        outputHeight,
+      });
+      await appendRenderJobLog(
+        jobId,
+        "vertical_layout",
+        `Layout: ${resolvedVerticalLayout.effectiveLayout}` +
+          (resolvedVerticalLayout.warnings.length
+            ? ` (${resolvedVerticalLayout.warnings.join(" ")})`
+            : "")
+      );
+      // Move captions into the layout's safe zone so they never cover the
+      // facecam panel or PiP window.
+      const safeZone = captionSafeZoneForLayout({
+        layout: resolvedVerticalLayout.effectiveLayout,
+        captionPosition: verticalLayoutRequest.captions?.position,
+        stackedFacecamPosition:
+          resolvedVerticalLayout.resolved.stacked?.facecamPosition,
+        stackedFacecamHeightRatio:
+          resolvedVerticalLayout.resolved.stacked?.facecamHeightRatio,
+        pipPosition: resolvedVerticalLayout.resolved.pip?.position,
+      });
+      appearance = {
+        ...appearance,
+        vertical: safeZone.vertical,
+        verticalOffsetPercent: safeZone.verticalOffsetPercent,
+      };
+    } catch (error) {
+      await appendRenderJobLog(
+        jobId,
+        "vertical_layout",
+        `Layout resolution failed, using center crop: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        "warn"
+      );
+      resolvedVerticalLayout = null;
+    }
+  }
 
   const textOverlays = editorState.overlays.filter(
     (
@@ -378,7 +460,7 @@ export async function executeRenderJob(
             }))
             .filter((cue) => cue.endTimeSeconds > cue.startTimeSeconds);
 
-      if (includeCaptions && shiftedCues.length === 0) {
+      if (includeCaptions && shiftedCues.length === 0 && !preview) {
         throw new Error("Captions are enabled, but no caption cues overlap this clip.");
       }
 
@@ -410,9 +492,14 @@ export async function executeRenderJob(
         appearance,
         width: outputWidth,
         height: outputHeight,
+        format,
       });
-      subtitlePath = path.join(rendersDir, `clip-${clipId}.ass`);
-      await fs.writeFile(subtitlePath, assContent, "utf8");
+      if (!includeCaptions || shiftedCues.length > 0 || overlayCues.length > 0) {
+        subtitlePath = path.join(rendersDir, `clip-${clipId}${preview ? "-preview" : ""}.ass`);
+        await fs.writeFile(subtitlePath, assContent, "utf8");
+      }
+    } else if (preview) {
+      // Previews never fail on missing captions — render without them.
     } else {
       throw new Error(
         "Captions are enabled, but transcription has not reached this clip yet. " +
@@ -490,13 +577,19 @@ export async function executeRenderJob(
       inputPath,
       outputPath,
       startTimeSeconds: renderStart,
-      endTimeSeconds: renderEnd,
+      endTimeSeconds: preview
+        ? Math.min(renderEnd, renderStart + PREVIEW_MAX_SECONDS)
+        : renderEnd,
       format,
       layout,
+      width: format === "vertical" ? outputWidth : undefined,
+      height: format === "vertical" ? outputHeight : undefined,
       srtPath: subtitlePath,
       subtitleFormat: format,
       outputHeight,
       captionAppearance: appearance,
+      verticalLayout: resolvedVerticalLayout?.resolved,
+      previewQuality: preview,
       facecamRegion: facecam
         ? {
             x: facecam.x,
@@ -527,11 +620,14 @@ export async function executeRenderJob(
       lockedAt: null,
       lockedBy: null,
       errorMessage: null,
+      ...(resolvedVerticalLayout
+        ? { layout: resolvedVerticalLayout.effectiveLayout }
+        : {}),
       logs: logs as unknown as Prisma.InputJsonValue,
     },
   });
 
-  if (clipSuggestionId) {
+  if (clipSuggestionId && !preview) {
     await prisma.clipSuggestion.update({
       where: { id: clipSuggestionId },
       data: { status: "rendered" },

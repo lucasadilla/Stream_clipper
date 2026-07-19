@@ -26,6 +26,10 @@ import {
   failSocialPublishJob,
   reclaimStaleSocialPublishJobs,
 } from "@/services/social/socialPublishingService";
+import {
+  processOneFaceAnalysisJob,
+  reclaimStaleFaceAnalysisJobs,
+} from "@/services/faceAnalysisService";
 
 const WORKER_ID = `worker-${process.pid}-${randomUUID().slice(0, 8)}`;
 
@@ -249,6 +253,7 @@ export interface WorkerTickResult {
   platformExports: number;
   socialPublishes: number;
   transcriptions: number;
+  faceAnalyses: number;
   retentionDeleted: number;
 }
 
@@ -261,17 +266,21 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
       platformExports: 0,
       socialPublishes: 0,
       transcriptions: 0,
+      faceAnalyses: 0,
       retentionDeleted: 0,
     };
   }
   tickInFlight = true;
   try {
-    const [staleRenders, stalePlatformExports, staleSocial] = await Promise.all([
-      reclaimStaleRenderJobs(),
-      reclaimStalePlatformExports(),
-      reclaimStaleSocialPublishJobs(),
-    ]);
-    const reclaimed = staleRenders + stalePlatformExports + staleSocial;
+    const [staleRenders, stalePlatformExports, staleSocial, staleFaceAnalyses] =
+      await Promise.all([
+        reclaimStaleRenderJobs(),
+        reclaimStalePlatformExports(),
+        reclaimStaleSocialPublishJobs(),
+        reclaimStaleFaceAnalysisJobs(),
+      ]);
+    const reclaimed =
+      staleRenders + stalePlatformExports + staleSocial + staleFaceAnalyses;
     let renders = 0;
     // Process up to a few renders per tick so the loop stays responsive.
     for (let i = 0; i < 2; i++) {
@@ -287,6 +296,14 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
     let socialPublishes = 0;
     const didSocial = await processOneSocialPublish();
     if (didSocial) socialPublishes = 1;
+
+    let faceAnalyses = 0;
+    try {
+      const didFace = await processOneFaceAnalysisJob();
+      if (didFace) faceAnalyses = 1;
+    } catch (err) {
+      console.error("[worker] face analysis failed:", err);
+    }
 
     let transcriptions = 0;
     const didTx = await processOneTranscription();
@@ -309,6 +326,7 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
       platformExports,
       socialPublishes,
       transcriptions,
+      faceAnalyses,
       retentionDeleted,
     };
   } finally {

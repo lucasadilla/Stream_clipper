@@ -1,0 +1,14 @@
+# Clipper facecam analysis worker
+#
+# Install into a virtualenv and point FACECAM_PYTHON at its python binary:
+#   python -m venv .venv
+#   .venv/Scripts/pip install -r requirements.txt   (Windows)
+#   .venv/bin/pip install -r requirements.txt       (Linux/macOS)
+#
+# Primary detector is OpenCV YuNet (small ONNX model downloaded on first run),
+# which finds small embedded gaming facecams that MediaPipe's short-range
+# BlazeFace misses. mediapipe is an optional secondary fallback; the worker
+# degrades to an OpenCV Haar cascade if both are unavailable.
+opencv-python-headless>=4.9
+numpy>=1.26,<3
+mediapipe>=0.10.14,<0.11

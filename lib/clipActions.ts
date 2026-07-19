@@ -133,7 +133,8 @@ export async function renderClip(
   captionCues?: CaptionCue[],
   onProgress?: (update: RenderProgressUpdate) => void,
   editorState?: EditorState,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  verticalLayout?: unknown
 ) {
   if (signal?.aborted) throw new RenderAbortedError();
   onProgress?.({ progress: 5, status: "queued" });
@@ -149,6 +150,7 @@ export async function renderClip(
         captionAppearance,
         captionCues,
         editorState,
+        verticalLayout: format === "vertical" ? verticalLayout : undefined,
       }),
       signal,
     });

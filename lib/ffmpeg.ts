@@ -4,6 +4,10 @@ import path from "path";
 import type { RenderFormat } from "@/lib/renderFormat";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
 import { getFfmpegCaptionForceStyle } from "@/lib/captionAppearance";
+import {
+  buildVerticalLayoutFilter,
+  type ResolvedVerticalLayout,
+} from "@/lib/verticalLayoutFilters";
 
 function isWindowsAbsolutePath(value: string): boolean {
   return /^[a-zA-Z]:[\\/]/.test(value) || value.includes("\\");
@@ -541,6 +545,10 @@ export interface RenderShortOptions {
   outputHeight?: number;
   captionAppearance?: CaptionAppearance;
   facecamRegion?: { x: number; y: number; width: number; height: number };
+  /** Facecam-aware vertical layout (stacked / PiP / subject crop / center crop). */
+  verticalLayout?: ResolvedVerticalLayout;
+  /** Faster encode preset for low-res preview renders. */
+  previewQuality?: boolean;
 }
 
 function subtitleFilter(
@@ -624,21 +632,116 @@ export async function fastCutSegment(
   ]);
 }
 
+/**
+ * Frame-accurate trim used when captions are burned in.
+ * Stream-copy cuts snap to the previous keyframe, which desyncs ASS timing
+ * from the speech the editor preview is locked to. Re-encoding with `-ss`
+ * after `-i` decodes up to the exact timestamp so t=0 matches the ASS clock.
+ */
+export async function accurateCutSegment(
+  inputPath: string,
+  outputPath: string,
+  startSeconds: number,
+  durationSeconds: number
+): Promise<void> {
+  const lowMemory = isFfmpegLowMemoryMode();
+  await runCommand(getFfmpegPath(), [
+    "-y",
+    "-nostdin",
+    "-loglevel",
+    "error",
+    "-i",
+    inputPath,
+    "-ss",
+    String(Math.max(0, startSeconds)),
+    "-t",
+    String(Math.max(0.1, durationSeconds)),
+    "-map",
+    "0:v:0?",
+    "-map",
+    "0:a:0?",
+    "-c:v",
+    "libx264",
+    "-preset",
+    renderPreset(),
+    "-crf",
+    lowMemory ? "26" : "18",
+    "-threads",
+    String(getFfmpegThreadCount()),
+    ...x264MemoryArgs(),
+    "-c:a",
+    "aac",
+    "-b:a",
+    "192k",
+    "-avoid_negative_ts",
+    "make_zero",
+    "-movflags",
+    "+faststart",
+    outputPath,
+  ]);
+}
+
 async function encodeWithFilters(options: {
   inputPath: string;
   outputPath: string;
   vf: string;
   outputHeight: number;
   withAudio: boolean;
+  previewQuality?: boolean;
+  /** Higher quality for caption burn-in / final exports. */
+  highQuality?: boolean;
+  startSeconds?: number;
+  durationSeconds?: number;
+  accurateSeek?: boolean;
 }): Promise<void> {
   const lowMemory = isFfmpegLowMemoryMode();
+  const highQuality = Boolean(options.highQuality) && !options.previewQuality;
+  const preset = options.previewQuality
+    ? "ultrafast"
+    : highQuality
+      ? process.env.FFMPEG_CAPTION_PRESET?.trim() || "medium"
+      : renderPreset();
+  const crf = options.previewQuality
+    ? "30"
+    : highQuality
+      ? lowMemory
+        ? "20"
+        : "17"
+      : lowMemory
+        ? "26"
+        : "24";
+
   const args = [
     "-y",
     "-nostdin",
     "-loglevel",
     "error",
-    "-i",
-    options.inputPath,
+  ];
+
+  // Fast coarse seek before input when we don't need frame accuracy.
+  if (
+    options.startSeconds != null &&
+    options.startSeconds > 0 &&
+    !options.accurateSeek
+  ) {
+    args.push("-ss", String(options.startSeconds));
+  }
+
+  args.push("-i", options.inputPath);
+
+  // Frame-accurate seek after input (decodes up to the exact timestamp).
+  if (
+    options.startSeconds != null &&
+    options.startSeconds > 0 &&
+    options.accurateSeek
+  ) {
+    args.push("-ss", String(options.startSeconds));
+  }
+  if (options.durationSeconds != null && options.durationSeconds > 0) {
+    args.push("-t", String(options.durationSeconds));
+  }
+
+  args.push(
     "-map",
     "0:v:0?",
     "-map",
@@ -650,20 +753,22 @@ async function encodeWithFilters(options: {
     "-c:v",
     "libx264",
     "-preset",
-    renderPreset(),
+    preset,
     "-crf",
-    lowMemory ? "26" : "24",
+    crf,
+    "-pix_fmt",
+    "yuv420p",
     "-threads",
     String(getFfmpegThreadCount()),
-    ...x264MemoryArgs(),
-  ];
+    ...x264MemoryArgs()
+  );
 
   if (lowMemory) {
     args.push("-filter_threads", "1", "-max_muxing_queue_size", "1024");
   }
 
   if (options.withAudio) {
-    args.push("-c:a", "aac", "-b:a", "128k");
+    args.push("-c:a", "aac", "-b:a", highQuality ? "192k" : "128k");
   } else {
     args.push("-an");
   }
@@ -716,6 +821,8 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
     subtitleFormat = format,
     outputHeight: outputHeightOption,
     captionAppearance,
+    verticalLayout,
+    previewQuality,
   } = options;
 
   const verticalHeight = getRenderVerticalHeight();
@@ -740,13 +847,21 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
   const tempFiles = [tempCut];
 
   try {
-    await fastCutSegment(inputPath, tempCut, startTimeSeconds, duration);
+    // Caption burn-in needs a frame-accurate cut so ASS times (authored as if
+    // t=0 is exactly startTimeSeconds) stay locked to the speech. Without
+    // captions, stream-copy is fine and much faster.
+    if (srtPath) {
+      await accurateCutSegment(inputPath, tempCut, startTimeSeconds, duration);
+    } else {
+      await fastCutSegment(inputPath, tempCut, startTimeSeconds, duration);
+    }
 
     const memcapPath = `${outputPath}.memcap.mp4`;
     const encodeInput = await maybeDownscaleSourceForMemory(tempCut, memcapPath);
     if (encodeInput !== tempCut) tempFiles.push(encodeInput);
 
     const captionsSupported = srtPath ? await hasSubtitleFilter() : false;
+    const highQuality = Boolean(srtPath) && !previewQuality;
 
     if (format === "native" && srtPath) {
       if (!captionsSupported) {
@@ -758,17 +873,31 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
         vf: subtitleFilter(srtPath, subtitleFormat, outputHeight, captionAppearance),
         outputHeight,
         withAudio: true,
+        previewQuality,
+        highQuality,
       });
       return;
     }
 
     let vf: string;
-    switch (layout) {
-      case "center_crop":
-      case "facecam_overlay":
-      case "facecam_top_gameplay_bottom":
-      default:
-        vf = `scale=${width}:${height}:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=${width}:${height}`;
+    if (verticalLayout) {
+      // The encode input may have been downscaled for memory limits, so probe
+      // its real dimensions before converting normalized rects to pixels.
+      const encodeProbe = await probeMedia(encodeInput);
+      vf = buildVerticalLayoutFilter(verticalLayout, {
+        sourceWidth: encodeProbe.width,
+        sourceHeight: encodeProbe.height,
+        outputWidth: width,
+        outputHeight: height,
+      });
+    } else {
+      switch (layout) {
+        case "center_crop":
+        case "facecam_overlay":
+        case "facecam_top_gameplay_bottom":
+        default:
+          vf = `scale=${width}:${height}:force_original_aspect_ratio=increase:flags=${highQuality ? "lanczos" : "fast_bilinear"},crop=${width}:${height}`;
+      }
     }
 
     if (srtPath && !captionsSupported) {
@@ -784,6 +913,8 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
       vf,
       outputHeight: height,
       withAudio: true,
+      previewQuality,
+      highQuality,
     });
   } finally {
     for (const file of tempFiles) {
@@ -981,14 +1112,24 @@ export async function renderSequence(options: RenderSequenceOptions): Promise<vo
     "-c:v",
     "libx264",
     "-preset",
-    renderPreset(),
+    options.srtPath
+      ? process.env.FFMPEG_CAPTION_PRESET?.trim() || "medium"
+      : renderPreset(),
     "-crf",
-    isFfmpegLowMemoryMode() ? "26" : "24",
+    options.srtPath
+      ? isFfmpegLowMemoryMode()
+        ? "20"
+        : "17"
+      : isFfmpegLowMemoryMode()
+        ? "26"
+        : "24",
+    "-pix_fmt",
+    "yuv420p",
     "-threads",
     String(getFfmpegThreadCount()),
     ...x264MemoryArgs()
   );
-  if (withAudio) args.push("-c:a", "aac", "-b:a", "128k");
+  if (withAudio) args.push("-c:a", "aac", "-b:a", options.srtPath ? "192k" : "128k");
   else args.push("-an");
   if (isFfmpegLowMemoryMode()) {
     args.push("-filter_threads", "1", "-filter_complex_threads", "1", "-max_muxing_queue_size", "1024");

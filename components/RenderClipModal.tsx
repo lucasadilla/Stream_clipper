@@ -48,6 +48,11 @@ import {
   sequenceDuration,
   type EditorState,
 } from "@/lib/editorState";
+import {
+  VerticalLayoutPicker,
+  defaultVerticalLayoutSelection,
+  type VerticalLayoutSelection,
+} from "@/components/VerticalLayoutPicker";
 
 interface RenderClipModalProps {
   open: boolean;
@@ -95,6 +100,9 @@ export function RenderClipModal({
   const [downloadFilename, setDownloadFilename] = useState("clip.mp4");
   const [downloadDone, setDownloadDone] = useState(false);
   const [betaAccess, setBetaAccess] = useState(false);
+  const [verticalLayout, setVerticalLayout] = useState<VerticalLayoutSelection>(
+    defaultVerticalLayoutSelection
+  );
   const exportAbortRef = useRef<AbortController | null>(null);
   const prevOpenRef = useRef(false);
   /** Snapshot of selection taken when the modal opens. */
@@ -130,6 +138,7 @@ export function RenderClipModal({
     setExportStep("saving");
     setExportProgress(0);
     setFormat("vertical");
+    setVerticalLayout(defaultVerticalLayoutSelection());
     setTitle(`Clip ${formatSeconds((bounds ?? selection).start)}`);
     setDescription("");
     setTagsText("");
@@ -267,7 +276,10 @@ export function RenderClipModal({
           setExportStep("rendering");
         },
         editorState,
-        abort.signal
+        abort.signal,
+        format === "vertical"
+          ? { ...verticalLayout, captions: { ...verticalLayout.captions, enabled: burnCaptions } }
+          : undefined
       );
 
       if (abort.signal.aborted) return;
@@ -358,8 +370,8 @@ export function RenderClipModal({
   const modal = (
     <div
       className={cn(
-        "editor-shell fixed inset-0 isolate flex items-center justify-center p-4 sm:p-6",
-        isExporting ? "z-[2147483647] bg-black" : "z-[99999] bg-black/82 backdrop-blur-sm"
+        "editor-shell fixed inset-0 isolate z-[99999] flex items-start justify-center overflow-y-auto p-3 sm:p-4",
+        isExporting ? "z-[2147483647] bg-black" : "bg-black/82 backdrop-blur-sm"
       )}
       role="presentation"
       onMouseDown={(e) => {
@@ -368,9 +380,19 @@ export function RenderClipModal({
     >
       <div
         className={cn(
-          "relative z-10 flex w-full max-w-lg flex-col overflow-hidden rounded-lg border border-[var(--color-card-border)] bg-[#050705] shadow-[0_24px_100px_rgba(0,0,0,0.62)]",
-          isExporting ? "min-h-[360px]" : "max-h-[min(92vh,760px)]"
+          "relative z-10 flex w-full flex-col overflow-hidden rounded-lg border border-[var(--color-card-border)] bg-[#050705] shadow-[0_24px_100px_rgba(0,0,0,0.62)]",
+          phase === "configure" && format === "vertical" ? "max-w-xl" : "max-w-lg",
+          isExporting && "min-h-[360px]"
         )}
+        // Definite height (not just max-height) so the middle pane can scroll
+        // and the Export footer stays pinned on screen.
+        style={{
+          maxHeight: "calc(100dvh - 1.5rem)",
+          height:
+            phase === "configure" && format === "vertical"
+              ? "calc(100dvh - 1.5rem)"
+              : undefined,
+        }}
         role="dialog"
         aria-modal="true"
         aria-labelledby="render-modal-title"
@@ -405,10 +427,10 @@ export function RenderClipModal({
 
         <div
           className={cn(
-            "relative flex-1 px-4 py-4",
-            phase === "configure" && "overflow-y-auto space-y-4",
-            isExporting && "flex items-center justify-center",
-            phase === "done" && "overflow-y-auto space-y-4"
+            "relative min-h-0 flex-1 px-4 py-4",
+            phase === "configure" && "overflow-y-auto overscroll-contain space-y-4",
+            isExporting && "flex items-center justify-center overflow-hidden",
+            phase === "done" && "overflow-y-auto overscroll-contain space-y-4"
           )}
         >
           {generatingMeta && phase === "configure" && (
@@ -440,6 +462,19 @@ export function RenderClipModal({
                   />
                 </div>
               </div>
+
+              {format === "vertical" && (
+                <div className="rounded-lg border border-[var(--color-card-border)] bg-[#020302] p-3">
+                  <VerticalLayoutPicker
+                    sessionId={sessionId}
+                    startSeconds={effectiveSelection.start}
+                    endSeconds={effectiveSelection.end}
+                    value={verticalLayout}
+                    onChange={setVerticalLayout}
+                    includeCaptions={burnCaptions}
+                  />
+                </div>
+              )}
 
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
