@@ -321,6 +321,14 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
       } catch (err) {
         console.error("[worker] retention failed:", err);
       }
+      try {
+        const { reclaimEphemeralStorage } = await import(
+          "@/services/storageReclaimService"
+        );
+        await reclaimEphemeralStorage({ pruneSessionSegments: false });
+      } catch (err) {
+        console.warn("[worker] ephemeral reclaim failed:", err);
+      }
     }
 
     return {

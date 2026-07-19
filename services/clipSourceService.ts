@@ -24,6 +24,11 @@ import {
   isYtDlpAvailable,
 } from "@/services/youtubeDownloadService";
 import { getPreviewMp4Path } from "@/services/previewVideoService";
+import {
+  isNoSpaceError,
+  noSpaceLeftError,
+  reclaimEphemeralStorage,
+} from "@/services/storageReclaimService";
 
 function formatYtDlpTime(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds));
@@ -168,14 +173,33 @@ async function muxedClipSourceForRange(
   renderStart: number;
   renderEnd: number;
 } | null> {
-  const muxed = await createMuxedLiveSegment(
-    streamSessionId,
-    startTimeSeconds,
-    endTimeSeconds
-  ).catch((error) => {
-    console.warn("[render] Could not mux companion audio for clip:", error);
-    return null;
-  });
+  const attempt = () =>
+    createMuxedLiveSegment(streamSessionId, startTimeSeconds, endTimeSeconds);
+
+  let muxed: Awaited<ReturnType<typeof createMuxedLiveSegment>> | null = null;
+  try {
+    muxed = await attempt();
+  } catch (error) {
+    if (isNoSpaceError(error)) {
+      console.warn(
+        "[render] Disk full while muxing companion audio — reclaiming space and retrying"
+      );
+      await reclaimEphemeralStorage({
+        keepSessionId: streamSessionId,
+        pruneSessionSegments: true,
+      });
+      try {
+        muxed = await attempt();
+      } catch (retryError) {
+        if (isNoSpaceError(retryError)) throw noSpaceLeftError();
+        console.warn("[render] Could not mux companion audio for clip:", retryError);
+        return null;
+      }
+    } else {
+      console.warn("[render] Could not mux companion audio for clip:", error);
+      return null;
+    }
+  }
   if (!muxed) return null;
 
   const muxedMedia = await ensureSourceMediaRow(streamSessionId, muxed.path, {
@@ -220,6 +244,25 @@ async function preferAudibleClipSource(
     endTimeSeconds
   );
   if (muxed) return muxed;
+
+  // Companion audio exists on disk but mux failed for a non-space reason, or
+  // there is truly no audio track — never silently export video-only when we
+  // know a separate audio file is present.
+  const uploadDir = getUploadDir(streamSessionId);
+  const candidates = await listSourceCandidateFiles(uploadDir);
+  let companionExists = false;
+  for (const candidate of candidates) {
+    if (candidate === absolutePath) continue;
+    if (await hasAudioStream(candidate)) {
+      companionExists = true;
+      break;
+    }
+  }
+  if (companionExists) {
+    throw new Error(
+      "Could not combine video and audio for export (often low disk space). Free storage and try again."
+    );
+  }
 
   console.warn(
     "[render] Using video-only source; no companion audio found for mux",

@@ -159,6 +159,12 @@ function exportEncodeProfile(options: {
 
 export function formatFfmpegProcessError(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
+  if (/no space left on device|enospc|disk.?full/i.test(message)) {
+    return (
+      "Server storage is full. Delete old sessions from the Sessions list, " +
+      "or free space on the Railway volume, then try exporting again."
+    );
+  }
   if (/out of memory|cannot allocate memory|killed|sigkill|\boom\b/i.test(message)) {
     return (
       "Render ran out of server memory. Try a shorter clip, turn off burned captions, " +

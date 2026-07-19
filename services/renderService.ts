@@ -20,6 +20,11 @@ import {
 } from "@/lib/storage";
 import { getTranscriptChunksForRange } from "@/services/transcriptService";
 import { ensureClipSourceForRender } from "@/services/clipSourceService";
+import {
+  isNoSpaceError,
+  noSpaceLeftError,
+  reclaimEphemeralStorage,
+} from "@/services/storageReclaimService";
 import type { RenderFormat } from "@/lib/renderFormat";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
 import {
@@ -214,12 +219,26 @@ export async function executeRenderJob(
 
   await updateJobProgress(jobId, 12, "prepare_source");
 
-  const clipSource = await ensureClipSourceForRender(
-    streamSessionId,
-    effectiveStart,
-    effectiveEnd,
-    sourceMediaId
-  );
+  // Free temp/replaced-session media before mux + encode (Railway volumes fill fast).
+  await reclaimEphemeralStorage({
+    keepSessionId: streamSessionId,
+    pruneSessionSegments: true,
+  }).catch((err) => {
+    console.warn("[render] storage reclaim skipped:", err);
+  });
+
+  let clipSource;
+  try {
+    clipSource = await ensureClipSourceForRender(
+      streamSessionId,
+      effectiveStart,
+      effectiveEnd,
+      sourceMediaId
+    );
+  } catch (error) {
+    if (isNoSpaceError(error)) throw noSpaceLeftError();
+    throw error;
+  }
 
   await updateJobProgress(jobId, 25, "source_ready");
 
