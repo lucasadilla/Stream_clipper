@@ -9,7 +9,6 @@ import {
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import { resolveVideoDurationFromMetadata } from "@/lib/youtube";
 import { readStreamEmbed } from "@/lib/streamPlatform";
-import type { StreamPlatform } from "@/lib/streamPlatform";
 import { isBrowserPlayableVideoUrl } from "@/lib/streamPlatform";
 import {
   buildPreviewVideoUrl,

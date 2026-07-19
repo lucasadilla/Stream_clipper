@@ -277,7 +277,10 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
         reclaimStaleRenderJobs(),
         reclaimStalePlatformExports(),
         reclaimStaleSocialPublishJobs(),
-        reclaimStaleFaceAnalysisJobs(),
+        reclaimStaleFaceAnalysisJobs().catch((err) => {
+          console.warn("[worker] face analysis reclaim skipped:", err);
+          return 0;
+        }),
       ]);
     const reclaimed =
       staleRenders + stalePlatformExports + staleSocial + staleFaceAnalyses;
