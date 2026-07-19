@@ -10,7 +10,6 @@ RUN apt-get update \
     fonts-freefont-ttf \
     fonts-liberation \
     fonts-roboto \
-    fonts-montserrat \
     ca-certificates \
     curl \
     python3 \
