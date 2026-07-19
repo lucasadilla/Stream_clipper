@@ -1,0 +1,4 @@
+# Slim deps for Railway/Docker. YuNet (primary) only needs OpenCV + numpy.
+# MediaPipe is optional locally; skipped here to keep the image smaller.
+opencv-python-headless>=4.9,<5
+numpy>=1.26,<3

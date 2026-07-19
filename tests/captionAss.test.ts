@@ -5,7 +5,7 @@ import { applyCaptionEdits, remapCueWords } from "@/lib/captionEdits";
 import { resolveCaptionOverlaps, type CaptionCue } from "@/lib/captionTrack";
 
 describe("generateAss karaoke", () => {
-  it("emits one Dialogue per cue with \\k timings (not per-word events)", () => {
+  it("highlights only the active word like the editor (timed \\c, not progressive \\k)", () => {
     const ass = generateAss({
       width: 1080,
       height: 1920,
@@ -33,7 +33,9 @@ describe("generateAss karaoke", () => {
       .split("\n")
       .filter((line) => line.startsWith("Dialogue: 0,"));
     expect(dialogues).toHaveLength(1);
-    expect(dialogues[0]).toContain("{\\k");
+    expect(dialogues[0]).not.toContain("{\\k");
+    expect(dialogues[0]).toContain("\\t(");
+    expect(dialogues[0]).toContain("\\c&H");
     expect(dialogues[0]).toContain("hello");
     expect(dialogues[0]).toContain("world");
     expect(dialogues[0]).toContain("\\fscx86");

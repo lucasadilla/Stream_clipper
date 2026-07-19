@@ -86,6 +86,77 @@ function x264MemoryArgs(): string[] {
   return ["-x264-params", "ref=1:bframes=0:rc-lookahead=10"];
 }
 
+/** High-quality x264 tuning for final exports (sharper text/edges). */
+function x264HighQualityArgs(): string[] {
+  if (isFfmpegLowMemoryMode()) return [];
+  return ["-x264-params", "aq-mode=3:aq-strength=1.0:psy-rd=1.0,0.15:ref=4"];
+}
+
+function x264EncodeArgs(highQuality: boolean): string[] {
+  if (isFfmpegLowMemoryMode()) return x264MemoryArgs();
+  if (highQuality) return x264HighQualityArgs();
+  return [];
+}
+
+function parseCrf(value: string | undefined, fallback: number): string {
+  const parsed = Number.parseInt(value ?? "", 10);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 51) {
+    return String(fallback);
+  }
+  return String(parsed);
+}
+
+/**
+ * Encode settings for final exports vs previews.
+ * Finals default to high quality (slow/medium + low CRF) so captions stay sharp.
+ */
+function exportEncodeProfile(options: {
+  previewQuality?: boolean;
+  highQuality?: boolean;
+}): {
+  preset: string;
+  crf: string;
+  audioBitrate: string;
+  scaleFlags: string;
+} {
+  if (options.previewQuality) {
+    return {
+      preset: "ultrafast",
+      crf: "30",
+      audioBitrate: "128k",
+      scaleFlags: "fast_bilinear",
+    };
+  }
+
+  const highQuality = options.highQuality !== false;
+  const lowMemory = isFfmpegLowMemoryMode();
+
+  if (!highQuality) {
+    return {
+      preset: renderPreset(),
+      crf: lowMemory ? "26" : "24",
+      audioBitrate: "128k",
+      scaleFlags: "fast_bilinear",
+    };
+  }
+
+  const preset =
+    process.env.FFMPEG_CAPTION_PRESET?.trim() ||
+    process.env.FFMPEG_EXPORT_PRESET?.trim() ||
+    (lowMemory ? "medium" : "slow");
+  const crf = parseCrf(
+    process.env.FFMPEG_EXPORT_CRF,
+    lowMemory ? 18 : 15
+  );
+
+  return {
+    preset,
+    crf,
+    audioBitrate: "256k",
+    scaleFlags: "lanczos",
+  };
+}
+
 export function formatFfmpegProcessError(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
   if (/out of memory|cannot allocate memory|killed|sigkill|\boom\b/i.test(message)) {
@@ -663,16 +734,18 @@ export async function accurateCutSegment(
     "-c:v",
     "libx264",
     "-preset",
-    renderPreset(),
+    process.env.FFMPEG_CAPTION_PRESET?.trim() ||
+      process.env.FFMPEG_EXPORT_PRESET?.trim() ||
+      (lowMemory ? "medium" : "slow"),
     "-crf",
-    lowMemory ? "26" : "18",
+    parseCrf(process.env.FFMPEG_EXPORT_CRF, lowMemory ? 18 : 15),
     "-threads",
     String(getFfmpegThreadCount()),
-    ...x264MemoryArgs(),
+    ...x264EncodeArgs(true),
     "-c:a",
     "aac",
     "-b:a",
-    "192k",
+    "256k",
     "-avoid_negative_ts",
     "make_zero",
     "-movflags",
@@ -694,22 +767,12 @@ async function encodeWithFilters(options: {
   durationSeconds?: number;
   accurateSeek?: boolean;
 }): Promise<void> {
-  const lowMemory = isFfmpegLowMemoryMode();
   const highQuality = Boolean(options.highQuality) && !options.previewQuality;
-  const preset = options.previewQuality
-    ? "ultrafast"
-    : highQuality
-      ? process.env.FFMPEG_CAPTION_PRESET?.trim() || "medium"
-      : renderPreset();
-  const crf = options.previewQuality
-    ? "30"
-    : highQuality
-      ? lowMemory
-        ? "20"
-        : "17"
-      : lowMemory
-        ? "26"
-        : "24";
+  const profile = exportEncodeProfile({
+    previewQuality: options.previewQuality,
+    highQuality,
+  });
+  const lowMemory = isFfmpegLowMemoryMode();
 
   const args = [
     "-y",
@@ -741,6 +804,17 @@ async function encodeWithFilters(options: {
     args.push("-t", String(options.durationSeconds));
   }
 
+  // After an accurate seek, reset PTS so burned ASS (authored at t=0 = clip
+  // start) stays locked to the speech — same clock as a pre-cut segment.
+  let vf = options.vf;
+  if (
+    options.accurateSeek &&
+    options.startSeconds != null &&
+    options.startSeconds > 0
+  ) {
+    vf = `setpts=PTS-STARTPTS,${vf}`;
+  }
+
   args.push(
     "-map",
     "0:v:0?",
@@ -749,18 +823,18 @@ async function encodeWithFilters(options: {
     "-sn",
     "-dn",
     "-vf",
-    options.vf,
+    vf,
     "-c:v",
     "libx264",
     "-preset",
-    preset,
+    profile.preset,
     "-crf",
-    crf,
+    profile.crf,
     "-pix_fmt",
     "yuv420p",
     "-threads",
     String(getFfmpegThreadCount()),
-    ...x264MemoryArgs()
+    ...x264EncodeArgs(highQuality)
   );
 
   if (lowMemory) {
@@ -768,7 +842,14 @@ async function encodeWithFilters(options: {
   }
 
   if (options.withAudio) {
-    args.push("-c:a", "aac", "-b:a", highQuality ? "192k" : "128k");
+    if (
+      options.accurateSeek &&
+      options.startSeconds != null &&
+      options.startSeconds > 0
+    ) {
+      args.push("-af", "asetpts=PTS-STARTPTS");
+    }
+    args.push("-c:a", "aac", "-b:a", profile.audioBitrate);
   } else {
     args.push("-an");
   }
@@ -843,25 +924,39 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
   }
 
   const fs = await import("fs/promises");
-  const tempCut = `${outputPath}.cut.mp4`;
-  const tempFiles = [tempCut];
+  const tempFiles: string[] = [];
+  const highQuality = !previewQuality;
+  const scaleFlags = exportEncodeProfile({
+    previewQuality,
+    highQuality,
+  }).scaleFlags;
 
   try {
-    // Caption burn-in needs a frame-accurate cut so ASS times (authored as if
-    // t=0 is exactly startTimeSeconds) stay locked to the speech. Without
-    // captions, stream-copy is fine and much faster.
-    if (srtPath) {
-      await accurateCutSegment(inputPath, tempCut, startTimeSeconds, duration);
-    } else {
-      await fastCutSegment(inputPath, tempCut, startTimeSeconds, duration);
+    // Prefer a single encode pass from the source (seek + filters) so captions
+    // are not softened by an intermediate re-encode. Low-memory hosts still
+    // cut/downscale first to avoid OOM on long 4K sources.
+    let encodeInput = inputPath;
+    let seekStart: number | undefined = startTimeSeconds;
+    let seekDuration: number | undefined = duration;
+    let accurateSeek = Boolean(srtPath);
+
+    if (previewQuality || isFfmpegLowMemoryMode()) {
+      const tempCut = `${outputPath}.cut.mp4`;
+      tempFiles.push(tempCut);
+      if (srtPath) {
+        await accurateCutSegment(inputPath, tempCut, startTimeSeconds, duration);
+      } else {
+        await fastCutSegment(inputPath, tempCut, startTimeSeconds, duration);
+      }
+      const memcapPath = `${outputPath}.memcap.mp4`;
+      encodeInput = await maybeDownscaleSourceForMemory(tempCut, memcapPath);
+      if (encodeInput !== tempCut) tempFiles.push(encodeInput);
+      seekStart = undefined;
+      seekDuration = undefined;
+      accurateSeek = false;
     }
 
-    const memcapPath = `${outputPath}.memcap.mp4`;
-    const encodeInput = await maybeDownscaleSourceForMemory(tempCut, memcapPath);
-    if (encodeInput !== tempCut) tempFiles.push(encodeInput);
-
     const captionsSupported = srtPath ? await hasSubtitleFilter() : false;
-    const highQuality = Boolean(srtPath) && !previewQuality;
 
     if (format === "native" && srtPath) {
       if (!captionsSupported) {
@@ -875,14 +970,15 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
         withAudio: true,
         previewQuality,
         highQuality,
+        startSeconds: seekStart,
+        durationSeconds: seekDuration,
+        accurateSeek,
       });
       return;
     }
 
     let vf: string;
     if (verticalLayout) {
-      // The encode input may have been downscaled for memory limits, so probe
-      // its real dimensions before converting normalized rects to pixels.
       const encodeProbe = await probeMedia(encodeInput);
       vf = buildVerticalLayoutFilter(verticalLayout, {
         sourceWidth: encodeProbe.width,
@@ -896,7 +992,7 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
         case "facecam_overlay":
         case "facecam_top_gameplay_bottom":
         default:
-          vf = `scale=${width}:${height}:force_original_aspect_ratio=increase:flags=${highQuality ? "lanczos" : "fast_bilinear"},crop=${width}:${height}`;
+          vf = `scale=${width}:${height}:force_original_aspect_ratio=increase:flags=${scaleFlags},crop=${width}:${height}`;
       }
     }
 
@@ -915,6 +1011,9 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
       withAudio: true,
       previewQuality,
       highQuality,
+      startSeconds: seekStart,
+      durationSeconds: seekDuration,
+      accurateSeek,
     });
   } finally {
     for (const file of tempFiles) {
@@ -1012,6 +1111,9 @@ export async function renderSequence(options: RenderSequenceOptions): Promise<vo
   const width = Math.max(2, Math.round(options.width / 2) * 2);
   const height = Math.max(2, Math.round(options.height / 2) * 2);
 
+  const profile = exportEncodeProfile({ highQuality: true });
+  const scaleFlags = profile.scaleFlags;
+
   options.segments.forEach((segment, index) => {
     const start = Math.max(0, segment.startTimeSeconds);
     const end = Math.max(start + 0.05, segment.endTimeSeconds);
@@ -1020,17 +1122,17 @@ export async function renderSequence(options: RenderSequenceOptions): Promise<vo
     if (options.format === "vertical" && options.verticalBackground === "blur") {
       filters.push(`${source},split=2[bg${index}][fg${index}]`);
       filters.push(
-        `[bg${index}]scale=${width}:${height}:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=${width}:${height},boxblur=20:2[blur${index}]`
+        `[bg${index}]scale=${width}:${height}:force_original_aspect_ratio=increase:flags=${scaleFlags},crop=${width}:${height},boxblur=20:2[blur${index}]`
       );
       filters.push(
-        `[fg${index}]scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=fast_bilinear[fit${index}]`
+        `[fg${index}]scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=${scaleFlags}[fit${index}]`
       );
       filters.push(
         `[blur${index}][fit${index}]overlay=(W-w)/2:(H-h)/2,setsar=1,fps=30,format=yuv420p[v${index}]`
       );
     } else {
       filters.push(
-        `${source},scale=${width}:${height}:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=${width}:${height},setsar=1,fps=30,format=yuv420p[v${index}]`
+        `${source},scale=${width}:${height}:force_original_aspect_ratio=increase:flags=${scaleFlags},crop=${width}:${height},setsar=1,fps=30,format=yuv420p[v${index}]`
       );
     }
 
@@ -1071,7 +1173,7 @@ export async function renderSequence(options: RenderSequenceOptions): Promise<vo
     const prepared = `ov${index}`;
     if (overlay.type === "broll") {
       filters.push(
-        `[${inputIndex}:v]setpts=PTS-STARTPTS,scale=${width}:${height}:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=${width}:${height},setsar=1,format=yuv420p[${prepared}]`
+        `[${inputIndex}:v]setpts=PTS-STARTPTS,scale=${width}:${height}:force_original_aspect_ratio=increase:flags=${scaleFlags},crop=${width}:${height},setsar=1,format=yuv420p[${prepared}]`
       );
       filters.push(
         `[${videoLabel}][${prepared}]overlay=0:0:enable='between(t,${overlay.startTimeSeconds},${overlay.endTimeSeconds})':eof_action=repeat[${nextLabel}]`
@@ -1083,7 +1185,7 @@ export async function renderSequence(options: RenderSequenceOptions): Promise<vo
       );
       const pos = overlayPosition(overlay.position);
       filters.push(
-        `[${inputIndex}:v]setpts=PTS-STARTPTS,scale=${overlayWidth}:-2:flags=fast_bilinear,format=rgba[${prepared}]`
+        `[${inputIndex}:v]setpts=PTS-STARTPTS,scale=${overlayWidth}:-2:flags=${scaleFlags},format=rgba[${prepared}]`
       );
       filters.push(
         `[${videoLabel}][${prepared}]overlay=${pos.x}:${pos.y}:enable='between(t,${overlay.startTimeSeconds},${overlay.endTimeSeconds})':eof_action=repeat[${nextLabel}]`
@@ -1112,24 +1214,16 @@ export async function renderSequence(options: RenderSequenceOptions): Promise<vo
     "-c:v",
     "libx264",
     "-preset",
-    options.srtPath
-      ? process.env.FFMPEG_CAPTION_PRESET?.trim() || "medium"
-      : renderPreset(),
+    profile.preset,
     "-crf",
-    options.srtPath
-      ? isFfmpegLowMemoryMode()
-        ? "20"
-        : "17"
-      : isFfmpegLowMemoryMode()
-        ? "26"
-        : "24",
+    profile.crf,
     "-pix_fmt",
     "yuv420p",
     "-threads",
     String(getFfmpegThreadCount()),
-    ...x264MemoryArgs()
+    ...x264EncodeArgs(true)
   );
-  if (withAudio) args.push("-c:a", "aac", "-b:a", options.srtPath ? "192k" : "128k");
+  if (withAudio) args.push("-c:a", "aac", "-b:a", profile.audioBitrate);
   else args.push("-an");
   if (isFfmpegLowMemoryMode()) {
     args.push("-filter_threads", "1", "-filter_complex_threads", "1", "-max_muxing_queue_size", "1024");

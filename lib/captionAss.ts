@@ -53,10 +53,6 @@ function formatAssTime(seconds: number): string {
   return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
 }
 
-function toKaraokeCs(seconds: number): number {
-  return Math.max(1, Math.round(Math.max(0, seconds) * 100));
-}
-
 /**
  * Entrance animations tuned to match the editor CSS.
  * Applied once per cue (not per karaoke syllable).
@@ -130,14 +126,17 @@ function readabilityOverrides(
 }
 
 /**
- * Karaoke body with \\k timings and soft line wraps matching the editor.
+ * Karaoke body matching the editor: only the active word is highlighted.
+ * Progressive ASS \\k fill leaves past words lit; timed \\c flips match the preview.
  */
 function karaokeAssBody(
   words: CaptionWord[],
   cueStart: number,
   cueEnd: number,
   capitalization: CaptionAppearance["capitalization"],
-  maxChars: number
+  maxChars: number,
+  baseColor: string,
+  highlightColor: string
 ): string {
   const usable = words
     .map((word) => {
@@ -149,17 +148,16 @@ function karaokeAssBody(
 
   if (usable.length === 0) return "";
 
+  const toMs = (seconds: number) =>
+    Math.max(0, Math.round((seconds - cueStart) * 1000));
+
   const parts: string[] = [];
-  let cursor = cueStart;
   let lineLen = 0;
   let linesUsed = 1;
   const maxLines = 2;
 
   for (let index = 0; index < usable.length; index++) {
     const word = usable[index]!;
-    if (word.start > cursor) {
-      parts.push(`{\\k${toKaraokeCs(word.start - cursor)}}`);
-    }
     const piece = applyCaptionCapitalization(word.word.trim(), capitalization);
     const addLen = lineLen > 0 ? piece.length + 1 : piece.length;
     if (lineLen > 0 && linesUsed < maxLines && addLen + lineLen > maxChars) {
@@ -168,11 +166,14 @@ function karaokeAssBody(
       linesUsed += 1;
     }
     const spacer = index < usable.length - 1 ? " " : "";
+    const startMs = toMs(word.start);
+    const endMs = Math.max(startMs + 1, toMs(word.end));
+    // Start in base color; flip to highlight for this word's window; restore base.
+    // Override form is \c&HBBGGRR& (trailing & required).
     parts.push(
-      `{\\k${toKaraokeCs(word.end - word.start)}}${escapeAssText(piece)}${spacer}`
+      `{\\c${baseColor}&\\t(${startMs},${startMs},\\c${highlightColor}&)\\t(${endMs},${endMs},\\c${baseColor}&)}${escapeAssText(piece)}${spacer}`
     );
     lineLen = lineLen > 0 ? lineLen + 1 + piece.length : piece.length;
-    cursor = word.end;
   }
 
   return parts.join("");
@@ -196,7 +197,8 @@ export function generateAss(options: GenerateAssOptions): string {
 
   const baseColor = hexToAssColor(app.color);
   const highlightColor = hexToAssColor(app.highlightColor);
-  const primary = app.karaokeEnabled ? highlightColor : baseColor;
+  // Karaoke colors are applied inline so Primary stays the base (editor) color.
+  const primary = baseColor;
   const secondary = baseColor;
 
   const styleFields = (
@@ -283,7 +285,9 @@ export function generateAss(options: GenerateAssOptions): string {
         cue.startTimeSeconds,
         cue.endTimeSeconds,
         app.capitalization,
-        maxChars
+        maxChars,
+        baseColor,
+        highlightColor
       );
       if (!body) {
         const fallback = escapeAssText(
