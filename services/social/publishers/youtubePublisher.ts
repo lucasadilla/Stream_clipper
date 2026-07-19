@@ -6,6 +6,7 @@ import {
   forcesPrivateUploads,
   getPlatformCapability,
 } from "@/lib/social/capabilities";
+import { getPublicSiteUrl } from "@/lib/publicOrigin";
 import type {
   PublishRequest,
   PublisherContext,
@@ -38,7 +39,7 @@ export function youtubeOAuthConfigured(): boolean {
 export function getYouTubeRedirectUri(): string {
   return (
     process.env.YOUTUBE_REDIRECT_URI?.trim() ||
-    `${process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") || "http://localhost:3000"}/api/social/oauth/youtube/callback`
+    `${getPublicSiteUrl()}/api/social/oauth/youtube/callback`
   );
 }
 

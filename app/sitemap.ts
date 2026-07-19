@@ -1,6 +1,7 @@
 import type { MetadataRoute } from "next";
+import { getPublicSiteUrl } from "@/lib/publicOrigin";
 
-const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "https://streamclipper.stream";
+const siteUrl = getPublicSiteUrl();
 
 export default function sitemap(): MetadataRoute.Sitemap {
   return [

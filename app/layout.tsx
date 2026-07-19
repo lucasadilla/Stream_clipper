@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Instrument_Serif } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { getPublicSiteUrl } from "@/lib/publicOrigin";
 import "./globals.css";
 
 const instrumentSerif = Instrument_Serif({
@@ -12,9 +13,7 @@ const instrumentSerif = Instrument_Serif({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL(
-    process.env.NEXT_PUBLIC_SITE_URL ?? "https://streamclipper.stream"
-  ),
+  metadataBase: new URL(getPublicSiteUrl()),
   title: {
     default: "Clipper - AI Livestream Editor & Shorts Generator",
     template: "%s | Clipper",

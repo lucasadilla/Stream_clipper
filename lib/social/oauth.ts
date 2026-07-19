@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
+import { getPublicSiteUrl } from "@/lib/publicOrigin";
 
 export function createPkcePair(): { verifier: string; challenge: string } {
   const verifier = randomBytes(32).toString("base64url");
@@ -61,8 +62,5 @@ export function verifyMediaGrant(token: string): { filePath: string } | null {
 }
 
 export function publicOrigin(): string {
-  return (
-    process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") ||
-    "http://localhost:3000"
-  );
+  return getPublicSiteUrl();
 }
