@@ -46,7 +46,7 @@ function formatAssTime(seconds: number): string {
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = Math.floor(s % 60);
-  let cs = Math.round((s - Math.floor(s)) * 100);
+  const cs = Math.round((s - Math.floor(s)) * 100);
   if (cs === 100) {
     return formatAssTime(Math.floor(s) + 1);
   }
