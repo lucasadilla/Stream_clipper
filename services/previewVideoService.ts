@@ -17,10 +17,14 @@ import {
 
 const PREVIEW_FILENAME = "preview.mp4";
 const MIN_PREVIEW_BYTES = 48 * 1024;
-/** After a successful remux, wait this long before rewriting again. */
-const REMUX_INTERVAL_MS = 60_000;
-/** While no playable preview exists yet, retry more often so the monitor isn't blank. */
+/** After preview is caught up with source, wait this long before rewriting again. */
+const REMUX_INTERVAL_MS = 45_000;
+/** While preview is missing or far behind the capture, remux more often. */
+const CATCHUP_REMUX_INTERVAL_MS = 12_000;
 const FIRST_REMUX_INTERVAL_MS = 8_000;
+/** ~300 KB/s — same ballpark as liveRecordingService for growing captures. */
+const BYTES_PER_SECOND_ESTIMATE = 300 * 1024;
+const MIN_BYTES_FOR_SIZE_ESTIMATE = 500_000;
 
 const lastRemuxAt = new Map<string, number>();
 const remuxInFlight = new Set<string>();
@@ -70,10 +74,34 @@ async function findCompanionAudioPath(
   return null;
 }
 
+function estimateSecondsFromBytes(sizeBytes: number): number {
+  if (sizeBytes < MIN_BYTES_FOR_SIZE_ESTIMATE) return 0;
+  return sizeBytes / BYTES_PER_SECOND_ESTIMATE;
+}
+
+/**
+ * Growing MKV/HLS captures often report a stale/short format.duration while
+ * the file on disk already holds much more media. Take the max of probe + size.
+ */
+async function resolveReadableSeconds(filePath: string): Promise<number> {
+  const probed = await probeMediaDurationBestEffort(filePath).catch(() => 0);
+  let sizeBytes = 0;
+  try {
+    sizeBytes = (await stat(filePath)).size;
+  } catch {
+    // ignore
+  }
+  return Math.max(probed, estimateSecondsFromBytes(sizeBytes));
+}
+
 /**
  * Remux the growing capture (usually .mkv) into browser-playable MP4 for preview.
  * When yt-dlp splits video/audio, merge both so playback stays in sync with Whisper.
  * Throttled — safe to call on every live sync tick.
+ *
+ * Important: do NOT truncate with a probed `-t` for single-file remux. Growing
+ * captures often under-report duration (e.g. stuck at ~30 min), which produced a
+ * short scrubbable preview while the live stream was hours long.
  */
 export async function syncPreviewMp4(
   streamSessionId: string,
@@ -86,13 +114,34 @@ export async function syncPreviewMp4(
 
   const now = Date.now();
   const last = lastRemuxAt.get(streamSessionId) ?? 0;
-  const hasPreview = await previewMp4Ready(streamSessionId);
-  const interval = hasPreview ? REMUX_INTERVAL_MS : FIRST_REMUX_INTERVAL_MS;
-  if (now - last < interval) return;
   if (remuxInFlight.has(streamSessionId)) return;
 
-  remuxInFlight.add(streamSessionId);
   const outputPath = getPreviewMp4Path(streamSessionId);
+  const hasPreview = await previewMp4Ready(streamSessionId);
+  const sourceSeconds = await resolveReadableSeconds(sourceAbsolutePath);
+  if (sourceSeconds < 1) return;
+
+  let previewSeconds = 0;
+  if (hasPreview) {
+    previewSeconds = await probeMediaDurationBestEffort(outputPath).catch(() => 0);
+  }
+
+  // Remux when missing, or when capture has grown meaningfully past the preview.
+  const behindBy = sourceSeconds - previewSeconds;
+  const needsCatchup = !hasPreview || behindBy >= 8;
+  if (!needsCatchup) {
+    lastRemuxAt.set(streamSessionId, now);
+    return;
+  }
+
+  const interval = !hasPreview
+    ? FIRST_REMUX_INTERVAL_MS
+    : behindBy >= 30
+      ? CATCHUP_REMUX_INTERVAL_MS
+      : REMUX_INTERVAL_MS;
+  if (now - last < interval) return;
+
+  remuxInFlight.add(streamSessionId);
   const tempPath = `${outputPath}.${process.pid}-${Date.now()}.tmp.mp4`;
 
   try {
@@ -101,27 +150,22 @@ export async function syncPreviewMp4(
       sourceAbsolutePath
     );
 
-    const videoSeconds = await probeMediaDurationBestEffort(
-      sourceAbsolutePath
-    ).catch(() => 0);
-    const audioSeconds = companionAudio
-      ? await probeMediaDurationBestEffort(companionAudio).catch(() => 0)
-      : 0;
-    const readableSeconds = Math.max(videoSeconds, audioSeconds);
-    if (readableSeconds < 1) return;
-
     const args = [
       "-y",
       "-nostdin",
       "-loglevel",
       "error",
+      "-err_detect",
+      "ignore_err",
       "-i",
       sourceAbsolutePath,
     ];
 
     if (companionAudio) {
-      // Separate DASH tracks — mux video + audio so captions match what you hear.
-      args.push("-i", companionAudio, "-t", String(readableSeconds));
+      const audioSeconds = await resolveReadableSeconds(companionAudio);
+      const readableSeconds = Math.max(sourceSeconds, audioSeconds);
+      // Bound mux length with the better estimate — still avoid a stale short probe.
+      args.push("-i", companionAudio, "-t", String(Math.max(readableSeconds, 1)));
       args.push(
         "-map",
         "0:v:0?",
@@ -136,16 +180,8 @@ export async function syncPreviewMp4(
         "-shortest"
       );
     } else {
-      args.push(
-        "-t",
-        String(readableSeconds),
-        "-map",
-        "0:v:0?",
-        "-map",
-        "0:a:0?",
-        "-c",
-        "copy"
-      );
+      // Copy all packets currently readable — no `-t` from a stale probe.
+      args.push("-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy");
     }
 
     args.push("-movflags", "+faststart", tempPath);
@@ -157,8 +193,10 @@ export async function syncPreviewMp4(
     lastRemuxAt.set(streamSessionId, Date.now());
   } catch {
     // Growing file may be locked or incomplete — retry on next tick.
-    // Still advance the throttle slightly so we don't hot-loop on hard failures.
-    lastRemuxAt.set(streamSessionId, Date.now() - interval + Math.min(interval, 5_000));
+    lastRemuxAt.set(
+      streamSessionId,
+      Date.now() - interval + Math.min(interval, 5_000)
+    );
   } finally {
     await unlink(tempPath).catch(() => {});
     remuxInFlight.delete(streamSessionId);

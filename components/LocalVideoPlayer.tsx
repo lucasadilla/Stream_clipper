@@ -77,38 +77,21 @@ export const LocalVideoPlayer = forwardRef<
     getDuration: () => videoRef.current?.duration ?? 0,
   }));
 
-  // Remount on path change. Reload on remux `v=` change when broken, paused, or
-  // near the old end — so longer previews aren't stuck at the first remux length.
+  // Reload whenever the remux `v=` changes so scrubbing length grows with capture.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     const identity = mediaIdentity(src);
     const version = cacheVersion(src);
-    const sameFile =
-      loadedIdentityRef.current === identity && Boolean(video.getAttribute("src"));
-    const sameVersion = loadedVersionRef.current === version;
-
-    if (sameFile && sameVersion) {
+    if (
+      loadedIdentityRef.current === identity &&
+      loadedVersionRef.current === version &&
+      video.getAttribute("src")
+    ) {
       if (Number.isFinite(video.duration) && video.duration > 0) {
         onDurationChangeRef.current?.(video.duration);
       }
       return;
-    }
-
-    if (sameFile && !sameVersion) {
-      const broken =
-        Boolean(video.error) ||
-        !Number.isFinite(video.duration) ||
-        video.duration <= 0;
-      const nearEnd =
-        Number.isFinite(video.duration) &&
-        video.duration > 0 &&
-        video.currentTime >= video.duration - 2;
-      if (!broken && !video.paused && !nearEnd) {
-        // Keep playing the current remux; pick up the longer file next pause/seek.
-        loadedVersionRef.current = version;
-        return;
-      }
     }
 
     const previousTime = video.currentTime;
@@ -120,13 +103,17 @@ export const LocalVideoPlayer = forwardRef<
     const restore = () => {
       if (previousTime > 0.25 && Number.isFinite(previousTime)) {
         try {
-          video.currentTime = previousTime;
+          const duration = Number.isFinite(video.duration) ? video.duration : previousTime;
+          video.currentTime = Math.min(previousTime, Math.max(0, duration - 0.05));
         } catch {
           // ignore seek before ready
         }
       }
       if (!wasPaused) {
         void video.play().catch(() => {});
+      }
+      if (Number.isFinite(video.duration) && video.duration > 0) {
+        onDurationChangeRef.current?.(video.duration);
       }
     };
     video.addEventListener("loadeddata", restore, { once: true });

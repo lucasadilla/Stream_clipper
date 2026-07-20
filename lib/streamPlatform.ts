@@ -171,17 +171,6 @@ export function shouldPreferLocalVideoPreview(options: {
   // not for replacing the stream viewer.
   if (options.platform === "youtube") return false;
 
-  // Twitch/Kick live: same rule — keep the channel embed so the monitor shows
-  // the ongoing stream. Local remux is only what we've captured so far (often
-  // much shorter than a multi-hour live), and locking onto it makes the player
-  // look like a finite VOD (e.g. 30 min of a 3 hour stream).
-  if (
-    (options.platform === "twitch" || options.platform === "kick") &&
-    options.isLive
-  ) {
-    return false;
-  }
-
   const playbackUrl =
     options.previewVideoUrl ??
     (options.sourceIsPlayableMp4 ? options.sourceVideoUrl : null);
@@ -191,6 +180,15 @@ export function shouldPreferLocalVideoPreview(options: {
 
   const localSeconds = options.durationSeconds ?? 0;
   if (localSeconds < 2) return false;
+
+  // Twitch/Kick live embed only shows the live edge — scrubbing the recorded
+  // stream (live-from-start capture) requires the local remux.
+  if (
+    (options.platform === "twitch" || options.platform === "kick") &&
+    (options.isLive || options.isLiveRecording)
+  ) {
+    return true;
+  }
 
   const known = options.knownStreamDuration ?? 0;
   // Keep using the remote player until local media covers most of the stream,

@@ -952,13 +952,22 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       : 0;
 
   const streamDuration = isLive
-    ? coalesceTimelineSeconds([
-        recordedSeconds,
-        currentTime,
-        playerDuration,
-        liveElapsedSeconds,
-        LIVE_SEGMENT_SECONDS,
-      ])
+    ? preferLocalVideo
+      ? // Scrub only what local capture has remuxed — liveElapsed would fake a
+        // multi-hour timeline the player can't seek into yet.
+        coalesceTimelineSeconds([
+          recordedSeconds,
+          currentTime,
+          playerDuration,
+          LIVE_SEGMENT_SECONDS,
+        ])
+      : coalesceTimelineSeconds([
+          recordedSeconds,
+          currentTime,
+          playerDuration,
+          liveElapsedSeconds,
+          LIVE_SEGMENT_SECONDS,
+        ])
     : coalesceTimelineSeconds([
         session.videoDurationSeconds,
         playerDuration,
