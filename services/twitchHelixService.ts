@@ -113,7 +113,9 @@ export async function fetchTwitchHelixMetadata(
   const live = data?.data?.[0];
   if (live) {
     return {
-      sourceId: live.user_id ?? channel,
+      // Channel login — not Helix user_id. Numeric ids get misread as VOD ids
+      // by the Twitch embed and blank the program monitor.
+      sourceId: channel,
       title: live.title ?? `${live.user_name ?? channel} (live)`,
       description: "",
       channelTitle: live.user_name ?? channel,
@@ -140,7 +142,7 @@ export async function fetchTwitchHelixMetadata(
   if (!user) return null;
 
   return {
-    sourceId: user.id,
+    sourceId: (user.login ?? channel).toLowerCase(),
     title: `${user.display_name ?? channel} (Twitch)`,
     description: "",
     channelTitle: user.display_name ?? channel,

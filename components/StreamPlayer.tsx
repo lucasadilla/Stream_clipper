@@ -90,7 +90,11 @@ export const StreamPlayer = forwardRef<StreamPlayerHandle, StreamPlayerProps>(
         <TwitchEmbedPlayer
           ref={ref}
           channel={resolvedEmbed.twitchChannel}
-          videoId={resolvedEmbed.twitchVideoId}
+          videoId={
+            resolvedEmbed.twitchChannel
+              ? undefined
+              : resolvedEmbed.twitchVideoId
+          }
           onTimeUpdate={onTimeUpdate}
           onDurationChange={onDurationChange}
           fillContainer={fillContainer}

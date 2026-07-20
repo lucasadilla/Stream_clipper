@@ -17,7 +17,7 @@ interface LocalVideoPlayerProps {
   fillContainer?: boolean;
 }
 
-/** Strip cache-bust query params so the same file identity is stable. */
+/** Strip cache-bust `v=` so normal remux updates don't remount mid-playback. */
 function mediaIdentity(src: string): string {
   try {
     const url = new URL(src, "http://local");
@@ -68,17 +68,25 @@ export const LocalVideoPlayer = forwardRef<
     getDuration: () => videoRef.current?.duration ?? 0,
   }));
 
-  // Only remount/load when the underlying media path changes — not on live
-  // duration growth or cache-bust query churn.
+  // Remount when the media path changes. Also reload when a remux cache-bust
+  // arrives for a broken/empty first preview (common for Twitch live mkv).
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     const identity = mediaIdentity(src);
-    if (loadedIdentityRef.current === identity && video.getAttribute("src")) {
-      if (Number.isFinite(video.duration) && video.duration > 0) {
-        onDurationChangeRef.current?.(video.duration);
+    const sameFile =
+      loadedIdentityRef.current === identity && Boolean(video.getAttribute("src"));
+    if (sameFile) {
+      const broken =
+        Boolean(video.error) ||
+        !Number.isFinite(video.duration) ||
+        video.duration <= 0;
+      if (!broken) {
+        if (Number.isFinite(video.duration) && video.duration > 0) {
+          onDurationChangeRef.current?.(video.duration);
+        }
+        return;
       }
-      return;
     }
     const previousTime = video.currentTime;
     const wasPaused = video.paused;

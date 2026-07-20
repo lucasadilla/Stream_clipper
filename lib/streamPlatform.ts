@@ -134,11 +134,18 @@ export function resolveStreamEmbed(
   embed: StreamEmbedInfo
 ): StreamEmbedInfo {
   if (platform === "twitch") {
-    const twitchVideoId =
-      embed.twitchVideoId ?? (/^\d+$/.test(sourceId) ? sourceId : undefined);
     const twitchChannel =
-      embed.twitchChannel ??
-      (twitchVideoId ? undefined : sourceId.toLowerCase());
+      embed.twitchChannel?.trim().toLowerCase() ||
+      (!/^\d+$/.test(sourceId) ? sourceId.toLowerCase() : undefined);
+
+    // Prefer an explicit VOD id from the URL/embed. Never invent a video id from
+    // a numeric Helix user_id / stream id when we already know the channel —
+    // that makes the Twitch embed request a non-existent VOD and stay blank
+    // while live capture + transcription still work.
+    const twitchVideoId =
+      embed.twitchVideoId?.trim() ||
+      (!twitchChannel && /^\d+$/.test(sourceId) ? sourceId : undefined);
+
     return { twitchChannel, twitchVideoId };
   }
   if (platform === "kick") {

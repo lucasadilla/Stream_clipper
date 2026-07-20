@@ -128,14 +128,19 @@ export const TwitchEmbedPlayer = forwardRef<
 
       teardown();
 
+      // Live channel sessions always have a channel. VOD sessions only have video.
+      // Prefer channel when present so a mistaken numeric id cannot blank the player.
       const options = {
         width: "100%",
         height: "100%",
         parent: twitchParents(),
         autoplay: false,
         muted: false,
-        ...(videoId ? { video: videoId } : {}),
-        ...(channel && !videoId ? { channel } : {}),
+        ...(channel
+          ? { channel }
+          : videoId
+            ? { video: videoId }
+            : {}),
       };
 
       const player = new window.Twitch.Player(containerId, options);

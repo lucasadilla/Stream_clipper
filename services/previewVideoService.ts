@@ -17,7 +17,10 @@ import {
 
 const PREVIEW_FILENAME = "preview.mp4";
 const MIN_PREVIEW_BYTES = 48 * 1024;
+/** After a successful remux, wait this long before rewriting again. */
 const REMUX_INTERVAL_MS = 60_000;
+/** While no playable preview exists yet, retry more often so the monitor isn't blank. */
+const FIRST_REMUX_INTERVAL_MS = 8_000;
 
 const lastRemuxAt = new Map<string, number>();
 const remuxInFlight = new Set<string>();
@@ -83,7 +86,9 @@ export async function syncPreviewMp4(
 
   const now = Date.now();
   const last = lastRemuxAt.get(streamSessionId) ?? 0;
-  if (now - last < REMUX_INTERVAL_MS) return;
+  const hasPreview = await previewMp4Ready(streamSessionId);
+  const interval = hasPreview ? REMUX_INTERVAL_MS : FIRST_REMUX_INTERVAL_MS;
+  if (now - last < interval) return;
   if (remuxInFlight.has(streamSessionId)) return;
 
   remuxInFlight.add(streamSessionId);
@@ -152,6 +157,8 @@ export async function syncPreviewMp4(
     lastRemuxAt.set(streamSessionId, Date.now());
   } catch {
     // Growing file may be locked or incomplete — retry on next tick.
+    // Still advance the throttle slightly so we don't hot-loop on hard failures.
+    lastRemuxAt.set(streamSessionId, Date.now() - interval + Math.min(interval, 5_000));
   } finally {
     await unlink(tempPath).catch(() => {});
     remuxInFlight.delete(streamSessionId);

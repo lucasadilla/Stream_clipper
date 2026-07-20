@@ -75,15 +75,23 @@ function mapYtDlpJson(
     typeof data.duration === "number" && data.duration > 0
       ? data.duration
       : null;
+  const liveStatus = mapYtDlpLiveStatus(data);
+  const isLiveLike = liveStatus === "live" || liveStatus === "upcoming";
+  // For live Twitch channel URLs, keep the login as sourceId so the embed
+  // opens the live channel — not yt-dlp's numeric stream id (looks like a VOD).
+  const sourceId =
+    isLiveLike && embed.twitchChannel
+      ? embed.twitchChannel
+      : (data.id ?? fallbackSourceId);
 
   return {
-    sourceId: data.id ?? fallbackSourceId,
+    sourceId,
     title: data.title ?? "Untitled stream",
     description: data.description ?? "",
     channelTitle: data.uploader ?? data.channel ?? "",
     channelId: data.uploader_id ?? data.channel_id ?? "",
     thumbnailUrl: data.thumbnail ?? "",
-    liveStatus: mapYtDlpLiveStatus(data),
+    liveStatus,
     actualStartTime: resolveStartTime(data),
     scheduledStartTime: null,
     concurrentViewers:
