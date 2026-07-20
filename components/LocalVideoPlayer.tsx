@@ -17,7 +17,7 @@ interface LocalVideoPlayerProps {
   fillContainer?: boolean;
 }
 
-/** Strip cache-bust `v=` so normal remux updates don't remount mid-playback. */
+/** Strip cache-bust `v=` so path identity stays stable across remux rewrites. */
 function mediaIdentity(src: string): string {
   try {
     const url = new URL(src, "http://local");
@@ -25,6 +25,14 @@ function mediaIdentity(src: string): string {
     return `${url.pathname}${url.search}`;
   } catch {
     return src.split("?")[0] || src;
+  }
+}
+
+function cacheVersion(src: string): string {
+  try {
+    return new URL(src, "http://local").searchParams.get("v") ?? "";
+  } catch {
+    return "";
   }
 }
 
@@ -37,6 +45,7 @@ export const LocalVideoPlayer = forwardRef<
 ) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const loadedIdentityRef = useRef<string | null>(null);
+  const loadedVersionRef = useRef<string | null>(null);
   const onTimeUpdateRef = useRef(onTimeUpdate);
   const onDurationChangeRef = useRef(onDurationChange);
   const onErrorRef = useRef(onError);
@@ -68,29 +77,44 @@ export const LocalVideoPlayer = forwardRef<
     getDuration: () => videoRef.current?.duration ?? 0,
   }));
 
-  // Remount when the media path changes. Also reload when a remux cache-bust
-  // arrives for a broken/empty first preview (common for Twitch live mkv).
+  // Remount on path change. Reload on remux `v=` change when broken, paused, or
+  // near the old end — so longer previews aren't stuck at the first remux length.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     const identity = mediaIdentity(src);
+    const version = cacheVersion(src);
     const sameFile =
       loadedIdentityRef.current === identity && Boolean(video.getAttribute("src"));
-    if (sameFile) {
+    const sameVersion = loadedVersionRef.current === version;
+
+    if (sameFile && sameVersion) {
+      if (Number.isFinite(video.duration) && video.duration > 0) {
+        onDurationChangeRef.current?.(video.duration);
+      }
+      return;
+    }
+
+    if (sameFile && !sameVersion) {
       const broken =
         Boolean(video.error) ||
         !Number.isFinite(video.duration) ||
         video.duration <= 0;
-      if (!broken) {
-        if (Number.isFinite(video.duration) && video.duration > 0) {
-          onDurationChangeRef.current?.(video.duration);
-        }
+      const nearEnd =
+        Number.isFinite(video.duration) &&
+        video.duration > 0 &&
+        video.currentTime >= video.duration - 2;
+      if (!broken && !video.paused && !nearEnd) {
+        // Keep playing the current remux; pick up the longer file next pause/seek.
+        loadedVersionRef.current = version;
         return;
       }
     }
+
     const previousTime = video.currentTime;
     const wasPaused = video.paused;
     loadedIdentityRef.current = identity;
+    loadedVersionRef.current = version;
     video.setAttribute("src", src);
     video.load();
     const restore = () => {
