@@ -13,6 +13,7 @@ import {
   resolveStoragePath,
   fileExists,
   listSourceCandidateFiles,
+  isMergedSourceFile,
 } from "@/lib/storage";
 
 const PREVIEW_FILENAME = "preview.mp4";
@@ -95,22 +96,41 @@ async function resolveReadableSeconds(filePath: string): Promise<number> {
 }
 
 /**
- * Remux the growing capture (usually .mkv) into browser-playable MP4 for preview.
+ * yt-dlp split tracks (`source.f399.mp4`) and .mkv need a finalized faststart
+ * preview. Browsers only play a short prefix of incomplete progressive MP4s.
+ * Merged `source.mp4` with audio can play directly.
+ */
+export function sourceNeedsPreviewRemux(sourceAbsolutePath: string): boolean {
+  const base = path.basename(sourceAbsolutePath);
+  if (/^preview\.mp4$/i.test(base)) return false;
+  if (/^source\.f\d+\./i.test(base)) return true;
+  const ext = path.extname(base).toLowerCase();
+  if (ext === ".mkv" || ext === ".ts") return true;
+  if (isMergedSourceFile(base) && (ext === ".mp4" || ext === ".webm" || ext === ".m4v" || ext === ".mov")) {
+    return false;
+  }
+  // Anything else (unusual extensions / partial names) — remux to be safe.
+  return true;
+}
+
+/**
+ * Remux the growing capture into browser-playable MP4 for preview.
  * When yt-dlp splits video/audio, merge both so playback stays in sync with Whisper.
  * Throttled — safe to call on every live sync tick.
- *
- * Important: do NOT truncate with a probed `-t` for single-file remux. Growing
- * captures often under-report duration (e.g. stuck at ~30 min), which produced a
- * short scrubbable preview while the live stream was hours long.
  */
 export async function syncPreviewMp4(
   streamSessionId: string,
   sourceAbsolutePath: string
 ): Promise<void> {
   if (!existsSync(sourceAbsolutePath)) return;
-
-  const ext = path.extname(sourceAbsolutePath).toLowerCase();
-  if (ext === ".mp4" || ext === ".m4v" || ext === ".webm") return;
+  if (!sourceNeedsPreviewRemux(sourceAbsolutePath)) {
+    // Still remux video-only merged files so A/V stay together in the monitor.
+    if (!(await hasAudioStream(sourceAbsolutePath).catch(() => false))) {
+      // fall through
+    } else {
+      return;
+    }
+  }
 
   const now = Date.now();
   const last = lastRemuxAt.get(streamSessionId) ?? 0;
@@ -162,10 +182,9 @@ export async function syncPreviewMp4(
     ];
 
     if (companionAudio) {
-      const audioSeconds = await resolveReadableSeconds(companionAudio);
-      const readableSeconds = Math.max(sourceSeconds, audioSeconds);
-      // Bound mux length with the better estimate — still avoid a stale short probe.
-      args.push("-i", companionAudio, "-t", String(Math.max(readableSeconds, 1)));
+      // Mux video + audio. Prefer copying all currently readable packets rather
+      // than trusting a short `-t` from a stale probe (common on growing files).
+      args.push("-i", companionAudio);
       args.push(
         "-map",
         "0:v:0?",
@@ -180,7 +199,6 @@ export async function syncPreviewMp4(
         "-shortest"
       );
     } else {
-      // Copy all packets currently readable — no `-t` from a stale probe.
       args.push("-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy");
     }
 

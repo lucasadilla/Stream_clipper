@@ -119,11 +119,14 @@ export function isLiveStatus(liveStatus: string | null | undefined): boolean {
   return liveStatus === "live" || liveStatus === "upcoming";
 }
 
-/** Browsers reliably play these in <video>; live captures are usually .mkv. */
+/** Browsers reliably play finalized progressive files in <video>.
+ * yt-dlp split tracks (`source.f399.mp4`) look like mp4 but are often
+ * incomplete/fragmented — Chrome only plays a short prefix (~30 min). */
 export function isBrowserPlayableVideoUrl(
   url: string | null | undefined
 ): boolean {
   if (!url) return false;
+  if (/source\.f\d+\.(mp4|webm|m4v)(\?|#|$)/i.test(url)) return false;
   return /\.(mp4|webm|m4v)(\?|#|$)/i.test(url);
 }
 
