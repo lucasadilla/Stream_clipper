@@ -11,6 +11,7 @@ import {
   baseYtDlpArgs,
   getYtDlpDeploymentArgs,
   resolveYtDlpInvocation,
+  detectDownloadPlatform,
 } from "@/services/youtubeDownloadService";
 
 /** Detached bestaudio capture when the primary file is video-only DASH. */
@@ -105,10 +106,11 @@ function startCompanionAudioDownload(
     if (!invocation) return;
 
     try {
+      const platform = detectDownloadPlatform(youtubeUrl);
       const args = [
         ...invocation.prefixArgs,
-        ...(await getYtDlpDeploymentArgs()),
-        ...baseYtDlpArgs(),
+        ...(await getYtDlpDeploymentArgs(platform)),
+        ...baseYtDlpArgs({ platform, url: youtubeUrl }),
         ...(options?.isLive ? ["--live-from-start"] : []),
         "-f",
         "bestaudio/best",

@@ -124,7 +124,11 @@ export async function fetchYtDlpMetadata(
   }
 
   const { stdout, stderr } = await runYtDlp(
-    [...baseYtDlpArgs(), "--dump-single-json", "--skip-download"],
+    [
+      ...baseYtDlpArgs({ url }),
+      "--dump-single-json",
+      "--skip-download",
+    ],
     url
   );
 
@@ -140,7 +144,7 @@ export async function probeYtDlpLiveStatus(
 
   const { stdout, stderr } = await runYtDlp(
     [
-      ...baseYtDlpArgs(),
+      ...baseYtDlpArgs({ url }),
       "--dump-single-json",
       "--skip-download",
       "--no-warnings",

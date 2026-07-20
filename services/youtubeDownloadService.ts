@@ -1,9 +1,15 @@
+import { existsSync } from "fs";
 import path from "path";
 import fs from "fs/promises";
 import { prisma } from "@/lib/db";
 import { runCommand, getFfmpegPath } from "@/lib/ffmpeg";
 import { probeMedia } from "@/lib/ffmpeg";
 import { toJsonValue } from "@/lib/utils";
+import {
+  parseStreamUrl,
+  readStreamEmbed,
+  type StreamPlatform,
+} from "@/lib/streamPlatform";
 import {
   getUploadDir,
   ensureDir,
@@ -18,9 +24,11 @@ export { getYtDlpPath } from "@/lib/ytDlp";
 let resolvedYtDlpInvocation: YtDlpInvocation | null = null;
 let lastYtDlpProbeError: string | null = null;
 let generatedCookiesPath: string | null = null;
+let generatedTwitchCookiesPath: string | null = null;
 let cachedVisitorData: { value: string; expiresAt: number } | null = null;
 
 const RUNTIME_COOKIES_PATH = "/tmp/youtube-cookies.txt";
+const RUNTIME_TWITCH_COOKIES_PATH = "/tmp/twitch-cookies.txt";
 const MAX_COOKIES_BYTES = 2 * 1024 * 1024;
 
 export interface YoutubeCookieStatus {
@@ -74,17 +82,73 @@ export async function getYtDlpVersion(): Promise<string | null> {
   }
 }
 
-function getFfmpegLocationDir(): string {
-  const ffmpegPath = getFfmpegPath();
-  const dir = path.dirname(ffmpegPath);
-  if (!dir || dir === "." || dir === path.parse(ffmpegPath).root) {
-    return process.cwd();
+/**
+ * Absolute ffmpeg binary for yt-dlp. Bare `FFMPEG_PATH=ffmpeg` must NOT use
+ * process.cwd() as --ffmpeg-location (that made Twitch HLS fail with
+ * "ffmpeg could not be found" while looking under /app).
+ */
+function resolveFfmpegBinaryForYtDlp(): string | null {
+  const configured = getFfmpegPath();
+  if (path.isAbsolute(configured) && existsSync(configured)) {
+    return configured;
   }
-  return dir;
+
+  const candidates =
+    process.platform === "win32"
+      ? []
+      : ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/bin/ffmpeg"];
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+
+  // Fall back to PATH lookup by omitting --ffmpeg-location.
+  return null;
+}
+
+function ffmpegLocationArgs(): string[] {
+  const binary = resolveFfmpegBinaryForYtDlp();
+  return binary ? ["--ffmpeg-location", binary] : [];
 }
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function detectDownloadPlatform(
+  url: string
+): StreamPlatform | "unknown" {
+  return parseStreamUrl(url)?.platform ?? "unknown";
+}
+
+/**
+ * For live Twitch, prefer the channel URL over /videos/:id.
+ * Concurrent VOD URLs often 403 on GQL from datacenter IPs; channel + live-from-start works.
+ */
+export function resolveStreamCaptureUrl(session: {
+  platform?: string | null;
+  youtubeUrl: string;
+  liveStatus?: string | null;
+  metadataJson?: unknown;
+}): string {
+  if ((session.platform ?? "youtube") !== "twitch") {
+    return session.youtubeUrl;
+  }
+  const isLive =
+    session.liveStatus === "live" || session.liveStatus === "upcoming";
+  if (!isLive) return session.youtubeUrl;
+
+  const embed = readStreamEmbed(session.metadataJson);
+  const channel = embed?.twitchChannel?.trim();
+  if (channel) {
+    return `https://www.twitch.tv/${channel}`;
+  }
+
+  const parsed = parseStreamUrl(session.youtubeUrl);
+  if (parsed?.embed.twitchChannel) {
+    return `https://www.twitch.tv/${parsed.embed.twitchChannel}`;
+  }
+  return session.youtubeUrl;
 }
 
 export function isTransientYtDlpError(message: string): boolean {
@@ -110,8 +174,15 @@ export function networkYtDlpArgs(): string[] {
 }
 
 export function baseYtDlpArgs(options?: {
+  /** When set, YouTube-only / Twitch-only extractor args are scoped correctly. */
+  platform?: StreamPlatform | "unknown";
+  /** Optional media URL — used to infer platform when `platform` is omitted. */
+  url?: string;
   youtubeExtractorArgs?: string | null;
 }): string[] {
+  const platform =
+    options?.platform ??
+    (options?.url ? detectDownloadPlatform(options.url) : "unknown");
   const impersonate = process.env.YT_DLP_IMPERSONATE?.trim();
   const configuredYoutubeClient = process.env.YT_DLP_YOUTUBE_CLIENT?.trim();
   const youtubeExtractorArgs =
@@ -121,27 +192,39 @@ export function baseYtDlpArgs(options?: {
         ? `player_client=${configuredYoutubeClient}`
         : null;
   const potProviderUrl = process.env.YT_DLP_POT_PROVIDER_URL?.trim();
-  return [
+  const twitchClientId = process.env.TWITCH_CLIENT_ID?.trim();
+
+  const args: string[] = [
     ...networkYtDlpArgs(),
     ...(impersonate ? ["--impersonate", impersonate] : []),
-    ...(youtubeExtractorArgs
-      ? ["--extractor-args", `youtube:${youtubeExtractorArgs}`]
-      : []),
-    ...(potProviderUrl
-      ? [
-          "--extractor-args",
-          `youtubepot-bgutilhttp:base_url=${potProviderUrl}`,
-        ]
-      : []),
+    ...ffmpegLocationArgs(),
     // Expose growing media files immediately so transcription and timeline
     // thumbnails do not wait for a multi-hour VOD download to finish.
     "--no-part",
     "--js-runtimes",
     getYtDlpJsRuntimeArg(),
     "--no-playlist",
-    "--ffmpeg-location",
-    getFfmpegLocationDir(),
   ];
+
+  // YouTube-only args — never attach to Twitch/Kick (keeps those extractors clean).
+  if (platform === "youtube" || platform === "unknown") {
+    if (youtubeExtractorArgs) {
+      args.push("--extractor-args", `youtube:${youtubeExtractorArgs}`);
+    }
+    if (potProviderUrl) {
+      args.push(
+        "--extractor-args",
+        `youtubepot-bgutilhttp:base_url=${potProviderUrl}`
+      );
+    }
+  }
+
+  // Twitch Helix app client id helps GQL metadata from servers that 403 anonymously.
+  if (platform === "twitch" && twitchClientId) {
+    args.push("--extractor-args", `twitch:client_id=${twitchClientId}`);
+  }
+
+  return args;
 }
 
 export async function getYtDlpVisitorData(): Promise<string | null> {
@@ -174,13 +257,16 @@ export async function getYtDlpVisitorData(): Promise<string | null> {
   }
 }
 
-function validateNetscapeCookies(contents: Buffer): void {
+function validateNetscapeCookies(
+  contents: Buffer,
+  label = "Cookies"
+): void {
   if (contents.byteLength === 0 || contents.byteLength > MAX_COOKIES_BYTES) {
-    throw new Error("YouTube cookies file is empty or unexpectedly large.");
+    throw new Error(`${label} file is empty or unexpectedly large.`);
   }
   const text = contents.toString("utf8");
   if (text.includes("\0")) {
-    throw new Error("YouTube cookies file is not valid text.");
+    throw new Error(`${label} file is not valid text.`);
   }
   const lines = text.split(/\r?\n/);
   const hasNetscapeHeader = lines.some((line) =>
@@ -192,37 +278,55 @@ function validateNetscapeCookies(contents: Buffer): void {
   });
   if (!hasNetscapeHeader || !hasCookieRow) {
     throw new Error(
-      "YouTube cookies must use Netscape cookies.txt format with at least one cookie."
+      `${label} must use Netscape cookies.txt format with at least one cookie.`
     );
   }
 }
 
-function decodeCookiesBase64(value: string): Buffer {
+function decodeCookiesBase64(value: string, label: string): Buffer {
   const normalized = value.replace(/\s+/g, "");
   if (!normalized || !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)) {
-    throw new Error("YT_DLP_COOKIES_B64 is not valid Base64.");
+    throw new Error(`${label} is not valid Base64.`);
   }
   const decoded = Buffer.from(normalized, "base64");
-  validateNetscapeCookies(decoded);
+  validateNetscapeCookies(decoded, label);
   return decoded;
 }
 
 async function resolveYoutubeCookiesPath(): Promise<string | null> {
   const configuredPath = process.env.YT_DLP_COOKIES_PATH?.trim();
   if (configuredPath) {
-    validateNetscapeCookies(await fs.readFile(configuredPath));
+    validateNetscapeCookies(await fs.readFile(configuredPath), "YouTube cookies");
     return configuredPath;
   }
 
   const cookiesBase64 = process.env.YT_DLP_COOKIES_B64?.trim();
   if (!cookiesBase64) return null;
   if (!generatedCookiesPath) {
-    const contents = decodeCookiesBase64(cookiesBase64);
+    const contents = decodeCookiesBase64(cookiesBase64, "YT_DLP_COOKIES_B64");
     await fs.writeFile(RUNTIME_COOKIES_PATH, contents, { mode: 0o600 });
     await fs.chmod(RUNTIME_COOKIES_PATH, 0o600);
     generatedCookiesPath = RUNTIME_COOKIES_PATH;
   }
   return generatedCookiesPath;
+}
+
+async function resolveTwitchCookiesPath(): Promise<string | null> {
+  const configuredPath = process.env.TWITCH_COOKIES_PATH?.trim();
+  if (configuredPath) {
+    validateNetscapeCookies(await fs.readFile(configuredPath), "Twitch cookies");
+    return configuredPath;
+  }
+
+  const cookiesBase64 = process.env.TWITCH_COOKIES_B64?.trim();
+  if (!cookiesBase64) return null;
+  if (!generatedTwitchCookiesPath) {
+    const contents = decodeCookiesBase64(cookiesBase64, "TWITCH_COOKIES_B64");
+    await fs.writeFile(RUNTIME_TWITCH_COOKIES_PATH, contents, { mode: 0o600 });
+    await fs.chmod(RUNTIME_TWITCH_COOKIES_PATH, 0o600);
+    generatedTwitchCookiesPath = RUNTIME_TWITCH_COOKIES_PATH;
+  }
+  return generatedTwitchCookiesPath;
 }
 
 export async function getYoutubeCookieStatus(): Promise<YoutubeCookieStatus> {
@@ -249,14 +353,25 @@ export async function getYoutubeCookieStatus(): Promise<YoutubeCookieStatus> {
   }
 }
 
-/** Optional Railway egress/auth settings for datacenter-blocked media hosts. */
-export async function getYtDlpDeploymentArgs(): Promise<string[]> {
+/** Optional Railway egress/auth settings. Cookies are platform-scoped. */
+export async function getYtDlpDeploymentArgs(
+  platform: StreamPlatform | "unknown" = "unknown"
+): Promise<string[]> {
   const args: string[] = [];
   const proxy = process.env.YT_DLP_PROXY?.trim();
   if (proxy) args.push("--proxy", proxy);
 
-  const cookiesPath = await resolveYoutubeCookiesPath();
-  if (cookiesPath) args.push("--cookies", cookiesPath);
+  if (platform === "twitch") {
+    const twitchCookies = await resolveTwitchCookiesPath();
+    if (twitchCookies) args.push("--cookies", twitchCookies);
+    return args;
+  }
+
+  // YouTube (and unknown callers) keep the existing YouTube cookie path.
+  if (platform === "youtube" || platform === "unknown") {
+    const cookiesPath = await resolveYoutubeCookiesPath();
+    if (cookiesPath) args.push("--cookies", cookiesPath);
+  }
 
   return args;
 }
@@ -267,10 +382,21 @@ export type YtDlpErrorKind =
   | "members_only"
   | "age_restricted"
   | "unavailable"
+  | "twitch_forbidden"
+  | "ffmpeg_missing"
   | "unknown";
 
 export function classifyYtDlpError(error: unknown): YtDlpErrorKind {
   const message = error instanceof Error ? error.message : String(error);
+  if (/ffmpeg could not be found|ffmpeg is not installed/i.test(message)) {
+    return "ffmpeg_missing";
+  }
+  if (
+    /twitch/i.test(message) &&
+    /HTTP Error 403|Forbidden|Unable to download JSON metadata/i.test(message)
+  ) {
+    return "twitch_forbidden";
+  }
   if (/members[- ]only|join this channel|channel(?:'s)? members|channel members/i.test(message)) {
     return "members_only";
   }
@@ -299,6 +425,17 @@ export function formatYtDlpUserError(error: unknown): string {
       return "This age-restricted video requires authorized account cookies, or an authorized VOD upload.";
     case "unavailable":
       return "This stream has ended or is unavailable. Retry with its replay URL, or upload the VOD.";
+    case "twitch_forbidden":
+      return (
+        "Twitch blocked metadata from this server (403). Set TWITCH_CLIENT_ID " +
+        "(and optionally TWITCH_COOKIES_B64 from a logged-in browser), or use a proxy via YT_DLP_PROXY. " +
+        "For live streams, paste the channel URL (twitch.tv/name) instead of a /videos/ link."
+      );
+    case "ffmpeg_missing":
+      return (
+        "FFmpeg was not found for Twitch HLS remux. Redeploy the latest image, " +
+        "or set FFMPEG_PATH to the absolute ffmpeg binary path."
+      );
     default:
       return error instanceof Error
         ? error.message
@@ -311,7 +448,7 @@ export function formatYtDlpUserError(error: unknown): string {
 export async function runYtDlp(
   extraArgs: string[],
   url: string,
-  options?: { retries?: number }
+  options?: { retries?: number; platform?: StreamPlatform | "unknown" }
 ): Promise<{ stdout: string; stderr: string }> {
   const invocation = await resolveYtDlpInvocation();
   if (!invocation) {
@@ -321,12 +458,13 @@ export async function runYtDlp(
     );
   }
 
+  const platform = options?.platform ?? detectDownloadPlatform(url);
   const retries = Math.max(1, options?.retries ?? 3);
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
-      const deploymentArgs = await getYtDlpDeploymentArgs();
+      const deploymentArgs = await getYtDlpDeploymentArgs(platform);
       return await runCommand(invocation.command, [
         ...invocation.prefixArgs,
         ...deploymentArgs,
@@ -447,16 +585,18 @@ export async function downloadSourceFromYouTube(streamSessionId: string) {
   await ensureDir(uploadDir);
 
   const outputPath = path.join(uploadDir, "source.mp4");
+  const captureUrl = resolveStreamCaptureUrl(session);
+  const platform = detectDownloadPlatform(captureUrl);
 
   await runYtDlpWithFormatFallback(
     [
-      ...baseYtDlpArgs(),
+      ...baseYtDlpArgs({ platform, url: captureUrl }),
       "-f",
       sourceFormatChains()[0]!,
       "-o",
       outputPath,
     ],
-    session.youtubeUrl
+    captureUrl
   );
 
   // yt-dlp may write source.mp4 or source.f140.m4a etc. — find the output file
@@ -531,10 +671,11 @@ export async function downloadClipSegmentFromStream(
   }
 
   const section = `*${startTime}-${endTime}`;
+  const platform = detectDownloadPlatform(streamUrl);
 
   await runYtDlpWithFormatFallback(
     [
-      ...baseYtDlpArgs(),
+      ...baseYtDlpArgs({ platform, url: streamUrl }),
       ...(options?.liveFromStart ? ["--live-from-start"] : []),
       "--download-sections",
       section,

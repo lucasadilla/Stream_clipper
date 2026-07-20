@@ -20,6 +20,8 @@ import {
   getYtDlpVisitorData,
   resolveYtDlpInvocation,
   formatYtDlpUserError,
+  resolveStreamCaptureUrl,
+  detectDownloadPlatform,
 } from "@/services/youtubeDownloadService";
 
 function liveFormat(): string {
@@ -254,13 +256,15 @@ async function startLiveRecordingAttempt(
   const uploadDir = getUploadDir(streamSessionId);
   await ensureDir(uploadDir);
   const outputPath = path.join(uploadDir, "source.mkv");
+  const captureUrl = resolveStreamCaptureUrl(session);
+  const platform = detectDownloadPlatform(captureUrl);
 
   const args = [
     ...invocation.prefixArgs,
-    ...(await getYtDlpDeploymentArgs()),
+    ...(await getYtDlpDeploymentArgs(platform)),
     ...(youtubeExtractorArgs === undefined
-      ? baseYtDlpArgs()
-      : baseYtDlpArgs({ youtubeExtractorArgs })),
+      ? baseYtDlpArgs({ platform, url: captureUrl })
+      : baseYtDlpArgs({ platform, url: captureUrl, youtubeExtractorArgs })),
     "--live-from-start",
     "-f",
     liveFormat(),
@@ -269,7 +273,7 @@ async function startLiveRecordingAttempt(
     "--no-part",
     "-o",
     outputPath,
-    session.youtubeUrl,
+    captureUrl,
   ];
 
   const proc = spawn(invocation.command, args, {
@@ -296,7 +300,7 @@ async function startLiveRecordingAttempt(
     const { startCompanionAudioForSession } = await import(
       "@/services/companionAudioService"
     );
-    startCompanionAudioForSession(streamSessionId, session.youtubeUrl, {
+    startCompanionAudioForSession(streamSessionId, captureUrl, {
       isLive: true,
     });
   } catch {
@@ -639,9 +643,14 @@ async function acquireSourceMediaOnce(streamSessionId: string) {
     const { startCompanionAudioForSession } = await import(
       "@/services/companionAudioService"
     );
-    startCompanionAudioForSession(streamSessionId, session.youtubeUrl, {
-      isLive: false,
-    });
+    const { resolveStreamCaptureUrl } = await import(
+      "@/services/youtubeDownloadService"
+    );
+    startCompanionAudioForSession(
+      streamSessionId,
+      resolveStreamCaptureUrl(session),
+      { isLive: false }
+    );
   } catch {
     // non-fatal
   }
