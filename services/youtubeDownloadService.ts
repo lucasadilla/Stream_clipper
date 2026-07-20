@@ -192,7 +192,9 @@ export function baseYtDlpArgs(options?: {
         ? `player_client=${configuredYoutubeClient}`
         : null;
   const potProviderUrl = process.env.YT_DLP_POT_PROVIDER_URL?.trim();
-  const twitchClientId = process.env.TWITCH_CLIENT_ID?.trim();
+  // GQL web/console client id only — NOT the Helix Developer Console app id.
+  // Passing TWITCH_CLIENT_ID (Helix) here makes gql.twitch.tv return HTTP 400.
+  const twitchGqlClientId = process.env.YT_DLP_TWITCH_CLIENT_ID?.trim();
 
   const args: string[] = [
     ...networkYtDlpArgs(),
@@ -219,9 +221,8 @@ export function baseYtDlpArgs(options?: {
     }
   }
 
-  // Twitch Helix app client id helps GQL metadata from servers that 403 anonymously.
-  if (platform === "twitch" && twitchClientId) {
-    args.push("--extractor-args", `twitch:client_id=${twitchClientId}`);
+  if (platform === "twitch" && twitchGqlClientId) {
+    args.push("--extractor-args", `twitch:client_id=${twitchGqlClientId}`);
   }
 
   return args;
@@ -393,7 +394,9 @@ export function classifyYtDlpError(error: unknown): YtDlpErrorKind {
   }
   if (
     /twitch/i.test(message) &&
-    /HTTP Error 403|Forbidden|Unable to download JSON metadata/i.test(message)
+    /HTTP Error 40[03]|Forbidden|Bad Request|Unable to download JSON metadata/i.test(
+      message
+    )
   ) {
     return "twitch_forbidden";
   }
@@ -427,9 +430,9 @@ export function formatYtDlpUserError(error: unknown): string {
       return "This stream has ended or is unavailable. Retry with its replay URL, or upload the VOD.";
     case "twitch_forbidden":
       return (
-        "Twitch blocked metadata from this server (403). Set TWITCH_CLIENT_ID " +
-        "(and optionally TWITCH_COOKIES_B64 from a logged-in browser), or use a proxy via YT_DLP_PROXY. " +
-        "For live streams, paste the channel URL (twitch.tv/name) instead of a /videos/ link."
+        "Twitch blocked stream metadata from this server. Keep TWITCH_CLIENT_ID for Helix only " +
+        "(do not use it as a yt-dlp client id). Add TWITCH_COOKIES_B64 from a logged-in browser, " +
+        "or set YT_DLP_PROXY. For live streams, paste the channel URL (twitch.tv/name)."
       );
     case "ffmpeg_missing":
       return (
