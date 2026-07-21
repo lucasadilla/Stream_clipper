@@ -46,7 +46,7 @@ export async function findExistingAudioSource(
 export async function ensureCompanionAudioTrack(
   streamSessionId: string,
   youtubeUrl: string,
-  options?: { isLive?: boolean }
+  options?: { isLive?: boolean; liveFromStart?: boolean }
 ): Promise<string | null> {
   const existing = await findExistingAudioSource(streamSessionId);
   if (existing) return existing;
@@ -57,6 +57,9 @@ export async function ensureCompanionAudioTrack(
 
   startCompanionAudioDownload(streamSessionId, youtubeUrl, outputPath, {
     isLive: options?.isLive,
+    // Transcription retries should not require VOD-from-start (Twitch often
+    // has none). Explicit liveFromStart from live capture still wins.
+    liveFromStart: options?.liveFromStart ?? false,
   });
 
   // Growing / mid-download file may not probe yet — next poll picks it up.
@@ -73,7 +76,7 @@ export async function ensureCompanionAudioTrack(
 export function startCompanionAudioForSession(
   streamSessionId: string,
   youtubeUrl: string,
-  options?: { isLive?: boolean }
+  options?: { isLive?: boolean; liveFromStart?: boolean }
 ): void {
   const outputPath = path.join(
     getUploadDir(streamSessionId),
@@ -82,6 +85,7 @@ export function startCompanionAudioForSession(
   void ensureDir(getUploadDir(streamSessionId)).then(() => {
     startCompanionAudioDownload(streamSessionId, youtubeUrl, outputPath, {
       isLive: options?.isLive ?? true,
+      liveFromStart: options?.liveFromStart,
     });
   });
 }
@@ -90,7 +94,7 @@ function startCompanionAudioDownload(
   streamSessionId: string,
   youtubeUrl: string,
   outputPath: string,
-  options?: { isLive?: boolean }
+  options?: { isLive?: boolean; liveFromStart?: boolean }
 ): void {
   const existingProc = activeCompanionAudio.get(streamSessionId);
   if (existingProc && !existingProc.killed) return;
@@ -107,11 +111,16 @@ function startCompanionAudioDownload(
 
     try {
       const platform = detectDownloadPlatform(youtubeUrl);
+      const liveFromStart = options?.liveFromStart ?? Boolean(options?.isLive);
       const args = [
         ...invocation.prefixArgs,
         ...(await getYtDlpDeploymentArgs(platform)),
         ...baseYtDlpArgs({ platform, url: youtubeUrl }),
-        ...(options?.isLive ? ["--live-from-start"] : []),
+        ...(options?.isLive
+          ? liveFromStart
+            ? ["--live-from-start"]
+            : ["--no-live-from-start"]
+          : []),
         "-f",
         "bestaudio/best",
         "--no-part",

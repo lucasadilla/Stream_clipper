@@ -227,13 +227,20 @@ async function upsertSourceFromFile(
 }
 
 /**
- * Start recording a live stream from the beginning (or continue).
- * Uses mkv for safer partial-file reads while recording.
+ * Start recording a live stream from the beginning when possible.
+ * Twitch sometimes has no associated VOD / live-from-start formats — then we
+ * fall back to capturing from the live edge (--no-live-from-start).
  */
 async function startLiveRecordingAttempt(
   streamSessionId: string,
-  youtubeExtractorArgs?: string | null
+  options?: {
+    youtubeExtractorArgs?: string | null;
+    liveFromStart?: boolean;
+  }
 ) {
+  const youtubeExtractorArgs = options?.youtubeExtractorArgs;
+  const liveFromStart = options?.liveFromStart ?? true;
+
   const session = await prisma.streamSession.findUnique({
     where: { id: streamSessionId },
     include: { liveRecording: true, sourceMedia: { take: 1 } },
@@ -266,7 +273,7 @@ async function startLiveRecordingAttempt(
     ...(youtubeExtractorArgs === undefined
       ? baseYtDlpArgs({ platform, url: captureUrl })
       : baseYtDlpArgs({ platform, url: captureUrl, youtubeExtractorArgs })),
-    "--live-from-start",
+    liveFromStart ? "--live-from-start" : "--no-live-from-start",
     "-f",
     liveFormat(),
     "--merge-output-format",
@@ -303,6 +310,7 @@ async function startLiveRecordingAttempt(
     );
     startCompanionAudioForSession(streamSessionId, captureUrl, {
       isLive: true,
+      liveFromStart,
     });
   } catch {
     // non-fatal — transcription path will retry
@@ -410,10 +418,38 @@ function isYouTubeAccessBlock(error: unknown): boolean {
   );
 }
 
+/** Twitch often has no associated VOD, so --live-from-start cannot work. */
+function isLiveFromStartUnavailable(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no formats that can be downloaded from the start|Unable to extract the VOD associated|--live-from-start is passed/i.test(
+    message
+  );
+}
+
 export async function startLiveRecording(streamSessionId: string) {
   try {
-    return await startLiveRecordingAttempt(streamSessionId);
+    return await startLiveRecordingAttempt(streamSessionId, {
+      liveFromStart: true,
+    });
   } catch (initialError) {
+    if (isLiveFromStartUnavailable(initialError)) {
+      try {
+        const { clearCompanionAudioState } = await import(
+          "@/services/companionAudioService"
+        );
+        clearCompanionAudioState(streamSessionId);
+      } catch {
+        // ignore
+      }
+      activeRecordingErrors.delete(streamSessionId);
+      console.warn(
+        `[source] live-from-start unavailable for ${streamSessionId}; capturing from live edge`
+      );
+      return await startLiveRecordingAttempt(streamSessionId, {
+        liveFromStart: false,
+      });
+    }
+
     if (!isYouTubeAccessBlock(initialError)) throw initialError;
 
     const visitorData = await getYtDlpVisitorData();
@@ -428,11 +464,25 @@ export async function startLiveRecording(streamSessionId: string) {
 
     for (const extractorArgs of strategies) {
       try {
-        return await startLiveRecordingAttempt(
-          streamSessionId,
-          extractorArgs
-        );
+        return await startLiveRecordingAttempt(streamSessionId, {
+          youtubeExtractorArgs: extractorArgs,
+          liveFromStart: true,
+        });
       } catch (error) {
+        if (isLiveFromStartUnavailable(error)) {
+          try {
+            const { clearCompanionAudioState } = await import(
+              "@/services/companionAudioService"
+            );
+            clearCompanionAudioState(streamSessionId);
+          } catch {
+            // ignore
+          }
+          return await startLiveRecordingAttempt(streamSessionId, {
+            youtubeExtractorArgs: extractorArgs,
+            liveFromStart: false,
+          });
+        }
         lastError = error;
       }
     }
