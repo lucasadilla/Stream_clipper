@@ -47,8 +47,9 @@ const RECORDING_STARTUP_TIMEOUT_MS = 60_000;
 const RECORDING_STARTUP_CHECK_MS = 8_000;
 
 function estimateDurationFromFileSize(sizeBytes: number): number {
-  // Conservative ~300 KB/s for live 1080p-ish capture.
-  return sizeBytes / (300 * 1024);
+  // Conservative ~80 KB/s so we over-estimate duration on growing captures
+  // (under-estimates previously capped Twitch previews around ~1 hour).
+  return sizeBytes / (80 * 1024);
 }
 
 function recordingElapsedSeconds(startedAt?: Date | null): number {

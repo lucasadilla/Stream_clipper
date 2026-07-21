@@ -822,22 +822,6 @@ export function LiveTimeline({
     setDragging(mode);
   }
 
-  function handleVideoTrackPointerDown(e: React.PointerEvent) {
-    if (dragging) return;
-    const t = snapTimelineTime(timeFromVideoTrack(e.clientX), 1 / 30);
-    // Click/drag on filmstrip moves the playhead. Hold Shift to draw a range.
-    pauseTransport();
-    currentTimeRef.current = t;
-    setScrubPreview(t);
-    onScrub(t);
-    if (e.shiftKey) {
-      beginDrag("range", e, t);
-      onSelectionChange(clampSelection(t, t + MIN_CLIP_SECONDS, maxTime));
-      return;
-    }
-    beginDrag("scrub", e);
-  }
-
   /** Double-click drops the clip selection at the cursor, keeping its length. */
   function placeClipSelectionAt(timeSeconds: number) {
     const t = snapTimelineTime(timeSeconds, 1 / 30);
@@ -857,9 +841,37 @@ export function LiveTimeline({
     currentTimeRef.current = next.start;
     setScrubPreview(next.start);
     onScrub(next.start);
+    setDragging(null);
+  }
+
+  function handleVideoTrackPointerDown(e: React.PointerEvent) {
+    if (dragging) return;
+    const t = snapTimelineTime(timeFromVideoTrack(e.clientX), 1 / 30);
+
+    // Detect double-click on pointerdown. beginDrag()'s preventDefault would
+    // otherwise suppress the browser dblclick event entirely.
+    if (e.button === 0 && e.detail >= 2 && !e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      placeClipSelectionAt(t);
+      return;
+    }
+
+    // Click/drag on filmstrip moves the playhead. Hold Shift to draw a range.
+    pauseTransport();
+    currentTimeRef.current = t;
+    setScrubPreview(t);
+    onScrub(t);
+    if (e.shiftKey) {
+      beginDrag("range", e, t);
+      onSelectionChange(clampSelection(t, t + MIN_CLIP_SECONDS, maxTime));
+      return;
+    }
+    beginDrag("scrub", e);
   }
 
   function handleVideoTrackDoubleClick(e: React.MouseEvent) {
+    // Fallback if a browser still emits dblclick (e.g. no prior preventDefault).
     e.preventDefault();
     e.stopPropagation();
     placeClipSelectionAt(timeFromVideoTrack(e.clientX));
@@ -1371,6 +1383,12 @@ export function LiveTimeline({
               className="relative h-7 bg-[#030403] border-b border-[var(--color-card-border)] cursor-ew-resize shrink-0"
               onPointerDown={(e) => {
                 const t = snapTimelineTime(timeFromRef(e.clientX, rulerRef), 1 / 30);
+                if (e.button === 0 && e.detail >= 2 && !e.shiftKey) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  placeClipSelectionAt(t);
+                  return;
+                }
                 pauseTransport();
                 currentTimeRef.current = t;
                 setScrubPreview(t);
@@ -1592,7 +1610,15 @@ export function LiveTimeline({
                   left: `${selStartPct}%`,
                   width: `${Math.max(selWidthPct, 0.2)}%`,
                 }}
-                onPointerDown={(e) => e.stopPropagation()}
+                onPointerDown={(e) => {
+                  if (e.button === 0 && e.detail >= 2 && !e.shiftKey) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    placeClipSelectionAt(timeFromVideoTrack(e.clientX));
+                    return;
+                  }
+                  e.stopPropagation();
+                }}
                 onDoubleClick={handleVideoTrackDoubleClick}
               >
                 <div className="pointer-events-none absolute inset-x-6 top-1 flex items-center gap-1.5">
@@ -1605,15 +1631,39 @@ export function LiveTimeline({
                 </div>
                 <div
                   className="absolute left-0 top-0 bottom-0 w-2.5 bg-[var(--color-accent)] cursor-ew-resize z-10"
-                  onPointerDown={(e) => beginDrag("start", e)}
+                  onPointerDown={(e) => {
+                    if (e.button === 0 && e.detail >= 2) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      placeClipSelectionAt(timeFromVideoTrack(e.clientX));
+                      return;
+                    }
+                    beginDrag("start", e);
+                  }}
                 />
                 <div
                   className="absolute inset-x-2.5 inset-y-0 cursor-grab active:cursor-grabbing"
-                  onPointerDown={(e) => beginDrag("move", e)}
+                  onPointerDown={(e) => {
+                    if (e.button === 0 && e.detail >= 2) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      placeClipSelectionAt(timeFromVideoTrack(e.clientX));
+                      return;
+                    }
+                    beginDrag("move", e);
+                  }}
                 />
                 <div
                   className="absolute right-0 top-0 bottom-0 w-2.5 bg-[var(--color-accent)] cursor-ew-resize z-10"
-                  onPointerDown={(e) => beginDrag("end", e)}
+                  onPointerDown={(e) => {
+                    if (e.button === 0 && e.detail >= 2) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      placeClipSelectionAt(timeFromVideoTrack(e.clientX));
+                      return;
+                    }
+                    beginDrag("end", e);
+                  }}
                 />
               </div>
 
