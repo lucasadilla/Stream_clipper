@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { SiteLogo } from "@/components/layout/SiteLogo";
+import { cn } from "@/lib/cn";
 
 interface EditorHeaderProps {
   title?: string | null;
@@ -10,6 +11,17 @@ interface EditorHeaderProps {
   onDelete?: () => void;
   chatVisible?: boolean;
   onToggleChat?: () => void;
+}
+
+function formatLiveClock(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) {
+    return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 export function EditorHeader({
@@ -23,57 +35,69 @@ export function EditorHeader({
   onToggleChat,
 }: EditorHeaderProps) {
   return (
-    <header className="flex h-10 shrink-0 items-center justify-between gap-3 border-b border-[var(--color-card-border)] bg-[#020302] px-3 sm:px-4">
-      <div className="flex min-w-0 items-center gap-3">
-        <SiteLogo showText={false} />
-        <div className="hidden h-4 w-px bg-[var(--color-card-border)] sm:block" />
-        <h1 className="truncate text-xs font-semibold text-[var(--color-foreground)]/90">
-          {title ?? "Editor"}
-        </h1>
-      </div>
+    <header className="editor-header shrink-0 border-b border-[#21301f] bg-[#020302]">
+      <div className="mx-auto flex h-[var(--site-header-height)] w-full max-w-[1440px] items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
+        <div className="flex min-w-0 items-center gap-4 sm:gap-5">
+          <SiteLogo />
+          <div className="hidden h-10 w-px bg-[#243524] sm:block" />
+          <div className="min-w-0">
+            <p className="hidden text-[11px] font-medium uppercase tracking-[0.16em] text-white/45 sm:block">
+              Editor
+            </p>
+            <h1 className="truncate font-[var(--font-display)] text-lg leading-tight text-[#F1EFE7] sm:text-xl">
+              {title ?? "Untitled session"}
+            </h1>
+          </div>
+        </div>
 
-      <div className="flex shrink-0 items-center gap-2">
-        {storageLabel && storageLabel !== "0 B" && (
-          <span className="hidden font-mono text-[10px] text-[var(--color-muted)] sm:inline">
-            {storageLabel}
-          </span>
-        )}
-        {onToggleChat && (
-          <button
-            type="button"
-            onClick={onToggleChat}
-            aria-pressed={chatVisible}
-            className={`border px-2 py-1 text-[10px] uppercase tracking-[0.12em] transition-colors ${
-              chatVisible
-                ? "border-[var(--color-accent)]/50 text-[var(--color-accent)]"
-                : "border-[var(--color-card-border)] text-[var(--color-muted)] hover:border-[var(--color-accent)]/40 hover:text-white"
-            }`}
+        <div className="flex shrink-0 items-center gap-2 sm:gap-3">
+          {storageLabel && storageLabel !== "0 B" && (
+            <span className="hidden rounded-full border border-[#243524] bg-[#0c100c] px-4 py-2 font-mono text-xs text-white/55 lg:inline">
+              {storageLabel}
+            </span>
+          )}
+
+          {isLive && (
+            <span className="inline-flex h-12 items-center gap-2 rounded-full border border-red-500/35 bg-red-500/10 px-4 font-mono text-sm font-semibold text-[#ff8f8f] sm:h-14 sm:px-5">
+              <span className="h-2.5 w-2.5 rounded-full bg-red-500 animate-pulse" />
+              LIVE {formatLiveClock(recordedSeconds)}
+            </span>
+          )}
+
+          {onToggleChat && (
+            <button
+              type="button"
+              onClick={onToggleChat}
+              aria-pressed={chatVisible}
+              className={cn(
+                "hidden h-12 items-center rounded-lg border px-5 text-sm font-semibold transition-colors sm:inline-flex sm:h-14 sm:px-6",
+                chatVisible
+                  ? "border-[var(--color-accent)]/55 bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
+                  : "border-[#30462d] bg-[#070a07] text-white/75 hover:border-[var(--color-accent)]/50 hover:text-[var(--color-accent)]"
+              )}
+            >
+              Chat
+            </button>
+          )}
+
+          {onDelete && (
+            <button
+              type="button"
+              onClick={onDelete}
+              disabled={deleting}
+              className="hidden h-12 items-center rounded-lg border border-[#30462d] bg-[#070a07] px-5 text-sm font-semibold text-white/70 transition-colors hover:border-red-500/50 hover:text-red-400 disabled:opacity-50 sm:inline-flex sm:h-14 sm:px-6"
+            >
+              {deleting ? "Deleting…" : "Delete"}
+            </button>
+          )}
+
+          <Link
+            href="/"
+            className="inline-flex h-12 items-center rounded-lg bg-[var(--color-accent)] px-5 text-sm font-semibold text-[#071006] transition-colors hover:bg-[var(--color-accent-hover)] sm:h-14 sm:px-7"
           >
-            Chat
-          </button>
-        )}
-        {onDelete && (
-          <button
-            type="button"
-            onClick={onDelete}
-            disabled={deleting}
-            className="border border-[var(--color-card-border)] px-2 py-1 text-[10px] text-[var(--color-muted)] transition-colors hover:border-red-500/50 hover:text-red-400 disabled:opacity-50"
-          >
-            {deleting ? "Deleting…" : "Delete"}
-          </button>
-        )}
-        {isLive && (
-          <span className="flex items-center gap-1.5 font-mono text-[10px] text-[#ff6b6b]">
-            <span className="h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse" />
-            LIVE {Math.floor(recordedSeconds)}s
-          </span>
-        )}
-        <Link
-          href="/"
-          className="hidden text-[10px] uppercase tracking-[0.12em] text-[var(--color-muted)] transition-colors hover:text-white sm:inline"
-        >
-          Home
-        </Link>
+            Home
+          </Link>
+        </div>
       </div>
     </header>
   );

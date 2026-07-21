@@ -838,6 +838,33 @@ export function LiveTimeline({
     beginDrag("scrub", e);
   }
 
+  /** Double-click drops the clip selection at the cursor, keeping its length. */
+  function placeClipSelectionAt(timeSeconds: number) {
+    const t = snapTimelineTime(timeSeconds, 1 / 30);
+    const currentWidth = selection.end - selection.start;
+    const width = Math.max(
+      MIN_CLIP_SECONDS,
+      Math.min(
+        MAX_CLIP_SECONDS,
+        Number.isFinite(currentWidth) && currentWidth > 0
+          ? currentWidth
+          : LIVE_SEGMENT_SECONDS
+      )
+    );
+    const next = clampSelection(t, t + width, maxTime);
+    onSelectionChange(next);
+    pauseTransport();
+    currentTimeRef.current = next.start;
+    setScrubPreview(next.start);
+    onScrub(next.start);
+  }
+
+  function handleVideoTrackDoubleClick(e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    placeClipSelectionAt(timeFromVideoTrack(e.clientX));
+  }
+
   function setInPoint() {
     onSelectionChange(
       clampSelection(
@@ -1350,6 +1377,11 @@ export function LiveTimeline({
                 onScrub(t);
                 beginDrag("scrub", e);
               }}
+              onDoubleClick={(e) => {
+                e.preventDefault();
+                placeClipSelectionAt(timeFromRef(e.clientX, rulerRef));
+              }}
+              title="Double-click to place clip selection here"
             >
               {rulerTicks.map((t) => (
                 <div
@@ -1413,6 +1445,8 @@ export function LiveTimeline({
                 className="relative cursor-crosshair border-b border-[var(--color-card-border)] bg-[#020302]"
                 style={VIDEO_TRACK_STYLE}
                 onPointerDown={handleVideoTrackPointerDown}
+                onDoubleClick={handleVideoTrackDoubleClick}
+                title="Double-click to place clip selection here"
               >
               {/* Filmstrip — stretch each frame to the next (sparse OK) */}
               <div className="absolute inset-0 pointer-events-none">
@@ -1559,6 +1593,7 @@ export function LiveTimeline({
                   width: `${Math.max(selWidthPct, 0.2)}%`,
                 }}
                 onPointerDown={(e) => e.stopPropagation()}
+                onDoubleClick={handleVideoTrackDoubleClick}
               >
                 <div className="pointer-events-none absolute inset-x-6 top-1 flex items-center gap-1.5">
                   <span className="rounded bg-[#020302]/85 px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wide text-[var(--color-accent)]">
