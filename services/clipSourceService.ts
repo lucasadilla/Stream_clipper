@@ -22,6 +22,7 @@ import {
 import {
   downloadClipSegmentFromStream,
   isYtDlpAvailable,
+  resolveStreamCaptureUrl,
 } from "@/services/youtubeDownloadService";
 import { getPreviewMp4Path } from "@/services/previewVideoService";
 import {
@@ -627,7 +628,8 @@ export async function ensureClipSourceForRender(
     );
   }
 
-  const streamUrl = session.youtubeUrl;
+  const streamUrl =
+    resolveStreamCaptureUrl(session) || session.youtubeUrl;
   if (!streamUrl) {
     throw new Error("Session has no stream URL.");
   }
@@ -643,9 +645,10 @@ export async function ensureClipSourceForRender(
 
   if (!existsSync(absolutePath)) {
     const fetchLiveFromStart =
-      session.liveStatus === "live" ||
-      session.liveStatus === "upcoming" ||
-      isActivelyRecordingLive(session);
+      session.platform !== "kick" &&
+      (session.liveStatus === "live" ||
+        session.liveStatus === "upcoming" ||
+        isActivelyRecordingLive(session));
 
     await downloadClipSegmentFromStream(
       streamUrl,

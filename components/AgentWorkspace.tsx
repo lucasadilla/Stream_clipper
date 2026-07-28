@@ -5,11 +5,14 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import posthog from "posthog-js";
 import { EditorHeader } from "@/components/layout/EditorHeader";
-import { CaptionAppearancePanel } from "@/components/CaptionAppearancePanel";
 import {
   ClipSuggestionCard,
   type ClipSuggestionData,
 } from "@/components/ClipSuggestionCard";
+import { AgentClipPickGrid } from "@/components/agent/AgentClipPickGrid";
+import { AgentLookPresetStep } from "@/components/agent/AgentLookPresetStep";
+import { AgentClipEditor } from "@/components/agent/AgentClipEditor";
+import { AgentCadenceChooser } from "@/components/agent/AgentCadenceChooser";
 import { fetchJson } from "@/lib/apiClient";
 import { formatDuration, formatSeconds } from "@/lib/time";
 import {
@@ -34,17 +37,42 @@ import {
   PromptInputActions,
   PromptInputTextarea,
 } from "@/components/ui/prompt-input";
-import { ScrollButton } from "@/components/ui/scroll-button";
 import { Button } from "@/components/ui/button";
 import { ArrowUp } from "lucide-react";
+import {
+  DEFAULT_AGENT_WIZARD_STATE,
+  LIVE_NOW_ROLL_SECONDS,
+  LIVE_NOW_SUGGESTION_CAP,
+  readAgentWizardState,
+  type AgentCadence,
+  type AgentWizardState,
+  type AgentWizardStep,
+} from "@/lib/agentWizard";
+import {
+  getContentLookPreset,
+  type ContentLookPresetId,
+} from "@/lib/contentLookPresets";
+import {
+  defaultVerticalLayoutSelection,
+  type VerticalLayoutSelection,
+} from "@/components/VerticalLayoutPicker";
+import { clipDownloadUrl } from "@/lib/downloadUrls";
+import { triggerFileDownload } from "@/lib/clientDownload";
 
 interface AgentSessionData {
   id: string;
   title?: string | null;
   liveStatus?: string | null;
   storageLabel?: string;
+  metadataJson?: unknown;
+  videoDurationSeconds?: number;
   liveRecording?: { status: string; recordedSeconds: number } | null;
-  sourceMedia?: Array<{ durationSeconds?: number | null }>;
+  sourceMedia?: Array<{
+    durationSeconds?: number | null;
+    previewVideoUrl?: string | null;
+    sourceVideoUrl?: string | null;
+    sourceIsPlayableMp4?: boolean;
+  }>;
   clipSuggestions?: ClipSuggestionData[];
 }
 
@@ -55,15 +83,33 @@ type ChatTurn =
       role: "assistant";
       text: string;
       clip?: ClipSuggestionData | null;
-      renderJobId?: string | null;
       error?: boolean;
     };
 
 const MIN_TRANSCRIPT_SECONDS = 45;
 const MIN_SEARCHABLE_CHUNKS = 3;
 
+const STEP_LABELS: Record<AgentWizardStep, string> = {
+  transcribing: "Transcribing",
+  pick: "Pick clips",
+  look: "Look",
+  edit: "Edit",
+  export: "Export",
+  done: "Done",
+};
+
 interface AgentWorkspaceProps {
   sessionId: string;
+}
+
+function withThumbnails(
+  sessionId: string,
+  clips: ClipSuggestionData[]
+): Array<ClipSuggestionData & { thumbnailUrl: string }> {
+  return clips.map((clip) => ({
+    ...clip,
+    thumbnailUrl: `/api/storage/frames/${sessionId}/clip_${clip.id}.jpg?inline=1`,
+  }));
 }
 
 export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
@@ -80,15 +126,49 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   const [transcribedSeconds, setTranscribedSeconds] = useState(0);
   const [searchableChunks, setSearchableChunks] = useState(0);
   const [clips, setClips] = useState<ClipSuggestionData[]>([]);
+  const [wizard, setWizard] = useState<AgentWizardState>({
+    ...DEFAULT_AGENT_WIZARD_STATE,
+  });
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [suggesting, setSuggesting] = useState(false);
+  const [getMoreLoading, setGetMoreLoading] = useState(false);
+  const [analyzingFace, setAnalyzingFace] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportDoneUrl, setExportDoneUrl] = useState<string | null>(null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [prompt, setPrompt] = useState("");
   const [sending, setSending] = useState(false);
+  const [showFindChat, setShowFindChat] = useState(false);
+  const [newClipNotice, setNewClipNotice] = useState(false);
   const [captionAppearance, setCaptionAppearance] = useState<CaptionAppearance>(
     readCaptionAppearancePreference
   );
-  const [includeCaptions, setIncludeCaptions] = useState(true);
   const sourceStarted = useRef(false);
   const transcribeInFlight = useRef(false);
+  const suggestStarted = useRef(false);
+  const rollingInFlight = useRef(false);
+
+  const persistWizard = useCallback(
+    async (patch: Partial<AgentWizardState>) => {
+      const { ok, data } = await fetchJson<{
+        wizard?: AgentWizardState;
+        error?: string;
+      }>(`/api/sessions/${sessionId}/agent-wizard`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (ok && data.wizard) {
+        setWizard(data.wizard);
+        return data.wizard;
+      }
+      setWizard((prev) => ({ ...prev, ...patch }));
+      return null;
+    },
+    [sessionId]
+  );
 
   const loadSession = useCallback(async () => {
     const { ok, data } = await fetchJson<{
@@ -101,6 +181,11 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     setSession(data.session);
     if (data.session.clipSuggestions?.length) {
       setClips(data.session.clipSuggestions);
+    }
+    const nextWizard = readAgentWizardState(data.session.metadataJson);
+    setWizard(nextWizard);
+    if (nextWizard.selectedClipIds.length) {
+      setSelectedIds(new Set(nextWizard.selectedClipIds));
     }
   }, [sessionId]);
 
@@ -145,20 +230,122 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       Math.max(
         session?.liveRecording?.recordedSeconds ?? 0,
         session?.sourceMedia?.[0]?.durationSeconds ?? 0,
+        session?.videoDurationSeconds ?? 0,
         0
       ),
     [session]
   );
 
+  const playbackUrl = useMemo(() => {
+    const media = session?.sourceMedia?.[0];
+    return (
+      media?.previewVideoUrl ??
+      (media?.sourceIsPlayableMp4 ? media.sourceVideoUrl : null) ??
+      null
+    );
+  }, [session]);
+
   const isLive =
     session?.liveStatus === "live" || session?.liveStatus === "upcoming";
+
+  const streamEnded =
+    !isLive ||
+    session?.liveRecording?.status === "completed" ||
+    session?.liveStatus === "post_live" ||
+    session?.liveStatus === "completed";
 
   const transcriptionBehind =
     recordedSeconds > 5 && transcribedSeconds < recordedSeconds - 15;
 
+  const transcriptionCaughtUp =
+    recordedSeconds > 0 &&
+    transcribedSeconds >= Math.max(MIN_TRANSCRIPT_SECONDS, recordedSeconds * 0.92);
+
   const transcriptReady =
     transcribedSeconds >= MIN_TRANSCRIPT_SECONDS &&
-    searchableChunks >= MIN_SEARCHABLE_CHUNKS;
+    (searchableChunks >= MIN_SEARCHABLE_CHUNKS || transcriptionCaughtUp);
+
+  const needsCadenceChoice = Boolean(session && isLive && !wizard.cadence);
+
+  const runSuggest = useCallback(
+    async (opts?: {
+      extra?: number;
+      limit?: number;
+      throughSeconds?: number;
+    }): Promise<boolean> => {
+      if (opts?.extra) setGetMoreLoading(true);
+      else setSuggesting(true);
+      try {
+        const through = opts?.throughSeconds ?? transcribedSeconds;
+        const { ok, data } = await fetchJson<{
+          clips?: ClipSuggestionData[];
+          wizard?: AgentWizardState;
+          created?: number;
+          error?: string;
+        }>(`/api/sessions/${sessionId}/suggest-clips`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...(opts?.extra
+              ? { extra: opts.extra }
+              : { limit: opts?.limit ?? 10 }),
+            throughSeconds: through,
+            ...(wizard.cadence === "live_now"
+              ? { cap: LIVE_NOW_SUGGESTION_CAP }
+              : {}),
+          }),
+        });
+        if (!ok) throw new Error(data.error ?? "Suggest failed");
+        if (data.clips) setClips(data.clips);
+        if (data.wizard) setWizard(data.wizard);
+        else {
+          await persistWizard({
+            step: "pick",
+            suggestRequested: true,
+            lastSuggestThroughSeconds: through,
+          });
+        }
+        if ((data.created ?? 0) > 0) {
+          setNewClipNotice(true);
+          window.setTimeout(() => setNewClipNotice(false), 5000);
+        }
+        setTimeout(() => void loadSession().catch(() => {}), 2500);
+        return true;
+      } catch (err) {
+        setTranscriptionError(
+          err instanceof Error ? err.message : "Failed to suggest clips"
+        );
+        return false;
+      } finally {
+        setSuggesting(false);
+        setGetMoreLoading(false);
+      }
+    },
+    [
+      sessionId,
+      persistWizard,
+      loadSession,
+      transcribedSeconds,
+      wizard.cadence,
+    ]
+  );
+
+  // VOD sessions get vod_batch automatically; live waits for the chooser.
+  useEffect(() => {
+    if (!session || loading || wizard.cadence) return;
+    if (isLive) return;
+    void persistWizard({ cadence: "vod_batch" });
+  }, [session, loading, wizard.cadence, isLive, persistWizard]);
+
+  async function chooseCadence(
+    cadence: Extract<AgentCadence, "live_now" | "after_stream">
+  ) {
+    await persistWizard({ cadence, step: "transcribing" });
+    posthog.capture("agent_cadence_chosen", {
+      session_id: sessionId,
+      cadence,
+    });
+  }
 
   useEffect(() => {
     if (!session) return;
@@ -195,12 +382,23 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
           setTranscribedSeconds(data.transcribedThrough);
         }
 
-        const chunks = data.transcriptChunks ?? [];
+        // /transcribe does not return chunks — load them from /events for the ready gate.
+        const events = await fetchJson<{
+          transcriptChunks?: Array<{
+            endTimeSeconds: number;
+            text: string;
+            rawJson?: { whisper?: boolean; cursorOnly?: boolean } | null;
+          }>;
+        }>(`/api/sessions/${sessionId}/events`);
+        if (cancelled) return;
+
+        const chunks = events.ok ? (events.data.transcriptChunks ?? []) : [];
         if (chunks.length > 0) {
           const usable = chunks.filter((c) => {
             const raw = c.rawJson;
+            const isWhisper = !raw || raw.whisper !== false;
             return (
-              raw?.whisper &&
+              isWhisper &&
               !raw?.cursorOnly &&
               c.text !== "[silence]" &&
               c.text !== "[processing error]" &&
@@ -208,8 +406,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
             );
           });
           setSearchableChunks(usable.length);
-          const maxEnd = Math.max(0, ...usable.map((c) => c.endTimeSeconds));
-          if (maxEnd > 0) setTranscribedSeconds(maxEnd);
         }
         void loadSession().catch(() => {});
       } catch {
@@ -237,6 +433,67 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     loadSession,
   ]);
 
+  useEffect(() => {
+    if (!wizard.cadence) return;
+    if (wizard.cadence === "after_stream" && !streamEnded) return;
+    if (!transcriptReady) return;
+
+    if (wizard.cadence === "live_now") {
+      const last = wizard.lastSuggestThroughSeconds ?? 0;
+      const needFirst = !wizard.suggestRequested;
+      const needRoll =
+        wizard.suggestRequested &&
+        transcribedSeconds - last >= LIVE_NOW_ROLL_SECONDS;
+      if (!needFirst && !needRoll) return;
+      if (rollingInFlight.current || suggesting || getMoreLoading) return;
+
+      const visible = clips.filter((c) => c.status !== "rejected").length;
+      if (visible >= LIVE_NOW_SUGGESTION_CAP) return;
+
+      rollingInFlight.current = true;
+      void runSuggest({
+        ...(needFirst ? { limit: 6 } : { extra: 4 }),
+        throughSeconds: transcribedSeconds,
+      }).finally(() => {
+        rollingInFlight.current = false;
+      });
+      return;
+    }
+
+    // vod_batch or after_stream (stream ended)
+    if (wizard.suggestRequested || suggestStarted.current) return;
+    if (clips.length >= 10) {
+      void persistWizard({
+        step: "pick",
+        suggestRequested: true,
+        lastSuggestThroughSeconds: transcribedSeconds,
+      });
+      return;
+    }
+    suggestStarted.current = true;
+    void runSuggest({ throughSeconds: transcribedSeconds }).then((ok) => {
+      if (!ok) suggestStarted.current = false;
+    });
+  }, [
+    wizard.cadence,
+    wizard.suggestRequested,
+    wizard.lastSuggestThroughSeconds,
+    streamEnded,
+    transcriptReady,
+    transcribedSeconds,
+    clips.length,
+    suggesting,
+    getMoreLoading,
+    runSuggest,
+    persistWizard,
+  ]);
+
+  const activeClipId =
+    wizard.selectedClipIds[wizard.queueIndex] ??
+    [...selectedIds][wizard.queueIndex] ??
+    null;
+  const activeClip = clips.find((c) => c.id === activeClipId) ?? null;
+
   async function handleDeleteSession() {
     const size = session?.storageLabel ? ` (${session.storageLabel})` : "";
     if (
@@ -263,6 +520,233 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       alert(err instanceof Error ? err.message : "Delete failed");
       setDeleting(false);
     }
+  }
+
+  function toggleClip(clipId: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(clipId)) next.delete(clipId);
+      else next.add(clipId);
+      return next;
+    });
+  }
+
+  async function continueFromPick() {
+    const ids = [...selectedIds];
+    if (ids.length === 0) {
+      alert("Select at least one clip to continue.");
+      return;
+    }
+    // live_now keeps unselected suggestions around for later; batch modes reject them.
+    const rejectOthers = wizard.cadence !== "live_now";
+    const rejectedIds = rejectOthers
+      ? clips.map((c) => c.id).filter((id) => !selectedIds.has(id))
+      : [];
+    await Promise.all([
+      ...ids.map((id) =>
+        fetchJson(`/api/clips/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "saved" }),
+        })
+      ),
+      ...rejectedIds.map((id) =>
+        fetchJson(`/api/clips/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "rejected" }),
+        })
+      ),
+    ]);
+    setClips((prev) =>
+      prev.map((c) => {
+        if (selectedIds.has(c.id)) return { ...c, status: "saved" };
+        if (rejectOthers) return { ...c, status: "rejected" };
+        return c;
+      })
+    );
+    await persistWizard({
+      step: "look",
+      selectedClipIds: ids,
+      queueIndex: 0,
+      lookPreset: null,
+      faceAnalysisJobId: null,
+    });
+    setExportDoneUrl(null);
+    setExportError(null);
+    posthog.capture("agent_clips_picked", {
+      session_id: sessionId,
+      count: ids.length,
+      cadence: wizard.cadence,
+    });
+  }
+
+  async function applyLookPreset(presetId: ContentLookPresetId) {
+    if (!activeClip) return;
+    setAnalysisError(null);
+    const preset = getContentLookPreset(presetId);
+    await persistWizard({ lookPreset: presetId });
+
+    await fetchJson(`/api/clips/${activeClip.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ suggestedLayout: preset.layout }),
+    });
+
+    if (!preset.needsFaceAnalysis) {
+      await persistWizard({
+        lookPreset: presetId,
+        faceAnalysisJobId: null,
+        step: "edit",
+      });
+      return;
+    }
+
+    setAnalyzingFace(true);
+    try {
+      const { ok, data } = await fetchJson<{
+        analysisJobId?: string;
+        error?: string;
+      }>(`/api/sessions/${sessionId}/face-analysis`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          startSeconds: activeClip.startTimeSeconds,
+          endSeconds: activeClip.endTimeSeconds,
+          clipSuggestionId: activeClip.id,
+        }),
+      });
+      if (!ok || !data.analysisJobId) {
+        setAnalysisError(data.error ?? "Face analysis did not start");
+        await persistWizard({
+          lookPreset: presetId,
+          faceAnalysisJobId: null,
+        });
+        return;
+      }
+
+      let jobId = data.analysisJobId;
+      for (let i = 0; i < 40; i++) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const poll = await fetchJson<{
+          status?: string;
+          errorMessage?: string | null;
+        }>(`/api/face-analysis/${jobId}`);
+        if (!poll.ok) continue;
+        if (poll.data.status === "completed") break;
+        if (poll.data.status === "failed") {
+          setAnalysisError(poll.data.errorMessage ?? "Face analysis failed");
+          jobId = data.analysisJobId;
+          break;
+        }
+      }
+
+      const selection = buildVerticalSelection(
+        presetId,
+        jobId,
+        wizard.includeCaptions
+      );
+      await fetchJson(`/api/clips/${activeClip.id}/vertical-layout`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(selection),
+      });
+
+      await persistWizard({
+        lookPreset: presetId,
+        faceAnalysisJobId: jobId,
+        step: "edit",
+      });
+    } catch (err) {
+      setAnalysisError(
+        err instanceof Error ? err.message : "Face analysis failed"
+      );
+    } finally {
+      setAnalyzingFace(false);
+    }
+  }
+
+  async function continueFromLook() {
+    if (!wizard.lookPreset) {
+      alert("Choose a look preset first.");
+      return;
+    }
+    if (wizard.step !== "edit") {
+      await applyLookPreset(wizard.lookPreset);
+    }
+  }
+
+  async function continueFromEdit() {
+    await persistWizard({
+      step: "export",
+      includeCaptions: wizard.includeCaptions,
+    });
+  }
+
+  async function renderActiveClip() {
+    if (!activeClip || !wizard.lookPreset) return;
+    setExporting(true);
+    setExportError(null);
+    setExportDoneUrl(null);
+    posthog.capture("agent_clip_export", {
+      session_id: sessionId,
+      clip_id: activeClip.id,
+      look_preset: wizard.lookPreset,
+    });
+
+    try {
+      const selection = buildVerticalSelection(
+        wizard.lookPreset,
+        wizard.faceAnalysisJobId,
+        wizard.includeCaptions
+      );
+
+      const res = await fetch(`/api/clips/${activeClip.id}/render`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          includeCaptions: wizard.includeCaptions,
+          captionAppearance,
+          format: "vertical",
+          verticalLayout: selection,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Render failed");
+
+      const url = data.downloadUrl ?? clipDownloadUrl(activeClip.id);
+      setExportDoneUrl(url);
+      setClips((prev) =>
+        prev.map((c) =>
+          c.id === activeClip.id ? { ...c, status: "rendered" } : c
+        )
+      );
+      await triggerFileDownload(
+        url,
+        `${activeClip.title.slice(0, 40) || "short"}.mp4`
+      );
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : "Render failed");
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  async function advanceQueue() {
+    const nextIndex = wizard.queueIndex + 1;
+    if (nextIndex >= wizard.selectedClipIds.length) {
+      await persistWizard({ step: "done" });
+      return;
+    }
+    await persistWizard({
+      step: "look",
+      queueIndex: nextIndex,
+      lookPreset: null,
+      faceAnalysisJobId: null,
+    });
+    setExportDoneUrl(null);
+    setExportError(null);
+    setAnalysisError(null);
   }
 
   async function handleSend() {
@@ -296,23 +780,19 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
         found?: boolean;
         answer?: string;
         clip?: ClipSuggestionData;
-        renderJob?: { jobId?: string; downloadUrl?: string } | null;
-        contextUsed?: number;
         error?: string;
       }>(`/api/sessions/${sessionId}/find-clip`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           description: text,
-          autoRender: true,
-          includeCaptions,
+          autoRender: false,
+          includeCaptions: wizard.includeCaptions,
           captionAppearance,
         }),
       });
 
-      if (!ok && data.error) {
-        throw new Error(data.error);
-      }
+      if (!ok && data.error) throw new Error(data.error);
 
       if (data.found === false || !data.clip) {
         setTurns((prev) => [
@@ -322,8 +802,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
             role: "assistant",
             text:
               data.answer ??
-              "I couldn't find that moment yet. Try quoting words from the stream, or wait for more transcript.",
-            error: false,
+              "I couldn't find that moment yet. Try quoting words from the stream.",
           },
         ]);
         return;
@@ -334,18 +813,26 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
         const without = prev.filter((c) => c.id !== clip.id);
         return [clip, ...without];
       });
-
+      setSelectedIds((prev) => new Set(prev).add(clip.id));
       setTurns((prev) => [
         ...prev,
         {
           id: `asst-${Date.now()}`,
           role: "assistant",
           text:
-            data.answer ?? `Found “${clip.title}” and started rendering.`,
+            data.answer ??
+            `Found “${clip.title}” and added it to your pick list.`,
           clip,
-          renderJobId: data.renderJob?.jobId ?? null,
         },
       ]);
+      if (wizard.step === "pick" || wizard.step === "transcribing") {
+        await persistWizard({ step: "pick", suggestRequested: true });
+      } else if (!wizard.selectedClipIds.includes(clip.id)) {
+        // Add custom finds into the edit/export queue when past pick.
+        await persistWizard({
+          selectedClipIds: [...wizard.selectedClipIds, clip.id],
+        });
+      }
     } catch (err) {
       setTurns((prev) => [
         ...prev,
@@ -391,6 +878,15 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       ? Math.min(100, Math.round((transcribedSeconds / recordedSeconds) * 100))
       : 0;
 
+  const stepOrder: AgentWizardStep[] = [
+    "transcribing",
+    "pick",
+    "look",
+    "edit",
+    "export",
+    "done",
+  ];
+
   return (
     <div className="editor-shell h-screen flex flex-col bg-[var(--color-background)] overflow-hidden">
       <EditorHeader
@@ -403,207 +899,555 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       />
 
       <div className="shrink-0 border-b border-[var(--color-card-border)] bg-[#020302] px-4 py-3">
-        <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--color-muted)]">
-          <span className="font-semibold uppercase tracking-[0.12em] text-[var(--color-accent)]">
-            Agent mode
-          </span>
-          <span>
-            Transcript {formatSeconds(transcribedSeconds)}
-            {recordedSeconds > 0 ? ` / ${formatSeconds(recordedSeconds)}` : ""}
-          </span>
-          {(transcribingActive || transcriptionBehind) && (
-            <span className="flex items-center gap-1.5 text-[var(--color-accent)]">
-              <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
-              Ingesting
+        <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-[var(--color-muted)]">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="font-semibold uppercase tracking-[0.12em] text-[var(--color-accent)]">
+              Agent mode
+              {wizard.cadence === "live_now"
+                ? " · live"
+                : wizard.cadence === "after_stream"
+                  ? " · after stream"
+                  : wizard.cadence === "vod_batch"
+                    ? " · VOD"
+                    : ""}
             </span>
-          )}
-          {sourceError && (
-            <span className="text-[var(--color-danger)]">{sourceError}</span>
-          )}
-          {transcriptionError && !sourceError && (
-            <span className="text-[var(--color-warning,#e6b84d)]">
-              {transcriptionError}
+            <span className="tabular-nums">
+              {formatSeconds(transcribedSeconds)} transcribed
+              {recordedSeconds > 0
+                ? ` · ${formatSeconds(recordedSeconds)} ${isLive ? "captured" : "total"}`
+                : ""}
+            </span>
+            {(transcribingActive || transcriptionBehind) && (
+              <span className="flex items-center gap-1.5 text-[var(--color-accent)]">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-accent)]" />
+                Ingesting
+              </span>
+            )}
+            {sourceError && (
+              <span className="text-[var(--color-danger)]">{sourceError}</span>
+            )}
+            {transcriptionError && !sourceError && (
+              <span className="text-[var(--color-warning,#e6b84d)]">
+                {transcriptionError}
+              </span>
+            )}
+          </div>
+          {recordedSeconds > 0 && (
+            <span className="tabular-nums font-semibold text-[var(--color-foreground)]">
+              {progressPct}%
             </span>
           )}
         </div>
-        <div className="mt-2 h-1 overflow-hidden bg-[#141414]">
+        <div
+          className="mt-2 h-1.5 overflow-hidden rounded-full bg-[#141414]"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={progressPct}
+          aria-label="Transcription progress"
+        >
           <div
-            className="h-full bg-[var(--color-accent)] transition-[width] duration-500"
+            className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-500"
             style={{ width: `${progressPct}%` }}
           />
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {stepOrder.map((step) => {
+            const active = wizard.step === step;
+            const idx = stepOrder.indexOf(wizard.step);
+            const done = stepOrder.indexOf(step) < idx;
+            return (
+              <span
+                key={step}
+                className={cn(
+                  "rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide",
+                  active
+                    ? "bg-[var(--color-accent)] text-black"
+                    : done
+                      ? "bg-[#1a2418] text-[var(--color-accent)]"
+                      : "bg-[#141414] text-[var(--color-muted)]"
+                )}
+              >
+                {STEP_LABELS[step]}
+              </span>
+            );
+          })}
         </div>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        <section className="flex min-h-0 min-w-0 flex-1 flex-col border-b border-[var(--color-card-border)] lg:border-b-0 lg:border-r">
-          <div className="relative min-h-0 flex-1">
-            <ChatContainerRoot className="h-full px-3">
-              <ChatContainerContent className="space-y-4 py-4">
-                {turns.length === 0 && (
-                  <Message>
-                    <MessageAvatar src="" alt="Clipper" fallback="C" />
-                    <MessageContent className="bg-secondary text-sm text-secondary-foreground">
-                      {`Describe moments you want clipped — e.g. “the rage when he died to the sniper” or quote words you heard. Use specific wording from the stream for best results.${
-                        !transcriptReady
-                          ? ` Waiting for ~${formatDuration(MIN_TRANSCRIPT_SECONDS)} of searchable transcript (${searchableChunks}/${MIN_SEARCHABLE_CHUNKS} chunks)…`
-                          : ""
-                      }`}
-                    </MessageContent>
-                  </Message>
-                )}
+        <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-4">
+          {needsCadenceChoice && (
+            <AgentCadenceChooser onChoose={(c) => void chooseCadence(c)} />
+          )}
 
-                {turns.map((turn) =>
-                  turn.role === "user" ? (
-                    <Message key={turn.id} className="justify-end">
-                      <MessageContent className="bg-primary text-primary-foreground">
-                        {turn.text}
-                      </MessageContent>
-                      <MessageAvatar src="" alt="You" fallback="You" />
-                    </Message>
-                  ) : (
-                    <Message key={turn.id}>
-                      <MessageAvatar src="" alt="Agent" fallback="AI" />
-                      <div className="min-w-0 flex-1 space-y-3">
-                        <MessageContent
-                          markdown
-                          className={cn(
-                            "text-sm",
-                            turn.error
-                              ? "border border-destructive/40 bg-[#1a0808] text-[#ffb4b4]"
-                              : "bg-secondary text-secondary-foreground"
-                          )}
-                        >
-                          {turn.text}
-                        </MessageContent>
-                        {turn.clip && (
-                          <ClipSuggestionCard
-                            clip={turn.clip}
-                            canRender
-                            includeCaptions={includeCaptions}
-                            captionAppearance={captionAppearance}
-                            onUpdate={(next) => {
-                              setClips((prev) =>
-                                prev.map((c) => (c.id === next.id ? next : c))
-                              );
-                              setTurns((prev) =>
-                                prev.map((t) =>
-                                  t.role === "assistant" &&
-                                  t.clip?.id === next.id
-                                    ? { ...t, clip: next }
-                                    : t
-                                )
-                              );
-                            }}
-                          />
-                        )}
-                      </div>
-                    </Message>
-                  )
-                )}
-
-                {sending && (
-                  <Message>
-                    <MessageAvatar src="" alt="Agent" fallback="AI" />
-                    <MessageContent className="bg-secondary text-sm text-muted-foreground animate-pulse">
-                      Finding and rendering clip…
-                    </MessageContent>
-                  </Message>
-                )}
-                <ChatContainerScrollAnchor />
-              </ChatContainerContent>
-              <div className="absolute right-4 bottom-4">
-                <ScrollButton className="border-border bg-card shadow-sm" />
+          {!needsCadenceChoice &&
+            wizard.cadence === "after_stream" &&
+            !streamEnded && (
+            <div className="mx-auto flex w-full max-w-lg flex-col items-center justify-center gap-5 py-16 text-center">
+              <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--color-accent)] border-t-transparent" />
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-[var(--color-foreground)]">
+                  Recording &amp; transcribing…
+                </p>
+                <p className="text-xs text-[var(--color-muted)]">
+                  Clips unlock when the stream ends. We&apos;ll propose about 10
+                  moments automatically.
+                </p>
               </div>
-            </ChatContainerRoot>
-          </div>
+              <TranscriptionProgressCard
+                transcribedSeconds={transcribedSeconds}
+                recordedSeconds={recordedSeconds}
+                progressPct={progressPct}
+                isLive={isLive}
+                transcriptionError={transcriptionError}
+              />
+            </div>
+          )}
 
-          <div className="shrink-0 border-t border-[var(--color-card-border)] bg-[#020302] p-3">
-            <PromptInput
-              value={prompt}
-              onValueChange={setPrompt}
-              isLoading={sending}
-              disabled={sending}
-              onSubmit={() => {
-                void handleSend();
-              }}
-              className="border-border bg-card"
-            >
-              <PromptInputTextarea
-                placeholder={
-                  transcriptReady
-                    ? "Describe the clip you want…"
-                    : "Waiting for transcript…"
+          {!needsCadenceChoice &&
+            !(wizard.cadence === "after_stream" && !streamEnded) &&
+            (wizard.step === "transcribing" ||
+              (!transcriptReady &&
+                wizard.step === "pick" &&
+                clips.length === 0)) &&
+            !(wizard.suggestRequested && clips.length > 0) && (
+            <div className="mx-auto flex w-full max-w-lg flex-col items-center justify-center gap-5 py-16 text-center">
+              <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--color-accent)] border-t-transparent" />
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-[var(--color-foreground)]">
+                  {suggesting || (transcriptReady && !wizard.suggestRequested)
+                    ? "Finding your top clips…"
+                    : transcriptionCaughtUp
+                      ? "Transcription complete — preparing clips…"
+                      : "Transcribing your stream…"}
+                </p>
+                <p className="text-xs text-[var(--color-muted)]">
+                  {suggesting || transcriptReady
+                    ? "Scoring moments from the transcript and audio."
+                    : wizard.cadence === "live_now"
+                      ? `Once we have about ${formatDuration(MIN_TRANSCRIPT_SECONDS)} of searchable transcript, clip suggestions will start rolling in.`
+                      : `Once we have about ${formatDuration(MIN_TRANSCRIPT_SECONDS)} of searchable transcript, we\u2019ll propose 10 clips automatically.`}
+                </p>
+              </div>
+              <TranscriptionProgressCard
+                transcribedSeconds={transcribedSeconds}
+                recordedSeconds={recordedSeconds}
+                progressPct={progressPct}
+                isLive={isLive}
+                transcriptionError={transcriptionError}
+              />
+              {transcriptionCaughtUp && !suggesting && transcriptionError && (
+                <Button
+                  type="button"
+                  onClick={() => {
+                    suggestStarted.current = false;
+                    void runSuggest({ throughSeconds: transcribedSeconds });
+                  }}
+                >
+                  Retry finding clips
+                </Button>
+              )}
+            </div>
+          )}
+
+          {!needsCadenceChoice &&
+            wizard.step === "pick" &&
+            (transcriptReady || clips.length > 0 || wizard.suggestRequested) &&
+            !(wizard.cadence === "after_stream" && !streamEnded) && (
+            <div className="space-y-4">
+              {newClipNotice && (
+                <p className="rounded-lg border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 px-3 py-2 text-xs text-[var(--color-accent)]">
+                  New clip suggestion
+                  {wizard.cadence === "live_now" ? " — still watching the live stream" : ""}
+                </p>
+              )}
+              {wizard.cadence === "live_now" && isLive && (
+                <p className="text-xs text-[var(--color-muted)]">
+                  Live suggestions update about every{" "}
+                  {Math.round(LIVE_NOW_ROLL_SECONDS / 60)} minutes of new
+                  transcript (up to {LIVE_NOW_SUGGESTION_CAP}). Select clips
+                  anytime to edit and export.
+                </p>
+              )}
+              <AgentClipPickGrid
+                clips={withThumbnails(
+                  sessionId,
+                  clips.filter((c) => c.status !== "rejected")
+                )}
+                selectedIds={selectedIds}
+                onToggle={toggleClip}
+                onGetMore={() =>
+                  void runSuggest({
+                    extra: 5,
+                    throughSeconds: transcribedSeconds,
+                  })
                 }
-                className="text-foreground placeholder:text-muted-foreground"
+                getMoreLoading={getMoreLoading}
+                suggesting={suggesting}
               />
-              <PromptInputActions className="justify-end pt-1">
-                <PromptInputAction tooltip={sending ? "Working…" : "Send"}>
-                  <Button
-                    type="button"
-                    size="icon"
-                    disabled={sending || !prompt.trim()}
-                    onClick={() => void handleSend()}
-                    className="h-9 w-9 rounded-full"
-                  >
-                    <ArrowUp className="h-4 w-4" />
-                  </Button>
-                </PromptInputAction>
-              </PromptInputActions>
-            </PromptInput>
-          </div>
-        </section>
-
-        <aside className="flex min-h-0 w-full shrink-0 flex-col lg:w-[340px]">
-          <div className="shrink-0 border-b border-[var(--color-card-border)] px-3 py-2">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8f9b89]">
-              Caption style
-            </p>
-            <label className="mt-2 flex items-center gap-2 text-xs text-[#c5cfc0]">
-              <input
-                type="checkbox"
-                checked={includeCaptions}
-                onChange={(e) => setIncludeCaptions(e.target.checked)}
-                className="accent-[var(--color-accent)]"
-              />
-              Burn captions into renders
-            </label>
-          </div>
-          <div className="min-h-0 flex-1 overflow-y-auto p-2">
-            <CaptionAppearancePanel
-              appearance={captionAppearance}
-              onChange={(next) => {
-                setCaptionAppearance(next);
-                writeCaptionAppearancePreference(next);
-              }}
-              disabled={!includeCaptions}
-            />
-          </div>
-
-          {clips.length > 0 && (
-            <div className="max-h-[40%] shrink-0 overflow-y-auto border-t border-[var(--color-card-border)] p-3">
-              <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8f9b89]">
-                Clips ({clips.length})
-              </p>
-              <div className="space-y-2">
-                {clips.map((clip) => (
-                  <ClipSuggestionCard
-                    key={clip.id}
-                    clip={clip}
-                    canRender
-                    includeCaptions={includeCaptions}
-                    captionAppearance={captionAppearance}
-                    onUpdate={(next) => {
-                      setClips((prev) =>
-                        prev.map((c) => (c.id === next.id ? next : c))
-                      );
-                    }}
-                  />
-                ))}
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <button
+                  type="button"
+                  className="text-xs text-[var(--color-accent)] hover:underline"
+                  onClick={() => setShowFindChat((v) => !v)}
+                >
+                  {showFindChat ? "Hide find chat" : "Find another moment"}
+                </button>
+                <Button
+                  type="button"
+                  disabled={selectedIds.size === 0}
+                  onClick={() => void continueFromPick()}
+                >
+                  Continue with {selectedIds.size || 0} clip
+                  {selectedIds.size === 1 ? "" : "s"}
+                </Button>
               </div>
             </div>
           )}
+
+          {wizard.step === "look" && activeClip && (
+            <div className="mx-auto w-full max-w-3xl space-y-4">
+              <p className="text-xs text-[var(--color-muted)]">
+                Clip {wizard.queueIndex + 1} of {wizard.selectedClipIds.length}:{" "}
+                {activeClip.title}
+              </p>
+              <AgentLookPresetStep
+                value={wizard.lookPreset}
+                onChange={(id) => void applyLookPreset(id)}
+                analyzing={analyzingFace}
+                analysisError={analysisError}
+              />
+              <div className="flex justify-end">
+                <Button
+                  type="button"
+                  disabled={!wizard.lookPreset || analyzingFace}
+                  onClick={() => void continueFromLook()}
+                >
+                  Continue to edit
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {wizard.step === "edit" && activeClip && (
+            <div className="mx-auto w-full max-w-4xl space-y-4">
+              <AgentClipEditor
+                sessionId={sessionId}
+                clip={activeClip}
+                playbackUrl={playbackUrl}
+                sourceDuration={recordedSeconds}
+                includeCaptions={wizard.includeCaptions}
+                onIncludeCaptionsChange={(value) => {
+                  void persistWizard({ includeCaptions: value });
+                }}
+                captionAppearance={captionAppearance}
+                onCaptionAppearanceChange={(next) => {
+                  setCaptionAppearance(next);
+                  writeCaptionAppearancePreference(next);
+                }}
+                onClipChange={(next) => {
+                  setClips((prev) =>
+                    prev.map((c) => (c.id === next.id ? next : c))
+                  );
+                }}
+              />
+              <div className="flex justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void persistWizard({ step: "look" })}
+                >
+                  Back
+                </Button>
+                <Button type="button" onClick={() => void continueFromEdit()}>
+                  Continue to export
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {wizard.step === "export" && activeClip && (
+            <div className="mx-auto w-full max-w-lg space-y-4 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-6">
+              <h2 className="text-lg font-semibold">Export</h2>
+              <p className="text-sm text-[var(--color-muted)]">
+                Render “{activeClip.title}” as a vertical Short
+                {wizard.lookPreset
+                  ? ` (${getContentLookPreset(wizard.lookPreset).label})`
+                  : ""}
+                {wizard.includeCaptions ? " with captions" : " without captions"}.
+              </p>
+              {exportError && (
+                <p className="text-sm text-[var(--color-danger)]">{exportError}</p>
+              )}
+              {exportDoneUrl && (
+                <p className="text-sm text-[var(--color-accent)]">
+                  Render ready — download started.
+                </p>
+              )}
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  disabled={exporting}
+                  onClick={() => void renderActiveClip()}
+                >
+                  {exporting ? "Rendering…" : exportDoneUrl ? "Render again" : "Render & download"}
+                </Button>
+                {exportDoneUrl && (
+                  <Button type="button" onClick={() => void advanceQueue()}>
+                    {wizard.queueIndex + 1 >= wizard.selectedClipIds.length
+                      ? "Finish"
+                      : "Next clip"}
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {wizard.step === "done" && (
+            <div className="mx-auto flex max-w-lg flex-col items-center gap-4 py-16 text-center">
+              <h2 className="text-xl font-semibold">All set</h2>
+              <p className="text-sm text-[var(--color-muted)]">
+                You finished the selected clips. Pick more from the grid or find
+                another moment.
+              </p>
+              <Button
+                type="button"
+                onClick={() =>
+                  void persistWizard({
+                    step: "pick",
+                    queueIndex: 0,
+                    lookPreset: null,
+                    faceAnalysisJobId: null,
+                  })
+                }
+              >
+                Back to clip picks
+              </Button>
+            </div>
+          )}
+
+          {(showFindChat || wizard.step === "pick") && showFindChat && (
+            <div className="mt-6 overflow-hidden rounded-xl border border-[var(--color-card-border)]">
+              <div className="relative max-h-72 min-h-[200px]">
+                <ChatContainerRoot className="h-full px-3">
+                  <ChatContainerContent className="space-y-4 py-4">
+                    {turns.length === 0 && (
+                      <Message>
+                        <MessageAvatar src="" alt="Clipper" fallback="C" />
+                        <MessageContent className="bg-secondary text-sm text-secondary-foreground">
+                          Describe a moment to add another clip to your list.
+                        </MessageContent>
+                      </Message>
+                    )}
+                    {turns.map((turn) =>
+                      turn.role === "user" ? (
+                        <Message key={turn.id} className="justify-end">
+                          <MessageContent className="bg-primary text-primary-foreground">
+                            {turn.text}
+                          </MessageContent>
+                        </Message>
+                      ) : (
+                        <Message key={turn.id}>
+                          <MessageAvatar src="" alt="Agent" fallback="AI" />
+                          <MessageContent
+                            className={cn(
+                              "text-sm",
+                              turn.error
+                                ? "border border-destructive/40 bg-[#1a0808] text-[#ffb4b4]"
+                                : "bg-secondary text-secondary-foreground"
+                            )}
+                          >
+                            {turn.text}
+                          </MessageContent>
+                        </Message>
+                      )
+                    )}
+                    <ChatContainerScrollAnchor />
+                  </ChatContainerContent>
+                </ChatContainerRoot>
+              </div>
+              <div className="border-t border-[var(--color-card-border)] p-3">
+                <PromptInput
+                  value={prompt}
+                  onValueChange={setPrompt}
+                  isLoading={sending}
+                  onSubmit={() => void handleSend()}
+                  className="border-border bg-card"
+                >
+                  <PromptInputTextarea placeholder="Describe the clip…" />
+                  <PromptInputActions className="justify-end pt-1">
+                    <PromptInputAction tooltip="Send">
+                      <Button
+                        type="button"
+                        size="icon"
+                        disabled={sending || !prompt.trim()}
+                        onClick={() => void handleSend()}
+                        className="h-9 w-9 rounded-full"
+                      >
+                        <ArrowUp className="h-4 w-4" />
+                      </Button>
+                    </PromptInputAction>
+                  </PromptInputActions>
+                </PromptInput>
+              </div>
+            </div>
+          )}
+        </section>
+
+        <aside className="hidden min-h-0 w-[300px] shrink-0 flex-col border-l border-[var(--color-card-border)] lg:flex">
+          <div className="border-b border-[var(--color-card-border)] px-3 py-2">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8f9b89]">
+              Queue
+            </p>
+          </div>
+          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
+            {wizard.selectedClipIds.length === 0 ? (
+              <p className="text-xs text-[var(--color-muted)]">
+                Selected clips appear here.
+              </p>
+            ) : (
+              wizard.selectedClipIds.map((id, index) => {
+                const clip = clips.find((c) => c.id === id);
+                if (!clip) return null;
+                return (
+                  <div
+                    key={id}
+                    className={cn(
+                      "rounded-lg border p-2 text-xs",
+                      index === wizard.queueIndex
+                        ? "border-[var(--color-accent)]"
+                        : "border-[var(--color-card-border)]"
+                    )}
+                  >
+                    <p className="font-medium line-clamp-2">{clip.title}</p>
+                    <p className="mt-1 text-[10px] text-[var(--color-muted)]">
+                      {clip.status}
+                    </p>
+                  </div>
+                );
+              })
+            )}
+            {activeClip && wizard.step !== "pick" && (
+              <ClipSuggestionCard
+                clip={activeClip}
+                canRender={false}
+                includeCaptions={wizard.includeCaptions}
+                captionAppearance={captionAppearance}
+                onUpdate={(next) => {
+                  setClips((prev) =>
+                    prev.map((c) => (c.id === next.id ? next : c))
+                  );
+                }}
+              />
+            )}
+          </div>
         </aside>
       </div>
+    </div>
+  );
+}
+
+function buildVerticalSelection(
+  presetId: ContentLookPresetId,
+  faceAnalysisJobId: string | null,
+  captionsEnabled: boolean
+): VerticalLayoutSelection {
+  const preset = getContentLookPreset(presetId);
+  const base = defaultVerticalLayoutSelection();
+  return {
+    ...base,
+    layout: preset.layout,
+    faceAnalysisJobId: faceAnalysisJobId ?? undefined,
+    faceSelection: { mode: "auto" },
+    stacked: {
+      ...base.stacked,
+      facecamPosition: "top",
+      hideOriginalFacecam: presetId === "gaming" ? "blur" : "none",
+    },
+    pip: {
+      ...base.pip,
+      hideOriginalFacecam: presetId === "podcast" ? "blur" : "none",
+    },
+    captions: {
+      enabled: captionsEnabled,
+      position: "lower",
+    },
+  };
+}
+
+function TranscriptionProgressCard({
+  transcribedSeconds,
+  recordedSeconds,
+  progressPct,
+  isLive,
+  transcriptionError,
+}: {
+  transcribedSeconds: number;
+  recordedSeconds: number;
+  progressPct: number;
+  isLive: boolean;
+  transcriptionError: string | null;
+}) {
+  return (
+    <div className="w-full space-y-2 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] px-4 py-4 text-left">
+      <div className="flex items-end justify-between gap-3">
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8f9b89]">
+            Transcription progress
+          </p>
+          <p className="mt-1 text-sm text-[var(--color-foreground)]">
+            <span className="font-semibold tabular-nums text-[var(--color-accent)]">
+              {formatSeconds(transcribedSeconds)}
+            </span>
+            <span className="text-[var(--color-muted)]"> transcribed</span>
+            {recordedSeconds > 0 && (
+              <>
+                <span className="text-[var(--color-muted)]"> of </span>
+                <span className="font-semibold tabular-nums">
+                  {formatSeconds(recordedSeconds)}
+                </span>
+                <span className="text-[var(--color-muted)]">
+                  {isLive ? " captured so far" : " stream length"}
+                </span>
+              </>
+            )}
+          </p>
+        </div>
+        <p className="shrink-0 text-lg font-semibold tabular-nums text-[var(--color-accent)]">
+          {recordedSeconds > 0 ? `${progressPct}%` : "…"}
+        </p>
+      </div>
+      <div
+        className="h-2.5 overflow-hidden rounded-full bg-[#141814]"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={progressPct}
+        aria-label="Transcription progress"
+      >
+        <div
+          className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-500 ease-out"
+          style={{
+            width: `${recordedSeconds > 0 ? progressPct : Math.min(8, transcribedSeconds > 0 ? 4 : 2)}%`,
+          }}
+        />
+      </div>
+      <div className="flex justify-between text-[10px] tabular-nums text-[var(--color-muted)]">
+        <span>0:00</span>
+        <span>
+          {recordedSeconds > 0
+            ? formatSeconds(recordedSeconds)
+            : isLive
+              ? "Waiting for capture…"
+              : "Measuring length…"}
+        </span>
+      </div>
+      {transcriptionError && (
+        <p className="text-[11px] text-[var(--color-warning,#e6b84d)]">
+          {transcriptionError}
+        </p>
+      )}
     </div>
   );
 }

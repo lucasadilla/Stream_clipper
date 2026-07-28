@@ -10,6 +10,8 @@ export interface StreamEmbedInfo {
   twitchChannel?: string;
   twitchVideoId?: string;
   kickChannel?: string;
+  /** Ongoing or completed Kick VOD UUID (enables from-start capture while live). */
+  kickVideoId?: string;
 }
 
 export interface ParsedStreamUrl {
@@ -78,11 +80,12 @@ export function parseStreamUrl(input: string): ParsedStreamUrl | null {
   const kickVideo = url.match(/kick\.com\/([^/]+)\/videos\/([a-f0-9-]+)/i);
   if (kickVideo?.[1] && kickVideo?.[2]) {
     const channel = kickVideo[1].toLowerCase();
+    const kickVideoId = kickVideo[2];
     return {
       platform: "kick",
-      sourceId: kickVideo[2],
-      canonicalUrl: `https://kick.com/${channel}/videos/${kickVideo[2]}`,
-      embed: { kickChannel: channel },
+      sourceId: kickVideoId,
+      canonicalUrl: `https://kick.com/${channel}/videos/${kickVideoId}`,
+      embed: { kickChannel: channel, kickVideoId },
     };
   }
 
@@ -152,9 +155,17 @@ export function resolveStreamEmbed(
     return { twitchChannel, twitchVideoId };
   }
   if (platform === "kick") {
-    return {
-      kickChannel: embed.kickChannel ?? sourceId.toLowerCase(),
-    };
+    const kickVideoId =
+      embed.kickVideoId?.trim() ||
+      (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        sourceId
+      )
+        ? sourceId
+        : undefined);
+    const kickChannel =
+      embed.kickChannel?.trim().toLowerCase() ||
+      (!kickVideoId ? sourceId.toLowerCase() : undefined);
+    return { kickChannel, kickVideoId };
   }
   return embed;
 }

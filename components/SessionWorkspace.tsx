@@ -527,7 +527,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   useEffect(() => {
     if (!session) return;
     // Poll filmstrip faster while waiting to open the editor.
-    const ms = editorReady ? THUMB_POLL_MS : 1000;
+    const ms = editorReady ? THUMB_POLL_MS : 500;
     const id = setInterval(() => void loadThumbnails(), ms);
     return () => clearInterval(id);
   }, [sessionId, session?.id, editorReady]);
@@ -861,6 +861,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         hasSourceError: Boolean(sourcePreparationError),
         previouslyPrepared: previouslyPreparedRef.current,
         transcriptionHint: transcriptionError,
+        isLive,
       }),
     [
       recordedSecondsForTx,
@@ -870,6 +871,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       prepareClock,
       sourcePreparationError,
       transcriptionError,
+      isLive,
     ]
   );
 
@@ -953,12 +955,15 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
 
   const streamDuration = isLive
     ? preferLocalVideo
-      ? // Scrub only what local capture has remuxed — liveElapsed would fake a
-        // multi-hour timeline the player can't seek into yet.
+      ? // Scrub only what's playable in the remux. recordedSeconds often races
+        // ahead (Kick VOD catch-up / size estimates) while preview.mp4 is still
+        // catching up — including it made a 30m timeline over a 5s player.
         coalesceTimelineSeconds([
-          recordedSeconds,
+          playerDuration > 2 ? playerDuration : null,
+          playerDuration > 2
+            ? null
+            : Math.min(recordedSeconds, Math.max(currentTime, LIVE_SEGMENT_SECONDS)),
           currentTime,
-          playerDuration,
           LIVE_SEGMENT_SECONDS,
         ])
       : coalesceTimelineSeconds([

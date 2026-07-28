@@ -195,7 +195,8 @@ export interface MediaProbeResult {
 
 export function runCommand(
   command: string,
-  args: string[]
+  args: string[],
+  options?: { timeoutMs?: number }
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     // Never use shell — on Windows it breaks quoted paths and yt-dlp section globs (*time-time)
@@ -205,9 +206,32 @@ export function runCommand(
     });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const timeoutMs = options?.timeoutMs;
+    const timer =
+      timeoutMs && timeoutMs > 0
+        ? setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            try {
+              proc.kill("SIGKILL");
+            } catch {
+              // ignore
+            }
+            reject(
+              new Error(
+                `${path.basename(command)} timed out after ${Math.round(timeoutMs / 1000)}s`
+              )
+            );
+          }, timeoutMs)
+        : null;
+
     proc.stdout.on("data", (d) => (stdout += d.toString()));
     proc.stderr.on("data", (d) => (stderr += d.toString()));
     proc.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
       if (code === 0) resolve({ stdout, stderr });
       else
         reject(
@@ -216,7 +240,12 @@ export function runCommand(
           )
         );
     });
-    proc.on("error", reject);
+    proc.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      reject(err);
+    });
   });
 }
 

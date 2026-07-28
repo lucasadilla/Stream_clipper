@@ -32,8 +32,9 @@ const MODES: Array<{
   {
     id: "agent",
     label: "Agent",
-    tagline: "Hands-off",
-    description: "Describe the moments you want — we find and render the clips.",
+    tagline: "Guided",
+    description:
+      "Auto clips for VODs and live — as moments happen, or after the stream ends.",
     icon: Sparkles,
   },
 ];

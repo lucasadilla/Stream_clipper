@@ -66,6 +66,7 @@ export async function GET(
         actualStartTime: session.actualStartTime,
         videoDurationSeconds,
         concurrentViewers: session.concurrentViewers,
+        metadataJson: session.metadataJson,
         liveRecording: session.liveRecording
           ? {
               status: session.liveRecording.status,

@@ -22,6 +22,29 @@ export const THUMB_SYNC_CHUNK_SECONDS = 6 * 60 * 60;
 /** Live: prioritize the recent edge once recording exceeds this length. */
 export const THUMB_LIVE_TAIL_PRIORITY_SECONDS = 3 * 60;
 
+/**
+ * Live Kick/Twitch from-start: first strip/bootstrap window — keep this short
+ * so stream-start paints in a couple seconds.
+ */
+export const THUMB_LIVE_FIRST_CHUNK_SECONDS = 2 * 60;
+
+/**
+ * Follow-up live strip window after the first paint.
+ */
+export const THUMB_LIVE_STRIP_CHUNK_SECONDS = 12 * 60;
+
+/**
+ * Editor prepare for live: score filmstrip against this window, not the full
+ * multi-hour backlog Kick VOD catch-up can dump immediately.
+ */
+export const THUMB_LIVE_READY_WINDOW_SECONDS = 90;
+
+/**
+ * ≤ this many missing blocks → parallel keyframe grabs (same 96px/q=9 as strip).
+ * Faster than a multi-minute strip decode for the first paint.
+ */
+export const THUMB_PARALLEL_BOOTSTRAP_MAX = 8;
+
 /** JPEG width for timeline filmstrip (~1.5 KB/frame at q=9). */
 export const THUMB_WIDTH_PX = 96;
 
@@ -38,10 +61,11 @@ export const THUMB_SOLO_QUALITY = 3;
 export const THUMB_POLL_MS = 2000;
 
 /**
- * Strip passes per background sync. Sparse mode usually finishes in 1 pass;
- * keep a small budget for live growth / retries.
+ * Strip passes per background sync. Live uses more short passes so each poll
+ * advances the head without one long ffmpeg walk.
  */
 export const THUMB_SYNC_PASSES = 2;
+export const THUMB_SYNC_PASSES_LIVE = 4;
 
 /** Adaptive spacing: ~48 frames across the session, never denser than 30s. */
 export function thumbIntervalForDuration(durationSeconds: number): number {
@@ -76,4 +100,15 @@ export function sparseThumbStarts(durationSeconds: number): number[] {
   }
   if (starts.length === 0) starts.push(0);
   return starts;
+}
+
+/** Keep only blocks inside the next strip chunk (head-first). */
+export function limitThumbBlocksToChunk(
+  blocks: number[],
+  chunkSeconds: number
+): number[] {
+  if (blocks.length === 0 || chunkSeconds <= 0) return blocks;
+  const origin = blocks[0]!;
+  const end = origin + chunkSeconds;
+  return blocks.filter((start) => start < end);
 }

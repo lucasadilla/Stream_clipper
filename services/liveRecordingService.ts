@@ -22,7 +22,14 @@ import {
   formatYtDlpUserError,
   resolveStreamCaptureUrl,
   detectDownloadPlatform,
+  isLiveFromStartUnavailable,
+  isFatalTwitchCaptureError,
 } from "@/services/youtubeDownloadService";
+
+/** Sessions that already fell back from --live-from-start to live-edge capture. */
+const edgeFallbackDone = new Set<string>();
+/** Whether the active capture used --live-from-start. */
+const liveFromStartBySession = new Map<string, boolean>();
 
 function liveFormat(): string {
   const configured = Number.parseInt(
@@ -141,10 +148,20 @@ async function waitForRecordingStartup(
   uploadDir: string,
   proc: ChildProcess
 ): Promise<void> {
-  const deadline = Date.now() + RECORDING_STARTUP_CHECK_MS;
+  const deadline = Date.now() + RECORDING_STARTUP_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (await findRecordingFile(uploadDir)) return;
     if (proc.exitCode !== null) break;
+
+    const detail = activeRecordingErrors.get(streamSessionId)?.trim() ?? "";
+    if (detail && isFatalTwitchCaptureError(detail)) {
+      if (proc.pid) killProcessTree(proc.pid);
+      activeRecordings.delete(streamSessionId);
+      const message = `Live source capture exited before media arrived: ${detail}`;
+      await markRecordingFailed(streamSessionId, message, proc.pid);
+      throw new Error(message);
+    }
+
     await delay(250);
   }
 
@@ -236,6 +253,8 @@ async function startLiveRecordingAttempt(
   options?: {
     youtubeExtractorArgs?: string | null;
     liveFromStart?: boolean;
+    /** Override resolveStreamCaptureUrl (e.g. Kick channel edge fallback). */
+    captureUrlOverride?: string;
   }
 ) {
   const youtubeExtractorArgs = options?.youtubeExtractorArgs;
@@ -264,7 +283,8 @@ async function startLiveRecordingAttempt(
   const uploadDir = getUploadDir(streamSessionId);
   await ensureDir(uploadDir);
   const outputPath = path.join(uploadDir, "source.mkv");
-  const captureUrl = resolveStreamCaptureUrl(session);
+  const captureUrl =
+    options?.captureUrlOverride?.trim() || resolveStreamCaptureUrl(session);
   const platform = detectDownloadPlatform(captureUrl);
 
   const args = [
@@ -301,6 +321,7 @@ async function startLiveRecordingAttempt(
   });
   proc.unref();
   activeRecordings.set(streamSessionId, proc);
+  liveFromStartBySession.set(streamSessionId, liveFromStart);
 
   // YouTube live DASH often writes video-only until merge; start bestaudio now
   // so Whisper does not wait for the first failed /transcribe poll.
@@ -349,6 +370,45 @@ async function startLiveRecordingAttempt(
     }, 30_000);
     cleanupErrorBuffer.unref();
     void (async () => {
+      // Twitch often rejects --live-from-start after spawn. Retry from live edge
+      // even when the failure happens after waitForRecordingStartup returned.
+      if (
+        code !== 0 &&
+        liveFromStart &&
+        !edgeFallbackDone.has(streamSessionId) &&
+        isLiveFromStartUnavailable(detail || "")
+      ) {
+        edgeFallbackDone.add(streamSessionId);
+        try {
+          const { clearCompanionAudioState } = await import(
+            "@/services/companionAudioService"
+          );
+          clearCompanionAudioState(streamSessionId);
+        } catch {
+          // ignore
+        }
+        activeRecordingErrors.delete(streamSessionId);
+        console.warn(
+          `[source] async live-from-start failed for ${streamSessionId}; capturing from live edge`
+        );
+        try {
+          await startLiveRecordingAttempt(streamSessionId, {
+            youtubeExtractorArgs,
+            liveFromStart: false,
+          });
+          return;
+        } catch (retryError) {
+          await markRecordingFailed(
+            streamSessionId,
+            retryError instanceof Error
+              ? retryError.message
+              : detail || `Live source capture exited with code ${code}`,
+            proc.pid
+          );
+          return;
+        }
+      }
+
       if (code !== 0) {
         await markRecordingFailed(
           streamSessionId,
@@ -419,20 +479,84 @@ function isYouTubeAccessBlock(error: unknown): boolean {
 }
 
 /** Twitch often has no associated VOD, so --live-from-start cannot work. */
-function isLiveFromStartUnavailable(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /no formats that can be downloaded from the start|Unable to extract the VOD associated|--live-from-start is passed/i.test(
-    message
+function shouldRetryLiveFromStart(error: unknown): boolean {
+  return isLiveFromStartUnavailable(error);
+}
+
+/**
+ * Kick does not support yt-dlp --live-from-start on channel URLs.
+ * From-start capture uses the ongoing VOD UUID URL (kick:vod) instead —
+ * that playlist already includes history from stream start.
+ */
+async function preferLiveFromStartForSession(
+  streamSessionId: string
+): Promise<boolean> {
+  const session = await prisma.streamSession.findUnique({
+    where: { id: streamSessionId },
+    select: { platform: true },
+  });
+  if ((session?.platform ?? "youtube") === "kick") return false;
+  return true;
+}
+
+async function kickChannelEdgeCaptureUrl(
+  streamSessionId: string
+): Promise<string | null> {
+  const session = await prisma.streamSession.findUnique({
+    where: { id: streamSessionId },
+    select: { platform: true, youtubeUrl: true, metadataJson: true },
+  });
+  if (!session || (session.platform ?? "youtube") !== "kick") return null;
+
+  const { readStreamEmbed, parseStreamUrl } = await import(
+    "@/lib/streamPlatform"
   );
+  const embed = readStreamEmbed(session.metadataJson);
+  const parsed = parseStreamUrl(session.youtubeUrl);
+  const channel =
+    embed.kickChannel?.trim() || parsed?.embed.kickChannel?.trim();
+  if (!channel) return null;
+
+  const vodUrl = resolveStreamCaptureUrl({
+    platform: session.platform,
+    youtubeUrl: session.youtubeUrl,
+    metadataJson: session.metadataJson,
+    liveStatus: "live",
+  });
+  // Only useful as a fallback when we were targeting the VOD URL.
+  if (!vodUrl.includes("/videos/")) return null;
+  return `https://kick.com/${channel}`;
 }
 
 export async function startLiveRecording(streamSessionId: string) {
+  const liveFromStart = await preferLiveFromStartForSession(streamSessionId);
   try {
     return await startLiveRecordingAttempt(streamSessionId, {
-      liveFromStart: true,
+      liveFromStart,
     });
   } catch (initialError) {
-    if (isLiveFromStartUnavailable(initialError)) {
+    const kickEdgeUrl = await kickChannelEdgeCaptureUrl(streamSessionId);
+    if (kickEdgeUrl) {
+      console.warn(
+        `[source] Kick VOD from-start failed for ${streamSessionId}; capturing channel live edge`
+      );
+      try {
+        const { clearCompanionAudioState } = await import(
+          "@/services/companionAudioService"
+        );
+        clearCompanionAudioState(streamSessionId);
+      } catch {
+        // ignore
+      }
+      activeRecordingErrors.delete(streamSessionId);
+      return await startLiveRecordingAttempt(streamSessionId, {
+        liveFromStart: false,
+        captureUrlOverride: kickEdgeUrl,
+      });
+    }
+
+    if (liveFromStart && shouldRetryLiveFromStart(initialError)) {
+      edgeFallbackDone.add(streamSessionId);
       try {
         const { clearCompanionAudioState } = await import(
           "@/services/companionAudioService"
@@ -466,10 +590,11 @@ export async function startLiveRecording(streamSessionId: string) {
       try {
         return await startLiveRecordingAttempt(streamSessionId, {
           youtubeExtractorArgs: extractorArgs,
-          liveFromStart: true,
+          liveFromStart,
         });
       } catch (error) {
-        if (isLiveFromStartUnavailable(error)) {
+        if (liveFromStart && shouldRetryLiveFromStart(error)) {
+          edgeFallbackDone.add(streamSessionId);
           try {
             const { clearCompanionAudioState } = await import(
               "@/services/companionAudioService"
@@ -580,6 +705,17 @@ export async function stopLiveRecording(
   if (proc?.pid) pids.add(proc.pid);
   activeRecordings.delete(streamSessionId);
   activeRecordingErrors.delete(streamSessionId);
+  liveFromStartBySession.delete(streamSessionId);
+  edgeFallbackDone.delete(streamSessionId);
+
+  try {
+    const { clearCompanionAudioState } = await import(
+      "@/services/companionAudioService"
+    );
+    clearCompanionAudioState(streamSessionId);
+  } catch {
+    // ignore
+  }
 
   const state = await prisma.liveRecordingState.findUnique({
     where: { streamSessionId },
@@ -617,7 +753,7 @@ function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Kill process + children (yt-dlp spawns ffmpeg on Windows). */
+/** Kill process + children (yt-dlp spawns ffmpeg). */
 function killProcessTree(pid: number) {
   if (!pid || pid <= 0) return;
   try {
@@ -627,7 +763,23 @@ function killProcessTree(pid: number) {
         windowsHide: true,
       });
     } else {
-      process.kill(pid, "SIGTERM");
+      try {
+        // Negative PID = process group (spawned detached).
+        process.kill(-pid, "SIGTERM");
+      } catch {
+        process.kill(pid, "SIGTERM");
+      }
+      setTimeout(() => {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            // already exited
+          }
+        }
+      }, 1500).unref();
     }
   } catch {
     // already exited

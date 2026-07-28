@@ -15,7 +15,7 @@ export async function GET(
     const { sessionId } = await params;
     const session = await prisma.streamSession.findUnique({
       where: { id: sessionId },
-      select: { liveStatus: true },
+      select: { liveStatus: true, platform: true },
     });
     if (!session || session.liveStatus === REPLACED_SESSION_STATUS) {
       return errorResponse("Session not found", 404);
@@ -23,7 +23,10 @@ export async function GET(
     const isLive =
       session.liveStatus === "live" || session.liveStatus === "upcoming";
 
-    const thumbnails = await getTimelineThumbnails(sessionId, { isLive });
+    const thumbnails = await getTimelineThumbnails(sessionId, {
+      isLive,
+      platform: session.platform,
+    });
     return jsonResponse({ thumbnails });
   } catch (error) {
     const message =

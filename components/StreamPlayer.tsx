@@ -73,6 +73,20 @@ export const StreamPlayer = forwardRef<StreamPlayerHandle, StreamPlayerProps>(
       );
     }
 
+    // Preferring local for Twitch/Kick live scrubbing: if remux fails, show a
+    // capture placeholder instead of jumping to the live-edge embed (which
+    // breaks timeline timestamps).
+    if (preferLocalVideo && localFailed) {
+      return (
+        <StreamCapturePlaceholder
+          platform={platform}
+          streamPageUrl={streamPageUrl}
+          channel={resolvedEmbed.kickChannel ?? resolvedEmbed.twitchChannel}
+          recordedSeconds={recordedSeconds}
+        />
+      );
+    }
+
     if (platform === "kick" && resolvedEmbed.kickChannel) {
       return (
         <KickEmbedPlayer

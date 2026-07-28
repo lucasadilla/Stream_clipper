@@ -91,7 +91,7 @@ export async function fetchTwitchHelixMetadata(
       actualStartTime: null,
       scheduledStartTime: null,
       concurrentViewers: item.view_count ?? null,
-      durationSeconds: null,
+      durationSeconds: parseTwitchDuration(item.duration),
       raw: withStreamEmbed(item as unknown as Record<string, unknown>, parsed.embed),
     };
   }
@@ -161,6 +161,18 @@ export function twitchPreviewUrl(channel: string): string {
   return `https://static-cdn.jtvnw.net/previews-ttv/live_user_${channel.toLowerCase()}-1280x720.jpg`;
 }
 
+/** Parse Twitch Helix duration strings like "1h2m3s" / "45m12s" / "33s". */
+export function parseTwitchDuration(duration: string | null | undefined): number | null {
+  if (!duration?.trim()) return null;
+  const match = duration.trim().match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/i);
+  if (!match) return null;
+  const hours = Number(match[1] ?? 0);
+  const minutes = Number(match[2] ?? 0);
+  const seconds = Number(match[3] ?? 0);
+  const total = hours * 3600 + minutes * 60 + seconds;
+  return total > 0 ? total : null;
+}
+
 export function fallbackTwitchMetadata(
   parsed: ParsedStreamUrl
 ): YtDlpStreamMetadata {
@@ -168,33 +180,14 @@ export function fallbackTwitchMetadata(
   const isVod = !!parsed.embed.twitchVideoId;
 
   return {
-    sourceId: parsed.sourceId,
+    sourceId: isVod ? parsed.sourceId : channel.toLowerCase(),
     title: isVod ? `Twitch VOD ${parsed.sourceId}` : `${channel} (Twitch)`,
     description: "",
     channelTitle: channel,
     channelId: "",
     thumbnailUrl: isVod ? "" : twitchPreviewUrl(channel),
-    liveStatus: isVod ? "completed" : "live",
-    actualStartTime: null,
-    scheduledStartTime: null,
-    concurrentViewers: null,
-    durationSeconds: null,
-    raw: withStreamEmbed({ fallback: true }, parsed.embed),
-  };
-}
-
-export function fallbackKickMetadata(parsed: ParsedStreamUrl): YtDlpStreamMetadata {
-  const channel = parsed.embed.kickChannel ?? parsed.sourceId;
-  const isVod = parsed.canonicalUrl.includes("/videos/");
-
-  return {
-    sourceId: parsed.sourceId,
-    title: isVod ? `Kick VOD` : `${channel} (Kick)`,
-    description: "",
-    channelTitle: channel,
-    channelId: "",
-    thumbnailUrl: "",
-    liveStatus: isVod ? "completed" : "live",
+    // Don't assume channel URLs are live — acquireSourceMedia probes yt-dlp.
+    liveStatus: isVod ? "completed" : "none",
     actualStartTime: null,
     scheduledStartTime: null,
     concurrentViewers: null,

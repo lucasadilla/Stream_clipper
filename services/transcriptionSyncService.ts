@@ -7,6 +7,7 @@ import {
   TRANSCRIPTION_BUDGET_LIVE_SECONDS,
   TRANSCRIPTION_BUDGET_VOD_SECONDS,
   TRANSCRIPTION_CHUNK_SECONDS,
+  TRANSCRIPTION_MAX_GROUPS_PER_SYNC,
   TRANSCRIPTION_PARALLEL,
 } from "@/lib/transcriptionConstants";
 import {
@@ -843,21 +844,66 @@ async function runSyncTranscription(
   let transcribedThrough = fromSeconds;
   let audioSecondsProcessed = 0;
 
-  // Seeking into a growing DASH recording costs up to ~80s, so each call pays
-  // for exactly ONE seek: process only the first contiguous gap group. The
-  // steady polling loop works through remaining gaps on subsequent calls.
-  const group = groupContiguousRanges(ranges)[0]!;
-  const { chunks, notReady } = await prepareGroupAudio(
-    streamSessionId,
-    inputPath,
-    group,
-    availableSeconds
+  // Each contiguous gap group needs one ffmpeg seek. Process several groups per
+  // sync (within budget) so catch-up does not wait on the next client/worker poll.
+  const groups = groupContiguousRanges(ranges).slice(
+    0,
+    TRANSCRIPTION_MAX_GROUPS_PER_SYNC
   );
+  let providerError: string | null = null;
+  let anyNotReady = false;
+  let groupsAttempted = 0;
 
-  if (chunks.length === 0) {
+  outer: for (const group of groups) {
+    if (audioSecondsProcessed >= budgetSeconds - 1) break;
+
+    const { chunks, notReady } = await prepareGroupAudio(
+      streamSessionId,
+      inputPath,
+      group,
+      availableSeconds
+    );
+    groupsAttempted += 1;
+    if (notReady) anyNotReady = true;
+    if (chunks.length === 0) continue;
+
+    for (let i = 0; i < chunks.length; i += parallel) {
+      if (audioSecondsProcessed >= budgetSeconds - 1) break outer;
+
+      const wave = chunks.slice(i, i + parallel);
+      const results = await Promise.all(
+        wave.map((c) =>
+          transcribeAudioRange(
+            streamSessionId,
+            c.audioPath,
+            c.audioStart,
+            c.start,
+            c.end
+          )
+        )
+      );
+
+      for (let j = 0; j < wave.length; j++) {
+        const chunk = wave[j]!;
+        const result = results[j]!;
+        if (result.skipped && result.reason === "provider_unavailable") {
+          providerError = result.error ?? "OpenAI is unreachable";
+          for (const rest of chunks.slice(i)) {
+            await fs.unlink(rest.audioPath).catch(() => {});
+          }
+          break outer;
+        }
+        transcribedThrough = Math.max(transcribedThrough, chunk.end);
+        audioSecondsProcessed += chunk.end - chunk.start;
+        if (!result.skipped) transcribedSegments += result.segments;
+      }
+    }
+  }
+
+  if (groupsAttempted > 0 && transcribedSegments === 0 && !providerError) {
     return {
       skipped: true,
-      reason: notReady
+      reason: anyNotReady
         ? "audio_not_ready"
         : ranges.length > 0
           ? "silent"
@@ -866,39 +912,6 @@ async function runSyncTranscription(
       recordedSeconds: recorded,
       placeholdersRemoved,
     };
-  }
-
-  let providerError: string | null = null;
-
-  outer: for (let i = 0; i < chunks.length; i += parallel) {
-    const wave = chunks.slice(i, i + parallel);
-    const results = await Promise.all(
-      wave.map((c) =>
-        transcribeAudioRange(
-          streamSessionId,
-          c.audioPath,
-          c.audioStart,
-          c.start,
-          c.end
-        )
-      )
-    );
-
-    for (let j = 0; j < wave.length; j++) {
-      const chunk = wave[j]!;
-      const result = results[j]!;
-      if (result.skipped && result.reason === "provider_unavailable") {
-        providerError = result.error ?? "OpenAI is unreachable";
-        // Clean up remaining prepared WAVs; ranges stay uncovered for retry.
-        for (const rest of chunks.slice(i)) {
-          await fs.unlink(rest.audioPath).catch(() => {});
-        }
-        break outer;
-      }
-      transcribedThrough = Math.max(transcribedThrough, chunk.end);
-      audioSecondsProcessed += chunk.end - chunk.start;
-      if (!result.skipped) transcribedSegments += result.segments;
-    }
   }
 
   if (providerError && transcribedSegments === 0) {

@@ -38,8 +38,8 @@ export function getOpenAiWhisperModel(): string {
 /** Higher-accuracy text pass; Whisper remains the timing/alignment pass. */
 export function getOpenAiTranscriptionQualityModel(): string | null {
   const configured = process.env.OPENAI_TRANSCRIPTION_QUALITY_MODEL?.trim();
-  if (configured && /^(off|none|false|0)$/i.test(configured)) return null;
-  return configured || "gpt-4o-transcribe";
+  if (!configured || /^(off|none|false|0)$/i.test(configured)) return null;
+  return configured;
 }
 
 export function getTranscriptionLanguage(): string | undefined {
@@ -49,10 +49,11 @@ export function getTranscriptionLanguage(): string | undefined {
 }
 
 export function getOpenRouterWhisperModel(): string {
-  // Prefer a Whisper model that supports verbose_json word/segment clocks.
-  // turbo is faster but some OpenRouter routes only return plain text.
+  // turbo is the incremental default (faster catch-up). Override with
+  // OPENROUTER_WHISPER_MODEL=openai/whisper-large-v3 for max timestamp fidelity.
   return (
-    process.env.OPENROUTER_WHISPER_MODEL?.trim() || "openai/whisper-large-v3"
+    process.env.OPENROUTER_WHISPER_MODEL?.trim() ||
+    "openai/whisper-large-v3-turbo"
   );
 }
 

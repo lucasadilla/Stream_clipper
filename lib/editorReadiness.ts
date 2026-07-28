@@ -1,4 +1,7 @@
-import { expectedThumbCountForDuration } from "@/lib/thumbnailConstants";
+import {
+  expectedThumbCountForDuration,
+  THUMB_LIVE_READY_WINDOW_SECONDS,
+} from "@/lib/thumbnailConstants";
 
 /** Timeline filmstrip + transcript should cover this fraction before opening. */
 export const EDITOR_READY_RATIO = 0.9;
@@ -17,6 +20,9 @@ export const EDITOR_PREPARE_MAX_MS = 3 * 60 * 1000;
  * the capture is video-only DASH and companion audio is still starting).
  */
 export const EDITOR_TRANSCRIPT_GRACE_MS = 25_000;
+
+/** Live Kick/Twitch: open once the first window of filmstrip is ready. */
+export const EDITOR_LIVE_SOFT_OPEN_MS = 10_000;
 
 export function editorPreparedStorageKey(sessionId: string): string {
   return `clipper:editorPrepared:${sessionId}`;
@@ -45,13 +51,18 @@ export function writeEditorPreparedFlag(sessionId: string, prepared: boolean): v
 export interface EditorReadinessInput {
   recordedSeconds: number;
   transcribedSeconds: number;
-  thumbnails: Array<{ endTimeSeconds: number }>;
+  thumbnails: Array<{ startTimeSeconds?: number; endTimeSeconds: number }>;
   prepareElapsedMs: number;
   hasSourceError?: boolean;
   /** Session was already opened successfully earlier in this tab. */
   previouslyPrepared?: boolean;
-  /** Live status from /transcribe (e.g. no_audio, audio_not_ready). */
+  /** Transcription status from /transcribe (e.g. no_audio, audio_not_ready). */
   transcriptionHint?: string | null;
+  /**
+   * Live sessions (esp. Kick from-start) can have a huge recorded backlog
+   * immediately — only require filmstrip coverage of the first window.
+   */
+  isLive?: boolean;
 }
 
 export interface EditorReadiness {
@@ -71,7 +82,7 @@ export interface EditorReadiness {
   openingWithoutFullTranscript: boolean;
 }
 
-function clamp01(n: number): number {
+function ratio01(n: number): number {
   if (!Number.isFinite(n) || n <= 0) return 0;
   if (n >= 1) return 1;
   return n;
@@ -87,16 +98,33 @@ export function computeEditorReadiness(
     ...input.thumbnails.map((t) => t.endTimeSeconds),
     0
   );
-  const expectedThumbCount = expectedThumbCountForDuration(recorded);
+
+  // Live Kick VOD catch-up can report 30–120+ min instantly. Scoring against
+  // the full backlog keeps the prepare screen stuck generating filmstrip.
+  const readinessBasis = input.isLive
+    ? Math.min(recorded, THUMB_LIVE_READY_WINDOW_SECONDS)
+    : recorded;
+
+  const expectedThumbCount = expectedThumbCountForDuration(readinessBasis);
   const thumbCount = input.thumbnails.length;
+  const thumbsInWindow = input.thumbnails.filter((t) => {
+    const start = t.startTimeSeconds ?? 0;
+    return start < readinessBasis || t.endTimeSeconds <= readinessBasis;
+  }).length;
 
   const thumbByTime =
-    recorded > 0 ? clamp01(thumbCoveredSeconds / recorded) : 0;
+    readinessBasis > 0
+      ? ratio01(Math.min(thumbCoveredSeconds, readinessBasis) / readinessBasis)
+      : 0;
   const thumbByCount =
-    expectedThumbCount > 0 ? clamp01(thumbCount / expectedThumbCount) : 0;
+    expectedThumbCount > 0
+      ? ratio01(Math.min(thumbsInWindow, thumbCount) / expectedThumbCount)
+      : 0;
   const thumbRatio = Math.max(thumbByTime, thumbByCount);
   const transcriptRatio =
-    recorded > 0 ? clamp01(transcribed / recorded) : 0;
+    readinessBasis > 0
+      ? ratio01(Math.min(transcribed, readinessBasis) / readinessBasis)
+      : 0;
   const overallRatio = (thumbRatio + transcriptRatio) / 2;
 
   const forcedByTimeout = input.prepareElapsedMs >= EDITOR_PREPARE_MAX_MS;
@@ -104,6 +132,10 @@ export function computeEditorReadiness(
   const transcriptReady = transcriptRatio >= EDITOR_READY_RATIO;
   const transcriptGraceElapsed =
     input.prepareElapsedMs >= EDITOR_TRANSCRIPT_GRACE_MS;
+  const liveSoftOpen =
+    Boolean(input.isLive) &&
+    input.prepareElapsedMs >= EDITOR_LIVE_SOFT_OPEN_MS &&
+    (thumbCount >= 2 || thumbRatio >= 0.45);
 
   let ready = false;
   let openingWithoutFullTranscript = false;
@@ -121,6 +153,9 @@ export function computeEditorReadiness(
       (recorded >= 2 && input.prepareElapsedMs >= 20_000);
   } else if (recorded < 2) {
     ready = false;
+  } else if (liveSoftOpen) {
+    ready = true;
+    openingWithoutFullTranscript = !transcriptReady;
   } else if (recorded < EDITOR_READY_MIN_SECONDS) {
     const hasThumb = thumbCount > 0 || thumbRatio >= 0.5;
     const hasTranscript = transcribed > 0 || transcriptRatio >= 0.5;
@@ -178,10 +213,7 @@ export function computeEditorReadiness(
     detailMessage = "Timeline is ready";
   }
 
-  if (
-    forcedByTimeout &&
-    !(thumbsReady && transcriptReady)
-  ) {
+  if (forcedByTimeout && !(thumbsReady && transcriptReady)) {
     statusMessage = "Opening with partial timeline";
     detailMessage = "Taking longer than usual — continuing with what's ready.";
   }

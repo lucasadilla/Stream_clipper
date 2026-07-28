@@ -7,6 +7,7 @@ import {
 } from "@/lib/youtube";
 import {
   parseStreamUrl,
+  readStreamEmbed,
   type StreamPlatform,
   type StreamEmbedInfo,
 } from "@/lib/streamPlatform";
@@ -14,6 +15,16 @@ import {
   fetchStreamPlatformMetadata,
   withStreamEmbed,
 } from "@/services/ytDlpMetadataService";
+
+function mergeStreamEmbed(
+  previous: StreamEmbedInfo | undefined,
+  metadataRaw: Record<string, unknown>
+): StreamEmbedInfo {
+  return {
+    ...(previous ?? {}),
+    ...readStreamEmbed(metadataRaw),
+  };
+}
 
 interface SessionMetadataInput {
   platform: StreamPlatform;
@@ -66,6 +77,7 @@ async function resolveSessionMetadata(
   }
 
   const metadata = await fetchStreamPlatformMetadata(parsed);
+  const embed = mergeStreamEmbed(parsed.embed, metadata.raw);
   return {
     platform: parsed.platform,
     sourceId: metadata.sourceId || parsed.sourceId,
@@ -80,7 +92,7 @@ async function resolveSessionMetadata(
     scheduledStartTime: metadata.scheduledStartTime,
     concurrentViewers: metadata.concurrentViewers,
     activeLiveChatId: null,
-    metadataJson: withStreamEmbed(metadata.raw, parsed.embed),
+    metadataJson: withStreamEmbed(metadata.raw, embed),
     durationSeconds: metadata.durationSeconds,
   };
 }
@@ -157,6 +169,7 @@ export async function refreshSessionLiveMetadata(streamSessionId: string) {
     canonicalUrl: session.youtubeUrl,
     embed: embed ?? {},
   });
+  const mergedEmbed = mergeStreamEmbed(embed, metadata.raw);
 
   return prisma.streamSession.update({
     where: { id: streamSessionId },
@@ -166,7 +179,7 @@ export async function refreshSessionLiveMetadata(streamSessionId: string) {
       actualStartTime: metadata.actualStartTime,
       scheduledStartTime: metadata.scheduledStartTime,
       concurrentViewers: metadata.concurrentViewers,
-      metadataJson: toJsonValue(withStreamEmbed(metadata.raw, embed ?? {})),
+      metadataJson: toJsonValue(withStreamEmbed(metadata.raw, mergedEmbed)),
     },
   });
 }

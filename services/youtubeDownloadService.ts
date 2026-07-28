@@ -122,8 +122,10 @@ export function detectDownloadPlatform(
 }
 
 /**
- * For live Twitch, prefer the channel URL over /videos/:id.
- * Concurrent VOD URLs often 403 on GQL from datacenter IPs; channel + live-from-start works.
+ * Prefer the URL yt-dlp can actually capture from stream start.
+ * - Twitch live: channel URL + --live-from-start (VOD URLs often 403 on GQL).
+ * - Kick live: ongoing VOD UUID URL (kick:vod). Channel URLs are live-edge only;
+ *   Kick does not support --live-from-start on kick:live.
  */
 export function resolveStreamCaptureUrl(session: {
   platform?: string | null;
@@ -131,20 +133,36 @@ export function resolveStreamCaptureUrl(session: {
   liveStatus?: string | null;
   metadataJson?: unknown;
 }): string {
-  if ((session.platform ?? "youtube") !== "twitch") {
-    return session.youtubeUrl;
-  }
+  const platform = session.platform ?? "youtube";
   const isLive =
     session.liveStatus === "live" || session.liveStatus === "upcoming";
+  const embed = readStreamEmbed(session.metadataJson);
+  const parsed = parseStreamUrl(session.youtubeUrl);
+
+  if (platform === "kick" && isLive) {
+    const channel =
+      embed?.kickChannel?.trim() || parsed?.embed.kickChannel?.trim();
+    const videoId =
+      embed?.kickVideoId?.trim() || parsed?.embed.kickVideoId?.trim();
+    if (channel && videoId) {
+      return `https://kick.com/${channel}/videos/${videoId}`;
+    }
+    if (channel) {
+      return `https://kick.com/${channel}`;
+    }
+    return session.youtubeUrl;
+  }
+
+  if (platform !== "twitch") {
+    return session.youtubeUrl;
+  }
   if (!isLive) return session.youtubeUrl;
 
-  const embed = readStreamEmbed(session.metadataJson);
   const channel = embed?.twitchChannel?.trim();
   if (channel) {
     return `https://www.twitch.tv/${channel}`;
   }
 
-  const parsed = parseStreamUrl(session.youtubeUrl);
   if (parsed?.embed.twitchChannel) {
     return `https://www.twitch.tv/${parsed.embed.twitchChannel}`;
   }
@@ -377,6 +395,24 @@ export async function getYtDlpDeploymentArgs(
   return args;
 }
 
+export function isLiveFromStartUnavailable(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no formats that can be downloaded from the start|Unable to extract the VOD associated|--live-from-start is passed/i.test(
+    message
+  );
+}
+
+export function isFatalTwitchCaptureError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    isLiveFromStartUnavailable(message) ||
+    (/twitch/i.test(message) &&
+      /HTTP Error 40[03]|Forbidden|Bad Request|Unable to download JSON metadata|gql\.twitch\.tv/i.test(
+        message
+      ))
+  );
+}
+
 export type YtDlpErrorKind =
   | "bot_verification"
   | "private_video"
@@ -384,6 +420,7 @@ export type YtDlpErrorKind =
   | "age_restricted"
   | "unavailable"
   | "twitch_forbidden"
+  | "twitch_live_from_start"
   | "ffmpeg_missing"
   | "unknown";
 
@@ -392,9 +429,12 @@ export function classifyYtDlpError(error: unknown): YtDlpErrorKind {
   if (/ffmpeg could not be found|ffmpeg is not installed/i.test(message)) {
     return "ffmpeg_missing";
   }
+  if (isLiveFromStartUnavailable(message)) {
+    return "twitch_live_from_start";
+  }
   if (
-    /twitch/i.test(message) &&
-    /HTTP Error 40[03]|Forbidden|Bad Request|Unable to download JSON metadata/i.test(
+    /twitch|gql\.twitch\.tv/i.test(message) &&
+    /HTTP Error 40[03]|Forbidden|Bad Request|Unable to download JSON metadata|cookies?/i.test(
       message
     )
   ) {
@@ -428,6 +468,11 @@ export function formatYtDlpUserError(error: unknown): string {
       return "This age-restricted video requires authorized account cookies, or an authorized VOD upload.";
     case "unavailable":
       return "This stream has ended or is unavailable. Retry with its replay URL, or upload the VOD.";
+    case "twitch_live_from_start":
+      return (
+        "Twitch has no start-of-stream VOD for this broadcast, so capture continues from the live edge. " +
+        "Past moments before capture started won't be available unless you upload the VOD later."
+      );
     case "twitch_forbidden":
       return (
         "Twitch blocked stream metadata from this server. Keep TWITCH_CLIENT_ID for Helix only " +
@@ -675,26 +720,39 @@ export async function downloadClipSegmentFromStream(
 
   const section = `*${startTime}-${endTime}`;
   const platform = detectDownloadPlatform(streamUrl);
+  const formatFallbacks = [
+    "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+    "bestvideo+bestaudio/best",
+    "best",
+  ];
 
-  await runYtDlpWithFormatFallback(
-    [
-      ...baseYtDlpArgs({ platform, url: streamUrl }),
-      ...(options?.liveFromStart ? ["--live-from-start"] : []),
-      "--download-sections",
-      section,
-      "--force-keyframes-at-cuts",
-      "-f",
-      "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
-      "-o",
-      outputPath,
-    ],
-    streamUrl,
-    [
-      "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
-      "bestvideo+bestaudio/best",
-      "best",
-    ]
-  );
+  const attempt = async (liveFromStart: boolean) => {
+    await runYtDlpWithFormatFallback(
+      [
+        ...baseYtDlpArgs({ platform, url: streamUrl }),
+        ...(liveFromStart ? ["--live-from-start"] : ["--no-live-from-start"]),
+        "--download-sections",
+        section,
+        "--force-keyframes-at-cuts",
+        "-f",
+        "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+        "-o",
+        outputPath,
+      ],
+      streamUrl,
+      formatFallbacks
+    );
+  };
+
+  try {
+    await attempt(Boolean(options?.liveFromStart));
+  } catch (error) {
+    if (options?.liveFromStart && isLiveFromStartUnavailable(error)) {
+      await attempt(false);
+      return;
+    }
+    throw error;
+  }
 }
 
 /** @deprecated Use downloadClipSegmentFromStream */

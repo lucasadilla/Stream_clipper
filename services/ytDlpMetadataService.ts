@@ -7,10 +7,13 @@ import {
 import type { ParsedStreamUrl, StreamEmbedInfo } from "@/lib/streamPlatform";
 import { sanitizeUnixTimestampSeconds } from "@/lib/timelineBounds";
 import {
-  fallbackKickMetadata,
   fallbackTwitchMetadata,
   fetchTwitchHelixMetadata,
 } from "@/services/twitchHelixService";
+import {
+  fallbackKickMetadata,
+  fetchKickApiMetadata,
+} from "@/services/kickApiService";
 
 export interface YtDlpStreamMetadata {
   sourceId: string;
@@ -77,11 +80,11 @@ function mapYtDlpJson(
       : null;
   const liveStatus = mapYtDlpLiveStatus(data);
   const isLiveLike = liveStatus === "live" || liveStatus === "upcoming";
-  // For live Twitch channel URLs, keep the login as sourceId so the embed
-  // opens the live channel — not yt-dlp's numeric stream id (looks like a VOD).
+  // For live Twitch/Kick channel URLs, keep the login/slug as sourceId so the
+  // embed opens the live channel — not yt-dlp's numeric/stream id.
   const sourceId =
-    isLiveLike && embed.twitchChannel
-      ? embed.twitchChannel
+    isLiveLike && (embed.twitchChannel || embed.kickChannel)
+      ? (embed.twitchChannel ?? embed.kickChannel)!
       : (data.id ?? fallbackSourceId);
 
   return {
@@ -173,6 +176,24 @@ export async function probeYtDlpLiveStatus(
 export async function fetchStreamPlatformMetadata(
   parsed: ParsedStreamUrl
 ): Promise<YtDlpStreamMetadata> {
+  // Kick Public API first — yt-dlp channel dumps are slow (Cloudflare +
+  // impersonate) and kick:live cannot start from stream beginning anyway.
+  if (parsed.platform === "kick") {
+    const kick = await fetchKickApiMetadata(parsed);
+    if (kick) return kick;
+    // Skip multi-minute yt-dlp Cloudflare dumps on signup when the API is down.
+    // acquireSourceMedia will probe live status if needed.
+    if (!parsed.embed.kickVideoId && !parsed.canonicalUrl.includes("/videos/")) {
+      return fallbackKickMetadata(parsed);
+    }
+  }
+
+  // Twitch Helix is faster than yt-dlp when credentials exist.
+  if (parsed.platform === "twitch") {
+    const helix = await fetchTwitchHelixMetadata(parsed);
+    if (helix) return helix;
+  }
+
   try {
     return await fetchYtDlpMetadata(
       parsed.canonicalUrl,
@@ -191,13 +212,17 @@ export async function fetchStreamPlatformMetadata(
       }
     }
 
-    if (parsed.platform === "kick" && isTransientYtDlpError(message)) {
-      return fallbackKickMetadata(parsed);
+    if (parsed.platform === "kick") {
+      const kick = await fetchKickApiMetadata(parsed);
+      if (kick) return kick;
+      if (isTransientYtDlpError(message)) {
+        return fallbackKickMetadata(parsed);
+      }
     }
 
     if (isTransientYtDlpError(message)) {
       throw new Error(
-        `${message}\n\nTwitch/Kick metadata could not be fetched (DNS/network). Try: flush DNS (ipconfig /flushdns), switch DNS to 1.1.1.1, or add TWITCH_CLIENT_ID + TWITCH_CLIENT_SECRET to .env for Helix fallback.`
+        `${message}\n\nTwitch/Kick metadata could not be fetched (DNS/network). Try: flush DNS (ipconfig /flushdns), switch DNS to 1.1.1.1, or add TWITCH_CLIENT_ID + TWITCH_CLIENT_SECRET / AUTH_KICK_ID + AUTH_KICK_SECRET to .env for API fallback.`
       );
     }
 

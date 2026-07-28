@@ -12,11 +12,14 @@ import {
   getYtDlpDeploymentArgs,
   resolveYtDlpInvocation,
   detectDownloadPlatform,
+  isLiveFromStartUnavailable,
 } from "@/services/youtubeDownloadService";
 
 /** Detached bestaudio capture when the primary file is video-only DASH. */
 const activeCompanionAudio = new Map<string, ChildProcess>();
 const companionAttemptAt = new Map<string, number>();
+const companionErrors = new Map<string, string>();
+const companionEdgeFallbackDone = new Set<string>();
 
 const COMPANION_RETRY_MS = 30_000;
 const COMPANION_OUTPUT = "source.audio.m4a";
@@ -130,15 +133,42 @@ function startCompanionAudioDownload(
       ];
       const proc = spawn(invocation.command, args, {
         detached: true,
-        stdio: ["ignore", "ignore", "ignore"],
+        stdio: ["ignore", "ignore", "pipe"],
         shell: false,
         windowsHide: true,
       });
+      companionErrors.delete(streamSessionId);
+      proc.stderr?.setEncoding("utf8");
+      proc.stderr?.on("data", (chunk: string) => {
+        const previous = companionErrors.get(streamSessionId) ?? "";
+        companionErrors.set(
+          streamSessionId,
+          `${previous}${chunk}`.slice(-8_000)
+        );
+      });
       proc.unref();
       activeCompanionAudio.set(streamSessionId, proc);
-      proc.on("exit", () => {
+      proc.on("exit", (code) => {
         if (activeCompanionAudio.get(streamSessionId) === proc) {
           activeCompanionAudio.delete(streamSessionId);
+        }
+        const detail = companionErrors.get(streamSessionId) ?? "";
+        if (
+          code !== 0 &&
+          options?.isLive &&
+          liveFromStart &&
+          !companionEdgeFallbackDone.has(streamSessionId) &&
+          isLiveFromStartUnavailable(detail)
+        ) {
+          companionEdgeFallbackDone.add(streamSessionId);
+          companionAttemptAt.delete(streamSessionId);
+          console.warn(
+            `[companion-audio] live-from-start failed for ${streamSessionId}; retrying from live edge`
+          );
+          startCompanionAudioDownload(streamSessionId, youtubeUrl, outputPath, {
+            isLive: true,
+            liveFromStart: false,
+          });
         }
       });
     } catch {
@@ -151,11 +181,21 @@ export function clearCompanionAudioState(streamSessionId: string): void {
   const proc = activeCompanionAudio.get(streamSessionId);
   if (proc && !proc.killed) {
     try {
-      proc.kill();
+      if (proc.pid) {
+        try {
+          process.kill(-proc.pid, "SIGTERM");
+        } catch {
+          proc.kill();
+        }
+      } else {
+        proc.kill();
+      }
     } catch {
       // ignore
     }
   }
   activeCompanionAudio.delete(streamSessionId);
   companionAttemptAt.delete(streamSessionId);
+  companionErrors.delete(streamSessionId);
+  companionEdgeFallbackDone.delete(streamSessionId);
 }
