@@ -537,6 +537,15 @@ body[data-render-modal-open] [data-timeline-playhead] {
   }
 }
 
+@keyframes agent-indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .marketing-marquee-track {
     animation: none;

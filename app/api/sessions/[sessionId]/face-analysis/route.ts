@@ -17,6 +17,7 @@ const bodySchema = z.object({
   sampleFps: z.number().min(1).max(8).optional(),
   clipSuggestionId: z.string().optional(),
   force: z.boolean().optional(),
+  priority: z.boolean().optional(),
 });
 
 /** Start (or reuse) a face analysis for a clip range within this session. */
@@ -48,6 +49,7 @@ export async function POST(
       endSeconds: body.endSeconds,
       sampleFps: body.sampleFps,
       force: body.force,
+      priority: body.priority,
     });
 
     return jsonResponse({ analysisJobId: jobId, status });

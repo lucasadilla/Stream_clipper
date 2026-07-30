@@ -13,6 +13,11 @@ import {
   listSessionsNeedingTranscription,
 } from "@/services/transcriptionLockService";
 import { syncTranscription } from "@/services/transcriptionSyncService";
+import {
+  AGENT_TRANSCRIPTION_BUDGET_SECONDS,
+  AGENT_TRANSCRIPTION_CHUNK_SECONDS,
+  AGENT_TRANSCRIPTION_PARALLEL,
+} from "@/lib/transcriptionConstants";
 import { runRetentionCleanup } from "@/services/retentionService";
 import {
   claimNextPlatformExport,
@@ -215,8 +220,24 @@ async function processOneTranscription(): Promise<boolean> {
     const claimed = await claimTranscriptionLock(sessionId, WORKER_ID);
     if (!claimed) continue;
     try {
+      const session = await prisma.streamSession.findUnique({
+        where: { id: sessionId },
+        select: { mode: true, liveStatus: true },
+      });
+      const agentPriority = session?.mode === "agent";
       const result = await syncTranscription(sessionId, {
-        budgetSeconds: 120,
+        isLive:
+          session?.liveStatus === "live" ||
+          session?.liveStatus === "upcoming",
+        budgetSeconds: agentPriority
+          ? AGENT_TRANSCRIPTION_BUDGET_SECONDS
+          : 120,
+        ...(agentPriority
+          ? {
+              chunkSeconds: AGENT_TRANSCRIPTION_CHUNK_SECONDS,
+              parallel: AGENT_TRANSCRIPTION_PARALLEL,
+            }
+          : {}),
         heldLockOwner: WORKER_ID,
       });
       if (result.error) {

@@ -15,11 +15,22 @@ import {
   mergeCaptionEdit,
   type CaptionEditsMap,
 } from "@/lib/captionEdits";
-import { buildCaptionTrack, type CaptionCue } from "@/lib/captionTrack";
+import {
+  buildCaptionTrack,
+  lookupCueAtTime,
+  type CaptionCue,
+} from "@/lib/captionTrack";
 import { CaptionAppearancePanel } from "@/components/CaptionAppearancePanel";
-import type { CaptionAppearance } from "@/lib/captionAppearance";
+import {
+  applyCaptionCapitalization,
+  captionPreviewStyle,
+  type CaptionAppearance,
+} from "@/lib/captionAppearance";
 import type { ClipSuggestionData } from "@/components/ClipSuggestionCard";
 import { fetchJson } from "@/lib/apiClient";
+import { LookVideoStage } from "@/components/agent/AgentStudioPreviews";
+import type { ContentLookPresetId } from "@/lib/contentLookPresets";
+import { getContentLookPreset } from "@/lib/contentLookPresets";
 
 interface TranscriptChunk {
   id: string;
@@ -39,6 +50,10 @@ interface AgentClipEditorProps {
   captionAppearance: CaptionAppearance;
   onCaptionAppearanceChange: (value: CaptionAppearance) => void;
   onClipChange: (clip: ClipSuggestionData) => void;
+  /** Instant look applied to the single preview. */
+  lookPreset?: ContentLookPresetId;
+  /** Normalized face box for centering look crops. */
+  faceRect?: { x: number; y: number; width: number; height: number } | null;
 }
 
 export function AgentClipEditor({
@@ -51,24 +66,28 @@ export function AgentClipEditor({
   captionAppearance,
   onCaptionAppearanceChange,
   onClipChange,
+  lookPreset = "auto",
+  faceRect = null,
 }: AgentClipEditorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
   const [currentTime, setCurrentTime] = useState(clip.startTimeSeconds);
   const [dragging, setDragging] = useState<"start" | "end" | "playhead" | null>(
     null
   );
   const [chunks, setChunks] = useState<TranscriptChunk[]>([]);
+  const [chunksLoading, setChunksLoading] = useState(true);
   const [edits, setEdits] = useState<CaptionEditsMap>({});
   const [editingCueId, setEditingCueId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
+  const [previewHeight, setPreviewHeight] = useState(400);
   const startRef = useRef(clip.startTimeSeconds);
   const endRef = useRef(clip.endTimeSeconds);
   startRef.current = clip.startTimeSeconds;
   endRef.current = clip.endTimeSeconds;
 
   const maxTime = Math.max(sourceDuration, clip.endTimeSeconds, 1);
-  // Zoom the trim bar to the clip neighborhood (Twitch-style), not the full VOD.
   const viewPad = Math.max(
     20,
     Math.min(90, (clip.endTimeSeconds - clip.startTimeSeconds) * 0.75)
@@ -83,23 +102,36 @@ export function AgentClipEditor({
   );
 
   useEffect(() => {
+    const el = previewRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      setPreviewHeight(entry?.contentRect.height ?? 400);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
+    setChunksLoading(true);
     void (async () => {
-      const [tx, cap] = await Promise.all([
+      // /transcribe does not return chunks — load from /events like the timeline.
+      const [events, cap] = await Promise.all([
         fetchJson<{
           transcriptChunks?: TranscriptChunk[];
-        }>(`/api/sessions/${sessionId}/transcribe`, { method: "POST" }),
+        }>(`/api/sessions/${sessionId}/events`),
         fetchJson<{ edits?: CaptionEditsMap }>(
           `/api/sessions/${sessionId}/captions`
         ),
       ]);
       if (cancelled) return;
-      if (tx.ok && tx.data.transcriptChunks) {
-        setChunks(tx.data.transcriptChunks);
+      if (events.ok) {
+        setChunks(events.data.transcriptChunks ?? []);
       }
       if (cap.ok && cap.data.edits) {
         setEdits(cap.data.edits);
       }
+      setChunksLoading(false);
     })();
     return () => {
       cancelled = true;
@@ -116,27 +148,36 @@ export function AgentClipEditor({
     );
   }, [chunks, edits, clip.startTimeSeconds, clip.endTimeSeconds]);
 
-  const activeCue = useMemo(() => {
-    return (
-      cues.find(
-        (c) =>
-          currentTime >= c.startTimeSeconds && currentTime < c.endTimeSeconds
-      ) ?? null
-    );
-  }, [cues, currentTime]);
+  const activeCue = useMemo(
+    () => lookupCueAtTime(cues, currentTime),
+    [cues, currentTime]
+  );
+
+  const previewStyles = useMemo(
+    () => captionPreviewStyle(captionAppearance, previewHeight),
+    [captionAppearance, previewHeight]
+  );
+
+  const displayText = activeCue
+    ? applyCaptionCapitalization(
+        activeCue.text,
+        captionAppearance.capitalization
+      )
+    : null;
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !playbackUrl) return;
-    if (video.getAttribute("src") !== playbackUrl) {
-      video.setAttribute("src", playbackUrl);
-      video.load();
-    }
-    try {
-      video.currentTime = clip.startTimeSeconds;
-    } catch {
-      // ignore
-    }
+    const seek = () => {
+      try {
+        video.currentTime = clip.startTimeSeconds;
+        setCurrentTime(clip.startTimeSeconds);
+      } catch {
+        // ignore
+      }
+    };
+    if (video.readyState >= 1) seek();
+    else video.addEventListener("loadedmetadata", seek, { once: true });
   }, [playbackUrl, clip.id, clip.startTimeSeconds]);
 
   const commitRange = useCallback(
@@ -171,6 +212,22 @@ export function AgentClipEditor({
     [clip.startTimeSeconds, viewStart, viewSpan]
   );
 
+  const seekVideo = useCallback((t: number) => {
+    const clamped = Math.max(
+      startRef.current,
+      Math.min(endRef.current, t)
+    );
+    setCurrentTime(clamped);
+    const video = videoRef.current;
+    if (video) {
+      try {
+        video.currentTime = clamped;
+      } catch {
+        // ignore
+      }
+    }
+  }, []);
+
   useEffect(() => {
     if (!dragging) return;
     const onMove = (event: PointerEvent) => {
@@ -188,19 +245,7 @@ export function AgentClipEditor({
           endTimeSeconds: Math.min(maxTime, next),
         });
       } else {
-        const clamped = Math.max(
-          startRef.current,
-          Math.min(endRef.current, t)
-        );
-        setCurrentTime(clamped);
-        const video = videoRef.current;
-        if (video) {
-          try {
-            video.currentTime = clamped;
-          } catch {
-            // ignore
-          }
-        }
+        seekVideo(t);
       }
     };
     const onUp = () => {
@@ -216,7 +261,15 @@ export function AgentClipEditor({
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
-  }, [dragging, timeFromClientX, clip, onClipChange, commitRange, maxTime]);
+  }, [
+    dragging,
+    timeFromClientX,
+    clip,
+    onClipChange,
+    commitRange,
+    maxTime,
+    seekVideo,
+  ]);
 
   async function saveCueEdit(cue: CaptionCue) {
     const text = editText.trim();
@@ -233,50 +286,87 @@ export function AgentClipEditor({
 
   const startPct = toPct(clip.startTimeSeconds);
   const endPct = toPct(clip.endTimeSeconds);
-  const playPct = toPct(
-    Math.max(viewStart, Math.min(viewEnd, currentTime))
-  );
+  const playPct = toPct(Math.max(viewStart, Math.min(viewEnd, currentTime)));
+
+  const useKaraoke =
+    captionAppearance.karaokeEnabled &&
+    activeCue?.words &&
+    activeCue.words.length > 0;
 
   return (
     <div className="space-y-4">
       <div>
         <h2 className="text-lg font-semibold">{clip.title}</h2>
         <p className="text-xs text-[var(--color-muted)]">
-          Drag the handles like a Twitch clip — then tweak captions if you want.
+          One preview — look + captions update live. Drag the handles to trim.
+        </p>
+        <p className="mt-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8f9b89]">
+          {getContentLookPreset(lookPreset).label} look
         </p>
       </div>
 
       <div className="overflow-hidden rounded-xl border border-[var(--color-card-border)] bg-black">
-        <div className="relative mx-auto aspect-[9/16] max-h-[52vh] w-full max-w-sm bg-black">
-          {playbackUrl ? (
-            <video
-              ref={videoRef}
-              className="h-full w-full object-contain"
-              playsInline
-              controls
-              onTimeUpdate={(e) => {
-                const t = e.currentTarget.currentTime;
-                setCurrentTime(t);
-                if (t < clip.startTimeSeconds - 0.15) {
-                  e.currentTarget.currentTime = clip.startTimeSeconds;
-                } else if (t > clip.endTimeSeconds) {
-                  e.currentTarget.pause();
-                  e.currentTarget.currentTime = clip.endTimeSeconds;
-                }
-              }}
-            />
-          ) : (
-            <div className="flex h-full items-center justify-center text-sm text-[var(--color-muted)]">
-              Waiting for local preview…
-            </div>
-          )}
-          {includeCaptions && activeCue && (
-            <div className="pointer-events-none absolute inset-x-3 bottom-10 text-center">
-              <span className="inline-block rounded bg-black/70 px-2 py-1 text-sm font-semibold text-white">
-                {activeCue.text}
-              </span>
-            </div>
-          )}
+        <div
+          ref={previewRef}
+          className="relative mx-auto max-h-[56vh] w-full max-w-sm"
+        >
+          <LookVideoStage
+            presetId={lookPreset}
+            playbackUrl={playbackUrl}
+            videoRef={videoRef}
+            faceRect={faceRect}
+            className="mx-auto max-h-[56vh] w-full rounded-none border-0"
+            onTimeUpdate={(e) => {
+              const t = e.currentTarget.currentTime;
+              setCurrentTime(t);
+              if (t < clip.startTimeSeconds - 0.15) {
+                e.currentTarget.currentTime = clip.startTimeSeconds;
+              } else if (t > clip.endTimeSeconds) {
+                e.currentTarget.pause();
+                e.currentTarget.currentTime = clip.endTimeSeconds;
+              }
+            }}
+          >
+            {includeCaptions ? (
+              <div className="absolute inset-0 overflow-hidden">
+                <div style={previewStyles.container}>
+                  {activeCue && displayText ? (
+                    <p
+                      key={activeCue.id}
+                      style={previewStyles.text}
+                      className="whitespace-pre-line line-clamp-2"
+                    >
+                      {useKaraoke
+                        ? activeCue.words!.map((word, index) => {
+                            const active =
+                              currentTime >= word.start &&
+                              currentTime < word.end;
+                            const label = applyCaptionCapitalization(
+                              word.word,
+                              captionAppearance.capitalization
+                            );
+                            return (
+                              <span key={`${activeCue.id}-${index}`}>
+                                <span
+                                  style={{
+                                    color: active
+                                      ? captionAppearance.highlightColor
+                                      : captionAppearance.color,
+                                  }}
+                                >
+                                  {label}
+                                </span>
+                                {index < activeCue.words!.length - 1 ? " " : ""}
+                              </span>
+                            );
+                          })
+                        : displayText}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+          </LookVideoStage>
         </div>
       </div>
 
@@ -294,25 +384,15 @@ export function AgentClipEditor({
           onPointerDown={(e) => {
             if ((e.target as HTMLElement).dataset.handle) return;
             setDragging("playhead");
-            const t = timeFromClientX(e.clientX);
-            const clamped = Math.max(
-              clip.startTimeSeconds,
-              Math.min(clip.endTimeSeconds, t)
-            );
-            setCurrentTime(clamped);
-            const video = videoRef.current;
-            if (video) {
-              try {
-                video.currentTime = clamped;
-              } catch {
-                // ignore
-              }
-            }
+            seekVideo(timeFromClientX(e.clientX));
           }}
         >
           <div
             className="absolute inset-y-0 bg-[var(--color-accent)]/25"
-            style={{ left: `${startPct}%`, width: `${Math.max(1, endPct - startPct)}%` }}
+            style={{
+              left: `${startPct}%`,
+              width: `${Math.max(1, endPct - startPct)}%`,
+            }}
           />
           <div
             data-handle="start"
@@ -348,7 +428,7 @@ export function AgentClipEditor({
               onChange={(e) => onIncludeCaptionsChange(e.target.checked)}
               className="accent-[var(--color-accent)]"
             />
-            Burn captions into export
+            Show &amp; burn captions
           </label>
           <CaptionAppearancePanel
             appearance={captionAppearance}
@@ -360,14 +440,20 @@ export function AgentClipEditor({
         <div className="space-y-2 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-3">
           <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8f9b89]">
             Captions in range
+            {!chunksLoading && includeCaptions ? ` · ${cues.length}` : ""}
           </p>
           {!includeCaptions ? (
             <p className="text-xs text-[var(--color-muted)]">
               Captions are off for this export.
             </p>
+          ) : chunksLoading ? (
+            <p className="text-xs text-[var(--color-muted)]">
+              Loading transcript…
+            </p>
           ) : cues.length === 0 ? (
             <p className="text-xs text-[var(--color-muted)]">
-              No caption cues in this range yet.
+              No caption cues in this trim range. Try widening the in/out
+              points, or wait for more transcription.
             </p>
           ) : (
             <ul className="max-h-56 space-y-2 overflow-y-auto">
@@ -379,10 +465,14 @@ export function AgentClipEditor({
                     activeCue?.id === cue.id && "border-[var(--color-accent)]"
                   )}
                 >
-                  <p className="mb-1 text-[10px] text-[var(--color-muted)]">
+                  <button
+                    type="button"
+                    className="mb-1 text-[10px] text-[var(--color-muted)] hover:text-[var(--color-accent)]"
+                    onClick={() => seekVideo(cue.startTimeSeconds)}
+                  >
                     {formatSeconds(cue.startTimeSeconds)}–
                     {formatSeconds(cue.endTimeSeconds)}
-                  </p>
+                  </button>
                   {editingCueId === cue.id ? (
                     <div className="space-y-2">
                       <textarea

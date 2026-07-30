@@ -57,6 +57,8 @@ export type ResolvedVerticalLayout = {
     | "center_crop";
   /** Resolved facecam crop (auto candidate or manual override). */
   facecamRect?: NormalizedRect;
+  /** Raw face box inside facecamRect — used to center the face in the panel. */
+  faceRect?: NormalizedRect;
   /** Where the facecam sits in the original frame (for blur/cover/crop-out). */
   originalFacecamRect?: NormalizedRect;
   stacked?: ResolvedStackedSettings;
@@ -204,6 +206,35 @@ function gameplayCropX(
   return facecamCenter >= 0.5 ? "0" : "iw-ow";
 }
 
+/**
+ * After scale-to-cover, crop so a relative point (0..1 inside the pre-scale
+ * image) lands at the center of the output window.
+ */
+function coverCenterCropXY(relX: number, relY: number): { x: string; y: string } {
+  const rx = clamp(relX, 0, 1);
+  const ry = clamp(relY, 0, 1);
+  return {
+    x: `max(0\\,min(iw-ow\\,${rx.toFixed(4)}*iw-ow/2))`,
+    y: `max(0\\,min(ih-oh\\,${ry.toFixed(4)}*ih-oh/2))`,
+  };
+}
+
+/** Relative position of `inner` center inside `outer` (0..1). */
+function relativeCenterInRect(
+  outer: NormalizedRect,
+  inner?: NormalizedRect | null
+): { x: number; y: number } {
+  if (!inner || outer.width <= 0 || outer.height <= 0) {
+    return { x: 0.5, y: 0.42 };
+  }
+  const cx = inner.x + inner.width / 2;
+  const cy = inner.y + inner.height / 2;
+  return {
+    x: clamp((cx - outer.x) / outer.width, 0, 1),
+    y: clamp((cy - outer.y) / outer.height, 0, 1),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Facecam + Gameplay (stacked)
 // ---------------------------------------------------------------------------
@@ -212,7 +243,8 @@ export function buildStackedFacecamFilter(
   ctx: FilterBuildContext,
   facecamRect: NormalizedRect,
   settings: Partial<ResolvedStackedSettings> = {},
-  originalFacecamRect?: NormalizedRect
+  originalFacecamRect?: NormalizedRect,
+  faceRect?: NormalizedRect
 ): string {
   assertContext(ctx);
   const cfg = { ...DEFAULT_STACKED_SETTINGS, ...settings };
@@ -229,15 +261,17 @@ export function buildStackedFacecamFilter(
   const dividerColor = ffmpegColor(cfg.dividerColor, "#000000");
 
   const facePx = normalizedRectToPixels(rect, ctx.sourceWidth, ctx.sourceHeight);
+  const focus = relativeCenterInRect(rect, faceRect ? normalizeRect(faceRect) : null);
+  const faceCrop = coverCenterCropXY(focus.x, focus.y);
 
   const filters: string[] = [];
   filters.push(`split=2[face_src${suffix}][game_src${suffix}]`);
 
-  // Facecam panel: crop the region, cover-scale into the panel.
+  // Facecam panel: crop the region, cover-scale, then crop centered on the face.
   filters.push(
     `[face_src${suffix}]crop=${facePx.width}:${facePx.height}:${facePx.x}:${facePx.y},` +
       `scale=${outW}:${facePanelH}:force_original_aspect_ratio=increase:${SCALE_FLAGS},` +
-      `crop=${outW}:${facePanelH},setsar=1` +
+      `crop=${outW}:${facePanelH}:x='${faceCrop.x}':y='${faceCrop.y}',setsar=1` +
       (divider > 0
         ? `,pad=${outW}:${facePanelH + divider}:0:${cfg.facecamPosition === "top" ? 0 : divider}:color=${dividerColor}`
         : "") +
@@ -283,7 +317,8 @@ export function buildPictureInPictureFilter(
   ctx: FilterBuildContext,
   facecamRect: NormalizedRect,
   settings: Partial<ResolvedPipSettings> = {},
-  originalFacecamRect?: NormalizedRect
+  originalFacecamRect?: NormalizedRect,
+  faceRect?: NormalizedRect
 ): string {
   assertContext(ctx);
   const cfg = { ...DEFAULT_PIP_SETTINGS, ...settings };
@@ -294,6 +329,8 @@ export function buildPictureInPictureFilter(
   const outW = toEven(ctx.outputWidth);
   const outH = toEven(ctx.outputHeight);
   const facePx = normalizedRectToPixels(rect, ctx.sourceWidth, ctx.sourceHeight);
+  const focus = relativeCenterInRect(rect, faceRect ? normalizeRect(faceRect) : null);
+  const pipFocus = coverCenterCropXY(focus.x, focus.y);
 
   const widthRatio = clamp(cfg.widthRatio, 0.2, 0.5);
   const border = toEven(clamp(cfg.borderSize, 0, 16));
@@ -357,7 +394,8 @@ export function buildPictureInPictureFilter(
 
   filters.push(
     `[pip_src${suffix}]crop=${facePx.width}:${facePx.height}:${facePx.x}:${facePx.y},` +
-      `scale=${pipW}:${pipH}:${SCALE_FLAGS},setsar=1` +
+      `scale=${pipW}:${pipH}:force_original_aspect_ratio=increase:${SCALE_FLAGS},` +
+      `crop=${pipW}:${pipH}:x='${pipFocus.x}':y='${pipFocus.y}',setsar=1` +
       (border > 0
         ? `,pad=${totalW}:${totalH}:${border}:${border}:color=${borderColor}`
         : "") +
@@ -510,7 +548,8 @@ export function buildVerticalLayoutFilter(
         ctx,
         layout.facecamRect,
         stacked,
-        layout.originalFacecamRect
+        layout.originalFacecamRect,
+        layout.faceRect
       );
     }
     case "facecam_pip": {
@@ -519,7 +558,8 @@ export function buildVerticalLayoutFilter(
         ctx,
         layout.facecamRect,
         layout.pip,
-        layout.originalFacecamRect
+        layout.originalFacecamRect,
+        layout.faceRect
       );
     }
     case "subject_aware_crop": {

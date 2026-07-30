@@ -2,6 +2,7 @@ import type { RenderFormat } from "@/lib/renderFormat";
 import {
   isValidCaptionText,
   maxCharsPerCaptionLine,
+  sanitizeCaptionText,
   wrapCaptionText,
 } from "@/lib/captionStyles";
 import { distributeTextAcrossSpan } from "@/lib/transcriptTiming";
@@ -93,14 +94,15 @@ function cuesFromWords(
   };
 
   for (const word of words) {
-    const piece = word.word.trim();
-    if (!piece) continue;
+    const piece = sanitizeCaptionText(word.word);
+    if (!isValidCaptionText(piece)) continue;
+    const cleanWord = { ...word, word: piece };
     const previous = lineWords[lineWords.length - 1];
-    const cueStart = lineWords[0]?.start ?? word.start;
+    const cueStart = lineWords[0]?.start ?? cleanWord.start;
     const crossesPause = previous
-      ? word.start - previous.end >= MAX_SILENCE_GAP_SECONDS
+      ? cleanWord.start - previous.end >= MAX_SILENCE_GAP_SECONDS
       : false;
-    const tooLong = word.end - cueStart > MAX_CUE_SECONDS;
+    const tooLong = cleanWord.end - cueStart > MAX_CUE_SECONDS;
     const sentenceEnded = previous
       ? /[.!?]["')\]]?$/.test(previous.word.trim())
       : false;
@@ -117,7 +119,7 @@ function cuesFromWords(
     if (lineLen + addLen > maxChars && lineWords.length > 0) {
       flush();
     }
-    lineWords.push(word);
+    lineWords.push(cleanWord);
     lineLen += lineLen > 0 ? piece.length + 1 : piece.length;
   }
   flush();
@@ -134,6 +136,7 @@ export function buildCaptionTrack(
 
   for (const chunk of chunks) {
     if (!isValidCaptionText(chunk.text)) continue;
+    const cleanText = sanitizeCaptionText(chunk.text);
 
     const meta = chunkMeta(chunk.rawJson);
     if (meta?.words && meta.words.length > 0) {
@@ -143,7 +146,7 @@ export function buildCaptionTrack(
 
     if (meta?.estimatedTiming) {
       const slices = distributeTextAcrossSpan(
-        chunk.text,
+        cleanText,
         chunk.startTimeSeconds,
         chunk.endTimeSeconds
       );
@@ -164,7 +167,7 @@ export function buildCaptionTrack(
       id: chunk.id,
       startTimeSeconds: chunk.startTimeSeconds,
       endTimeSeconds: Math.max(chunk.endTimeSeconds, chunk.startTimeSeconds + 0.05),
-      text: wrapCaptionText(chunk.text, maxChars),
+      text: wrapCaptionText(cleanText, maxChars),
     });
   }
 

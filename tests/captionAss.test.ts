@@ -2,7 +2,15 @@ import { describe, expect, it } from "vitest";
 import { generateAss } from "@/lib/captionAss";
 import { DEFAULT_CAPTION_APPEARANCE } from "@/lib/captionAppearance";
 import { applyCaptionEdits, remapCueWords } from "@/lib/captionEdits";
-import { resolveCaptionOverlaps, type CaptionCue } from "@/lib/captionTrack";
+import {
+  buildCaptionTrack,
+  resolveCaptionOverlaps,
+  type CaptionCue,
+} from "@/lib/captionTrack";
+import {
+  isValidCaptionText,
+  sanitizeCaptionText,
+} from "@/lib/captionStyles";
 
 describe("generateAss karaoke", () => {
   it("highlights only the active word like the editor (timed \\c, not progressive \\k)", () => {
@@ -116,6 +124,24 @@ describe("generateAss karaoke", () => {
     expect(outline).toBeGreaterThanOrEqual(2);
     expect(ass).toContain("\\blur");
   });
+
+  it("never burns punctuation-only pause placeholders", () => {
+    const ass = generateAss({
+      width: 1080,
+      height: 1920,
+      appearance: DEFAULT_CAPTION_APPEARANCE,
+      cues: [
+        { startTimeSeconds: 0, endTimeSeconds: 1, text: "..." },
+        { startTimeSeconds: 1, endTimeSeconds: 2, text: "Real words" },
+      ],
+    });
+    const dialogues = ass
+      .split("\n")
+      .filter((line) => line.startsWith("Dialogue: 0,"));
+    expect(dialogues).toHaveLength(1);
+    expect(dialogues[0]).toContain("Real words");
+    expect(dialogues[0]).not.toContain("...");
+  });
 });
 
 describe("remapCueWords", () => {
@@ -155,6 +181,43 @@ describe("remapCueWords", () => {
     expect(edited[0]!.words).toEqual([
       { word: "hello", start: 8.1, end: 8.6 },
       { word: "world", start: 8.7, end: 9.5 },
+    ]);
+  });
+});
+
+describe("caption text cleanup", () => {
+  it("drops punctuation-only pause placeholders", () => {
+    expect(isValidCaptionText("...")).toBe(false);
+    expect(isValidCaptionText("…")).toBe(false);
+    expect(sanitizeCaptionText("I ... actually won")).toBe("I actually won");
+  });
+
+  it("removes ellipsis-only words from timed captions", () => {
+    const cues = buildCaptionTrack(
+      [
+        {
+          id: "chunk",
+          startTimeSeconds: 0,
+          endTimeSeconds: 2,
+          text: "I ... actually won",
+          rawJson: {
+            words: [
+              { start: 0, end: 0.2, word: "I" },
+              { start: 0.2, end: 0.5, word: "..." },
+              { start: 0.5, end: 1, word: "actually" },
+              { start: 1, end: 1.4, word: "won" },
+            ],
+          },
+        },
+      ],
+      "vertical"
+    );
+    expect(cues).toHaveLength(1);
+    expect(cues[0]!.text).toBe("I actually won");
+    expect(cues[0]!.words?.map((word) => word.word)).toEqual([
+      "I",
+      "actually",
+      "won",
     ]);
   });
 });

@@ -416,18 +416,10 @@ export function recommendVerticalLayout(
   }
 
   if (classification === "multiple_faces") {
-    if (primary?.speakingScore != null && primary.speakingScore >= 0.25) {
-      return {
-        layout: "subject_aware_crop",
-        reason:
-          "Multiple faces were detected. Follow speaker will crop to the person who appears to be talking.",
-        warnings,
-      };
-    }
     return {
-      layout: "center_crop",
+      layout: "subject_aware_crop",
       reason:
-        "Multiple faces were detected. Select a face, or use Follow speaker / Center Crop.",
+        "Multiple faces were detected. Follow speaker will switch framing as the active speaker changes.",
       warnings,
     };
   }
@@ -502,6 +494,24 @@ export type SubjectCropKeyframe = {
   timestampSeconds: number;
   /** Normalized horizontal center of the crop window (0..1). */
   centerX: number;
+};
+
+export type ActiveSpeakerCropConfig = {
+  /** Minimum time a challenger must look active before the crop switches. */
+  switchConfirmationSeconds: number;
+  /** Avoid rapid cuts back and forth during interruptions and laughter. */
+  minimumSpeakerHoldSeconds: number;
+  /** Local mouth-motion advantage required to leave the current speaker. */
+  switchScoreMargin: number;
+  /** Window used to measure mouth movement around each sampled instant. */
+  activityWindowSeconds: number;
+};
+
+export const DEFAULT_ACTIVE_SPEAKER_CROP_CONFIG: ActiveSpeakerCropConfig = {
+  switchConfirmationSeconds: 0.5,
+  minimumSpeakerHoldSeconds: 1.1,
+  switchScoreMargin: 0.055,
+  activityWindowSeconds: 0.7,
 };
 
 export interface SubjectCropConfig {
@@ -634,6 +644,185 @@ export function buildSubjectCropPlan(
     return reduced;
   }
   return keyframes;
+}
+
+function closestTrackPoint(
+  track: FaceTrack,
+  timestampSeconds: number,
+  maxDistanceSeconds = 0.55
+): FaceTrackPoint | undefined {
+  let closest: FaceTrackPoint | undefined;
+  let closestDistance = Number.POSITIVE_INFINITY;
+  for (const point of track.points) {
+    const distance = Math.abs(point.timestampSeconds - timestampSeconds);
+    if (distance < closestDistance) {
+      closest = point;
+      closestDistance = distance;
+    }
+  }
+  return closestDistance <= maxDistanceSeconds ? closest : undefined;
+}
+
+function mouthActivityAt(
+  track: FaceTrack,
+  timestampSeconds: number,
+  windowSeconds: number
+): number {
+  const values = track.points
+    .filter(
+      (point) =>
+        Math.abs(point.timestampSeconds - timestampSeconds) <= windowSeconds &&
+        typeof point.mouthOpenRatio === "number" &&
+        Number.isFinite(point.mouthOpenRatio)
+    )
+    .map((point) => point.mouthOpenRatio as number);
+  if (values.length < 3) return 0;
+
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance =
+    values.reduce((sum, value) => sum + (value - mean) ** 2, 0) /
+    values.length;
+  const range = Math.max(...values) - Math.min(...values);
+  return Math.min(1, Math.sqrt(variance) * 10 + range * 2.5);
+}
+
+/**
+ * Build an editorial crop for conversations with multiple visible people.
+ *
+ * The plan uses local mouth motion instead of one whole-clip "best face".
+ * Hysteresis and a minimum hold prevent rapid cuts during pauses, crosstalk,
+ * laughter, or noisy landmark detections.
+ */
+export function buildActiveSpeakerCropPlan(
+  tracks: FaceTrack[],
+  clipStartSeconds: number,
+  clipEndSeconds: number,
+  cropWidthRatio: number,
+  config: Partial<ActiveSpeakerCropConfig> = {}
+): SubjectCropKeyframe[] {
+  const cfg = { ...DEFAULT_ACTIVE_SPEAKER_CROP_CONFIG, ...config };
+  const eligible = tracks
+    .map((track) => ({
+      track,
+      points: track.points.filter(
+        (point) =>
+          point.timestampSeconds >= clipStartSeconds - 0.5 &&
+          point.timestampSeconds <= clipEndSeconds + 0.5
+      ),
+    }))
+    .filter(({ points }) => points.length >= 3);
+
+  if (eligible.length < 2) {
+    const fallback = eligible[0]?.points ?? [];
+    return buildSubjectCropPlan(
+      fallback,
+      clipStartSeconds,
+      clipEndSeconds,
+      cropWidthRatio
+    );
+  }
+
+  const globalActivity = new Map(
+    eligible.map(({ track, points }) => {
+      const ratios = points
+        .map((point) => point.mouthOpenRatio)
+        .filter(
+          (value): value is number =>
+            typeof value === "number" && Number.isFinite(value)
+        );
+      const range =
+        ratios.length >= 3 ? Math.max(...ratios) - Math.min(...ratios) : 0;
+      return [
+        track.id,
+        range * 2 + points.length / Math.max(1, eligible[0]!.points.length),
+      ];
+    })
+  );
+
+  let activeId = [...eligible]
+    .sort(
+      (a, b) =>
+        (globalActivity.get(b.track.id) ?? 0) -
+        (globalActivity.get(a.track.id) ?? 0)
+    )[0]!.track.id;
+  let activeSince = clipStartSeconds;
+  let challengerId: string | null = null;
+  let challengerSince = clipStartSeconds;
+  const selectedPoints: FaceTrackPoint[] = [];
+
+  const step = 0.25;
+  for (let t = clipStartSeconds; t <= clipEndSeconds + 1e-6; t += step) {
+    const scored = eligible
+      .flatMap(({ track }) => {
+        const point = closestTrackPoint(track, t);
+        if (!point) return [];
+        const activity = mouthActivityAt(
+          track,
+          t,
+          cfg.activityWindowSeconds
+        );
+        const area = rectArea(point.rect);
+        return [
+          {
+            track,
+            point,
+            activity,
+            score:
+              activity * 0.78 +
+              point.confidence * 0.12 +
+              Math.min(1, area * 10) * 0.1,
+          },
+        ];
+      })
+      .sort((a, b) => b.score - a.score);
+
+    if (scored.length === 0) continue;
+    const current = scored.find((item) => item.track.id === activeId);
+    const best = scored[0]!;
+    const currentScore = current?.score ?? 0;
+    const hasSpeechEvidence = best.activity >= 0.035;
+    const canLeave =
+      t - activeSince >= cfg.minimumSpeakerHoldSeconds &&
+      best.track.id !== activeId &&
+      hasSpeechEvidence &&
+      best.score >= currentScore + cfg.switchScoreMargin;
+
+    if (canLeave) {
+      if (challengerId !== best.track.id) {
+        challengerId = best.track.id;
+        challengerSince = t;
+      } else if (t - challengerSince >= cfg.switchConfirmationSeconds) {
+        activeId = best.track.id;
+        activeSince = t;
+        challengerId = null;
+      }
+    } else {
+      challengerId = null;
+    }
+
+    const active =
+      scored.find((item) => item.track.id === activeId) ?? current ?? best;
+    selectedPoints.push({
+      ...active.point,
+      timestampSeconds: t,
+    });
+  }
+
+  return buildSubjectCropPlan(
+    selectedPoints,
+    clipStartSeconds,
+    clipEndSeconds,
+    cropWidthRatio,
+    {
+      smoothing: 0.9,
+      deadZoneRatio: 0.08,
+      maxPanSpeed: 2,
+      fallback: "hold",
+      holdSeconds: 2.5,
+      minKeyframeSpacingSeconds: 0.25,
+      minMovement: 0.008,
+    }
+  );
 }
 
 // ---------------------------------------------------------------------------

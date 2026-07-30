@@ -5,6 +5,11 @@ import {
   syncTranscription,
   waitForTranscriptionIdle,
 } from "@/services/transcriptionSyncService";
+import {
+  AGENT_TRANSCRIPTION_BUDGET_SECONDS,
+  AGENT_TRANSCRIPTION_CHUNK_SECONDS,
+  AGENT_TRANSCRIPTION_PARALLEL,
+} from "@/lib/transcriptionConstants";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import { canProcessMoreSeconds } from "@/services/usageService";
 import { getBillingAccountIdFromRequest } from "@/services/billingService";
@@ -37,6 +42,7 @@ export async function POST(
     const session = await prisma.streamSession.findUnique({
       where: { id: sessionId },
       select: {
+        mode: true,
         liveStatus: true,
         sourceMedia: {
           take: 1,
@@ -76,7 +82,17 @@ export async function POST(
       session.liveStatus === "upcoming" ||
       session.sourceMedia[0]?.isLiveRecording === true;
 
-    const result = await syncTranscription(sessionId, { isLive });
+    const agentPriority = session.mode === "agent";
+    const result = await syncTranscription(sessionId, {
+      isLive,
+      ...(agentPriority
+        ? {
+            budgetSeconds: AGENT_TRANSCRIPTION_BUDGET_SECONDS,
+            chunkSeconds: AGENT_TRANSCRIPTION_CHUNK_SECONDS,
+            parallel: AGENT_TRANSCRIPTION_PARALLEL,
+          }
+        : {}),
+    });
     if (result.skipped === true && rebuild && cleared > 0) {
       // Chunks were cleared but sync did not run — surface that so clients
       // do not treat this as a successful rebuild.
@@ -96,7 +112,39 @@ export async function POST(
         },
       });
     }
-    return jsonResponse({ success: true, cleared, ...result });
+    if (!agentPriority) {
+      return jsonResponse({ success: true, cleared, ...result });
+    }
+
+    const searchableWhere = {
+      streamSessionId: sessionId,
+      text: {
+        notIn: ["", "[silence]", "[processing error]"],
+      },
+      NOT: [
+        { text: { startsWith: "[Live " } },
+        { text: { contains: "placeholder" } },
+      ],
+    };
+    const [searchableChunks, transcriptFrontier] = await Promise.all([
+      prisma.transcriptChunk.count({ where: searchableWhere }),
+      prisma.transcriptChunk.aggregate({
+        where: searchableWhere,
+        _max: { endTimeSeconds: true },
+      }),
+    ]);
+    const persistedThrough = transcriptFrontier._max.endTimeSeconds ?? 0;
+
+    return jsonResponse({
+      success: true,
+      cleared,
+      ...result,
+      searchableChunks,
+      transcribedThrough: Math.max(
+        result.transcribedThrough ?? 0,
+        persistedThrough
+      ),
+    });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Transcription failed";

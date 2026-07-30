@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { toJsonValue } from "@/lib/utils";
 import { normalizeRect, type NormalizedRect } from "@/lib/normalizedRect";
 import {
+  buildActiveSpeakerCropPlan,
   buildSubjectCropPlan,
   recommendVerticalLayout,
   resolveLayoutName,
@@ -107,9 +108,11 @@ export async function resolveVerticalLayout(
   // Resolve the facecam rectangle: manual override wins, then the selected or
   // primary candidate.
   let facecamRect: NormalizedRect | undefined;
+  let faceRect: NormalizedRect | undefined;
   let selectedTrackId: string | undefined;
   if (request.faceSelection.mode === "manual" && request.faceSelection.manualRect) {
     facecamRect = normalizeRect(request.faceSelection.manualRect) ?? undefined;
+    faceRect = facecamRect;
     if (!facecamRect) {
       warnings.push("The manual facecam region was invalid and was ignored.");
     }
@@ -121,6 +124,8 @@ export async function resolveVerticalLayout(
     );
     if (candidate) {
       facecamRect = normalizeRect(candidate.rect) ?? undefined;
+      faceRect =
+        normalizeRect(candidate.faceRect ?? candidate.rect) ?? undefined;
       selectedTrackId = candidate.trackId;
     }
   }
@@ -136,9 +141,18 @@ export async function resolveVerticalLayout(
     layout = "center_crop";
   }
 
+  // Prefer face-centered horizontal crop when using center crop / auto fallback.
+  const faceCenterX =
+    faceRect != null
+      ? faceRect.x + faceRect.width / 2
+      : facecamRect != null
+        ? facecamRect.x + facecamRect.width / 2
+        : undefined;
+
   const resolved: ResolvedVerticalLayout = {
     layout: layout as ResolvedVerticalLayout["layout"],
     facecamRect,
+    faceRect,
     // Blur/cover targets the region where the facecam sits in the original
     // frame — same as the resolved crop unless a manual rect moved it.
     originalFacecamRect:
@@ -156,12 +170,19 @@ export async function resolveVerticalLayout(
         }
       : undefined,
     pip: request.pip,
-    centerCrop: request.centerCrop,
+    centerCrop: {
+      focalPointX:
+        request.centerCrop?.focalPointX ??
+        (faceCenterX != null ? faceCenterX : 0.5),
+      zoom: request.centerCrop?.zoom ?? 1,
+      useBlurredBackground: request.centerCrop?.useBlurredBackground ?? false,
+    },
   };
 
   if (layout === "subject_aware_crop") {
-    // Prefer an explicitly selected face, then the analysis primary (already
-    // ranked by speaking score for talking-head content), then the longest track.
+    // Manual selection intentionally locks to one person. Auto selection on a
+    // multi-person clip follows local mouth activity so the crop changes with
+    // the conversation instead of sticking to one whole-clip "best" face.
     const track =
       analysis?.tracks.find(
         (t) => t.id === (request.faceSelection.trackId ?? selectedTrackId)
@@ -177,19 +198,35 @@ export async function resolveVerticalLayout(
       const cropWidthRatio =
         (options.outputWidth / options.outputHeight) *
         ((analysis?.sourceHeight ?? 1080) / (analysis?.sourceWidth ?? 1920));
+      const normalizedCropWidth = Math.min(
+        0.95,
+        Math.max(0.1, cropWidthRatio)
+      );
+      const followActiveSpeaker =
+        request.faceSelection.mode === "auto" &&
+        !request.faceSelection.trackId &&
+        analysis?.classification === "multiple_faces" &&
+        analysis.tracks.filter((item) => item.points.length >= 3).length >= 2;
       resolved.subjectCrop = {
-        keyframes: buildSubjectCropPlan(
-          track.points,
-          options.clipStartSeconds,
-          options.clipEndSeconds,
-          Math.min(0.95, Math.max(0.1, cropWidthRatio)),
-          {
-            smoothing: request.subjectCrop?.smoothing,
-            deadZoneRatio: request.subjectCrop?.deadZoneRatio,
-            maxPanSpeed: request.subjectCrop?.maxPanSpeed,
-            fallback: request.subjectCrop?.fallback,
-          }
-        ),
+        keyframes: followActiveSpeaker
+          ? buildActiveSpeakerCropPlan(
+              analysis!.tracks,
+              options.clipStartSeconds,
+              options.clipEndSeconds,
+              normalizedCropWidth
+            )
+          : buildSubjectCropPlan(
+              track.points,
+              options.clipStartSeconds,
+              options.clipEndSeconds,
+              normalizedCropWidth,
+              {
+                smoothing: request.subjectCrop?.smoothing,
+                deadZoneRatio: request.subjectCrop?.deadZoneRatio,
+                maxPanSpeed: request.subjectCrop?.maxPanSpeed,
+                fallback: request.subjectCrop?.fallback,
+              }
+            ),
       };
     } else {
       warnings.push(

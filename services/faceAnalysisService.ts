@@ -177,10 +177,11 @@ export async function requestFaceAnalysis(options: {
   endSeconds: number;
   sampleFps?: number;
   force?: boolean;
+  priority?: boolean;
 }): Promise<{ jobId: string; status: string }> {
   const start = Math.max(0, options.startSeconds);
   const end = Math.max(start + 0.5, options.endSeconds);
-  const sampleFps = Math.min(8, Math.max(1, options.sampleFps ?? 4));
+  const sampleFps = Math.min(8, Math.max(1, options.sampleFps ?? 2.5));
 
   if (!options.force) {
     const existing = await prisma.faceAnalysisJob.findFirst({
@@ -206,9 +207,20 @@ export async function requestFaceAnalysis(options: {
         },
       },
       orderBy: { createdAt: "desc" },
-      select: { id: true, status: true },
+      select: { id: true, status: true, progress: true },
     });
-    if (existing) return { jobId: existing.id, status: existing.status };
+    if (existing) {
+      if (options.priority && existing.status === "queued") {
+        await prisma.faceAnalysisJob.update({
+          where: { id: existing.id },
+          data: { progress: Math.max(1, existing.progress) },
+        });
+        void import("@/services/workerService")
+          .then(({ runWorkerTick }) => runWorkerTick())
+          .catch(() => {});
+      }
+      return { jobId: existing.id, status: existing.status };
+    }
   }
 
   const job = await prisma.faceAnalysisJob.create({
@@ -220,6 +232,7 @@ export async function requestFaceAnalysis(options: {
       startSeconds: start,
       endSeconds: end,
       sampleFps,
+      progress: options.priority ? 1 : 0,
     },
   });
 
@@ -396,7 +409,7 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
   }
   if (classification === "multiple_faces") {
     warnings.push(
-      "Multiple faces were detected. Select the person or facecam you want to feature."
+      "Multiple faces were detected. Auto framing will follow the active speaker; manual face selection locks the crop to one person."
     );
   }
   if (worker.modelName === "opencv-haar") {
@@ -472,6 +485,15 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
       lockedBy: null,
     },
   });
+
+  // Agent-prepared clips: attach face job + recommended layout automatically.
+  if (job.clipSuggestionId) {
+    void import("@/services/clipAutoPrepareService")
+      .then(({ applyCompletedFaceAnalysisToClip }) =>
+        applyCompletedFaceAnalysisToClip(jobId)
+      )
+      .catch(() => {});
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -523,7 +545,7 @@ export async function reclaimStaleFaceAnalysisJobs(): Promise<number> {
 async function claimNextFaceAnalysisJob(): Promise<string | null> {
   const candidates = await prisma.faceAnalysisJob.findMany({
     where: { status: "queued" },
-    orderBy: { createdAt: "asc" },
+    orderBy: [{ progress: "desc" }, { createdAt: "asc" }],
     take: 4,
     select: { id: true, attempts: true, maxAttempts: true },
   });

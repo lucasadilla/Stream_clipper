@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildActiveSpeakerCropPlan,
   buildSubjectCropPlan,
   candidateFromTrack,
   captionSafeZoneForLayout,
@@ -195,9 +196,9 @@ describe("recommendVerticalLayout", () => {
     expect(rec.layout).toBe("center_crop");
   });
 
-  it("recommends center crop for multiple faces without a clear speaker", () => {
+  it("recommends active-speaker framing for multiple faces", () => {
     const rec = recommendVerticalLayout("multiple_faces", goodCandidate);
-    expect(rec.layout).toBe("center_crop");
+    expect(rec.layout).toBe("subject_aware_crop");
   });
 
   it("recommends Follow speaker when a clear speaker is detected among faces", () => {
@@ -258,6 +259,53 @@ describe("buildSubjectCropPlan", () => {
     }));
     const plan = buildSubjectCropPlan(points, 0, 500, 0.3);
     expect(plan.length).toBeLessThanOrEqual(61);
+  });
+});
+
+describe("buildActiveSpeakerCropPlan", () => {
+  it("switches from the first speaker to the second without rapid oscillation", () => {
+    const left = makeTrack({
+      id: "left",
+      count: 48,
+      x: 0.1,
+      y: 0.25,
+      size: 0.2,
+    });
+    const right = makeTrack({
+      id: "right",
+      count: 48,
+      x: 0.7,
+      y: 0.25,
+      size: 0.2,
+    });
+    left.points = left.points.map((point, index) => ({
+      ...point,
+      mouthOpenRatio:
+        index < 24 ? 0.38 + (index % 2 === 0 ? 0.13 : 0) : 0.4,
+    }));
+    right.points = right.points.map((point, index) => ({
+      ...point,
+      mouthOpenRatio:
+        index >= 24 ? 0.38 + (index % 2 === 0 ? 0.13 : 0) : 0.4,
+    }));
+
+    const plan = buildActiveSpeakerCropPlan([left, right], 0, 11.75, 0.3);
+    expect(plan[0]!.centerX).toBeLessThan(0.4);
+    expect(plan[plan.length - 1]!.centerX).toBeGreaterThan(0.6);
+    expect(plan.length).toBeLessThan(20);
+  });
+
+  it("falls back to normal subject tracking for one visible person", () => {
+    const track = makeTrack({
+      id: "solo",
+      count: 30,
+      x: 0.4,
+      y: 0.25,
+      size: 0.2,
+    });
+    const plan = buildActiveSpeakerCropPlan([track], 0, 7.25, 0.3);
+    expect(plan.length).toBeGreaterThan(0);
+    expect(plan[0]!.centerX).toBeCloseTo(0.5, 1);
   });
 });
 

@@ -6,7 +6,11 @@ import {
   normalizeCaptionAppearance,
   type CaptionAppearance,
 } from "@/lib/captionAppearance";
-import { maxCharsPerCaptionLine } from "@/lib/captionStyles";
+import {
+  isValidCaptionText,
+  maxCharsPerCaptionLine,
+  sanitizeCaptionText,
+} from "@/lib/captionStyles";
 import {
   resolveCaptionOverlaps,
   type CaptionCue,
@@ -185,8 +189,22 @@ export function generateAss(options: GenerateAssOptions): string {
   const { width, height } = options;
   const maxChars = maxCharsPerCaptionLine(options.format ?? "vertical");
 
-  // Editor only shows one cue; de-overlap so ASS does the same.
-  const cues = resolveCaptionOverlaps(options.cues);
+  // Clean client-edited cues too, not only transcript-built cues. This keeps
+  // punctuation-only Whisper pauses out of the final burned captions.
+  const cues = resolveCaptionOverlaps(
+    options.cues.flatMap((cue) => {
+      const text = sanitizeCaptionText(cue.text);
+      if (!isValidCaptionText(text)) return [];
+      const words = cue.words
+        ?.flatMap((word) => {
+          const cleanWord = sanitizeCaptionText(word.word);
+          return isValidCaptionText(cleanWord)
+            ? [{ ...word, word: cleanWord }]
+            : [];
+        });
+      return [{ ...cue, text, words }];
+    })
+  );
 
   const fontSize = Math.max(1, Math.round((app.fontSize * height) / 1080));
   const marginV = Math.round((app.verticalOffsetPercent / 100) * height);

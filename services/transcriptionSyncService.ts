@@ -351,7 +351,8 @@ export async function getTranscriptionBacklog(streamSessionId: string) {
 function buildGapRanges(
   coverage: CoverageInfo,
   recordedSeconds: number,
-  budgetSeconds: number
+  budgetSeconds: number,
+  chunkSeconds = TRANSCRIPTION_CHUNK_SECONDS
 ) {
   const gaps: Array<{ start: number; end: number }> = [];
   let cursor = 0;
@@ -372,7 +373,7 @@ function buildGapRanges(
     let at = gap.start;
     while (at < gap.end - MIN_SEGMENT_SECONDS && budgetLeft >= MIN_SEGMENT_SECONDS) {
       const end = Math.min(
-        at + Math.min(TRANSCRIPTION_CHUNK_SECONDS, budgetLeft),
+        at + Math.min(chunkSeconds, budgetLeft),
         gap.end
       );
       if (end - at < MIN_SEGMENT_SECONDS) break;
@@ -727,6 +728,7 @@ export interface TranscriptionSyncOptions {
   isLive?: boolean;
   budgetSeconds?: number;
   parallel?: number;
+  chunkSeconds?: number;
   /** Caller already holds the DB lock under this owner id. */
   heldLockOwner?: string;
 }
@@ -825,10 +827,22 @@ async function runSyncTranscription(
     options.budgetSeconds ??
     (isLive ? TRANSCRIPTION_BUDGET_LIVE_SECONDS : TRANSCRIPTION_BUDGET_VOD_SECONDS);
   const parallel = options.parallel ?? TRANSCRIPTION_PARALLEL;
+  const chunkSeconds = Math.min(
+    180,
+    Math.max(
+      TRANSCRIPTION_CHUNK_SECONDS,
+      options.chunkSeconds ?? TRANSCRIPTION_CHUNK_SECONDS
+    )
+  );
 
   const coverage = await getTranscriptionCoverage(streamSessionId);
   const fromSeconds = coverage.frontier;
-  const ranges = buildGapRanges(coverage, availableSeconds, budgetSeconds);
+  const ranges = buildGapRanges(
+    coverage,
+    availableSeconds,
+    budgetSeconds,
+    chunkSeconds
+  );
 
   if (ranges.length === 0) {
     return {

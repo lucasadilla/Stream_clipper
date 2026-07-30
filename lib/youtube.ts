@@ -134,9 +134,14 @@ export function resolveVideoDurationFromMetadata(
     opts?.actualStartTime ?? (actualStart ? new Date(actualStart) : null)
   );
   const now = opts?.nowMs ?? Date.now();
+  const isActiveLive =
+    isActiveLiveStatus(opts?.liveStatus) ||
+    (metadataJson &&
+      typeof metadataJson === "object" &&
+      (metadataJson as { is_live?: boolean }).is_live === true);
 
   let fromLiveSpan = 0;
-  if (startDate) {
+  if (startDate && (actualEnd || isActiveLive)) {
     const endMs = actualEnd ? new Date(actualEnd).getTime() : now;
     if (Number.isFinite(endMs)) {
       fromLiveSpan = sanitizeDurationSeconds(
@@ -145,13 +150,6 @@ export function resolveVideoDurationFromMetadata(
       );
     }
   }
-
-  const isActiveLive =
-    opts?.liveStatus === "live" ||
-    opts?.liveStatus === "upcoming" ||
-    (metadataJson &&
-      typeof metadataJson === "object" &&
-      (metadataJson as { is_live?: boolean }).is_live === true);
 
   const maxSpan = isActiveLive ? MAX_LIVE_TIMELINE_SECONDS : MAX_VOD_TIMELINE_SECONDS;
 
@@ -162,10 +160,15 @@ export function resolveVideoDurationFromMetadata(
     );
   }
 
-  return sanitizeDurationSeconds(
-    Math.max(fromContentDetails, fromLiveSpan),
-    { max: maxSpan }
-  );
+  // For an ended VOD, contentDetails is the encoded media duration and is more
+  // trustworthy than wall-clock span (premieres and reconnects can add gaps).
+  return sanitizeDurationSeconds(fromContentDetails || fromLiveSpan, {
+    max: maxSpan,
+  });
+}
+
+function isActiveLiveStatus(status: string | null | undefined): boolean {
+  return status === "live" || status === "upcoming";
 }
 
 export async function fetchYouTubeMetadata(

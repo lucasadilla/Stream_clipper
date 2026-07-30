@@ -138,14 +138,18 @@ export const FACECAM_EXPANSION = {
   /** Face box -> crop box width multiplier (head + some context). */
   widthMultiplier: 2.4,
   /** Face box -> crop box height multiplier (hair + shoulders). */
-  heightMultiplier: 2.8,
-  /** Shift the expanded box downward by this fraction of the face height so shoulders are included. */
-  downwardShiftRatio: 0.35,
+  heightMultiplier: 2.6,
+  /**
+   * Shift the expanded box downward by this fraction of the face height so
+   * shoulders are included — kept modest so the face stays near panel center.
+   */
+  downwardShiftRatio: 0.18,
 } as const;
 
 /**
  * Expand a raw face detection into a usable facecam crop: include the head,
  * hair, shoulders and a little surrounding context, clamped to the frame.
+ * Prefers keeping the face horizontally centered in the crop after clamping.
  */
 export function expandFaceToFacecamCrop(
   face: NormalizedRect,
@@ -162,17 +166,32 @@ export function expandFaceToFacecamCrop(
   const downwardShiftRatio =
     expansion.downwardShiftRatio ?? FACECAM_EXPANSION.downwardShiftRatio;
 
-  const center = rectCenter(face);
+  const faceCenter = rectCenter(face);
   const width = Math.min(1, face.width * widthMultiplier);
   const height = Math.min(1, face.height * heightMultiplier);
-  const centerY = center.y + face.height * downwardShiftRatio;
+  // Slight downward bias for shoulders, but keep the face near the crop center.
+  const targetCenterY = faceCenter.y + face.height * downwardShiftRatio;
 
-  const clamped = normalizeRect({
-    x: center.x - width / 2,
-    y: centerY - height / 2,
-    width,
-    height,
-  });
+  let x = faceCenter.x - width / 2;
+  let y = targetCenterY - height / 2;
+  x = Math.min(Math.max(0, x), Math.max(0, 1 - width));
+  y = Math.min(Math.max(0, y), Math.max(0, 1 - height));
+
+  // After edge clamp, re-center on the face horizontally whenever there's slack.
+  const idealX = faceCenter.x - width / 2;
+  x = Math.min(Math.max(0, idealX), Math.max(0, 1 - width));
+
+  // Keep the full face box inside the crop when possible.
+  if (face.x < x) x = Math.max(0, Math.min(face.x, 1 - width));
+  if (face.x + face.width > x + width) {
+    x = Math.min(1 - width, Math.max(0, face.x + face.width - width));
+  }
+  if (face.y < y) y = Math.max(0, Math.min(face.y, 1 - height));
+  if (face.y + face.height > y + height) {
+    y = Math.min(1 - height, Math.max(0, face.y + face.height - height));
+  }
+
+  const clamped = normalizeRect({ x, y, width, height });
   return clamped ?? face;
 }
 

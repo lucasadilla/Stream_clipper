@@ -98,12 +98,20 @@ describe("expandFaceToFacecamCrop", () => {
     expect(crop.y + crop.height).toBeLessThanOrEqual(1);
   });
 
-  it("shifts the crop downward to include shoulders", () => {
+  it("shifts the crop slightly downward to include shoulders", () => {
     const face = { x: 0.4, y: 0.4, width: 0.1, height: 0.1 };
     const crop = expandFaceToFacecamCrop(face);
     const faceCenter = rectCenter(face);
     const cropCenter = rectCenter(crop);
-    expect(cropCenter.y).toBeGreaterThan(faceCenter.y);
+    expect(cropCenter.y).toBeGreaterThanOrEqual(faceCenter.y);
+  });
+
+  it("keeps the face near the horizontal center of the crop", () => {
+    const face = { x: 0.45, y: 0.3, width: 0.1, height: 0.12 };
+    const crop = expandFaceToFacecamCrop(face);
+    const faceCenter = rectCenter(face);
+    const cropCenter = rectCenter(crop);
+    expect(Math.abs(cropCenter.x - faceCenter.x)).toBeLessThan(0.02);
   });
 });
 

@@ -72,7 +72,8 @@ export async function listSessionsNeedingTranscription(
         { transcribeLockedAt: { lt: cutoff } },
       ],
     },
-    orderBy: { updatedAt: "desc" },
+    // Interactive agent sessions should not sit behind background timeline work.
+    orderBy: [{ mode: "asc" }, { updatedAt: "desc" }],
     take: limit * 3,
     select: {
       id: true,

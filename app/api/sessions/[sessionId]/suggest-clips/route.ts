@@ -15,6 +15,7 @@ import {
   withAgentWizardState,
 } from "@/lib/agentWizard";
 import { ensureClipSuggestionThumbnails } from "@/services/clipThumbnailService";
+import { prepareSuggestedClips } from "@/services/clipAutoPrepareService";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -88,30 +89,43 @@ export async function POST(
       take: 40,
     });
 
-    void ensureClipSuggestionThumbnails(
+    // Clip cards use a lazy thumbnail endpoint, so never hold the first picks
+    // behind a batch of FFmpeg seeks. Warm the files in the background.
+    const thumbIds = [
+      ...result.clips.map((c) => c.id),
+      ...clips.map((c) => c.id),
+    ].filter((id, i, arr) => arr.indexOf(id) === i);
+    void ensureClipSuggestionThumbnails(sessionId, thumbIds).catch(() => {});
+
+    // Auto-compose vertical layouts (face detection → recommended crop).
+    // Fire-and-forget so the pick grid isn't blocked.
+    void prepareSuggestedClips(
       sessionId,
-      clips.map((c) => c.id)
+      clips.slice(0, 12).map((c) => ({
+        id: c.id,
+        startTimeSeconds: c.startTimeSeconds,
+        endTimeSeconds: c.endTimeSeconds,
+      }))
     ).catch(() => {});
 
+    const hasClips = clips.length > 0;
+    const isLaterStep =
+      currentWizard.step === "look" ||
+      currentWizard.step === "edit" ||
+      currentWizard.step === "export" ||
+      currentWizard.step === "done";
     const wizard = {
       ...currentWizard,
-      suggestRequested: true,
+      suggestRequested: hasClips,
       lastSuggestThroughSeconds:
         body.throughSeconds != null
           ? body.throughSeconds
           : currentWizard.lastSuggestThroughSeconds,
-      step:
-        clips.length > 0
-          ? ("pick" as const)
-          : currentWizard.step === "transcribing"
-            ? ("pick" as const)
-            : // Stay on look/edit/export if mid-wizard; otherwise pick
-              currentWizard.step === "look" ||
-                currentWizard.step === "edit" ||
-                currentWizard.step === "export" ||
-                currentWizard.step === "done"
-              ? currentWizard.step
-              : ("pick" as const),
+      step: hasClips
+        ? ("pick" as const)
+        : isLaterStep
+          ? currentWizard.step
+          : ("transcribing" as const),
     };
 
     // Don't yank the user out of look/edit/export when rolling live suggestions arrive.
@@ -141,6 +155,12 @@ export async function POST(
       created: result.created,
       clips,
       wizard,
+      ...(hasClips
+        ? {}
+        : {
+            emptyReason:
+              "The transcript finished, but it did not contain usable speech for clip suggestions.",
+          }),
     });
   } catch (error) {
     if (error instanceof z.ZodError) {

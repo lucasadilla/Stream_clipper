@@ -5,6 +5,10 @@ import type { TranscriptSegment } from "@/services/transcriptService";
 import { TRANSCRIPT_MERGE_MAX_SECONDS } from "@/lib/aiCostConstants";
 import { distributeTextAcrossSpan } from "@/lib/transcriptTiming";
 import {
+  isValidCaptionText,
+  sanitizeCaptionText,
+} from "@/lib/captionStyles";
+import {
   getOpenAiDirectClient,
   getOpenAiTranscriptionQualityModel,
   getOpenAiWhisperModel,
@@ -450,16 +454,20 @@ export async function transcribeWhisperAudio(
         .map((s) => ({
           startTimeSeconds: timeOffsetSeconds + s.start,
           endTimeSeconds: timeOffsetSeconds + s.end,
-          text: s.text.trim(),
+          text: sanitizeCaptionText(s.text),
         }))
-        .filter((s) => s.text.length > 0)
+        .filter((s) => isValidCaptionText(s.text))
     );
 
-    return attachWordsToSegments(segments, rawWords, timeOffsetSeconds);
+    return attachWordsToSegments(
+      segments,
+      rawWords.filter((word) => isValidCaptionText(word.word)),
+      timeOffsetSeconds
+    );
   }
 
-  const text = response.text?.trim();
-  if (!text) return [];
+  const text = sanitizeCaptionText(response.text ?? "");
+  if (!isValidCaptionText(text)) return [];
 
   const { probeMedia } = await import("@/lib/ffmpeg");
   const probe = await probeMedia(audioPath);

@@ -2,6 +2,7 @@ import type { RenderFormat } from "@/lib/renderFormat";
 
 const PLACEHOLDER_RE =
   /^\[Live \d+s|placeholder|connect Whisper|\[silence\]|\[processing error\]/i;
+const PUNCTUATION_ONLY_RE = /^[\s.…,;:!?'"()[\]{}<>_-]+$/u;
 
 export interface CaptionChunk {
   startTimeSeconds: number;
@@ -15,12 +16,24 @@ export function maxCharsPerCaptionLine(format: RenderFormat): number {
 }
 
 export function isValidCaptionText(text: string): boolean {
-  const t = text.trim();
-  return t.length > 0 && !PLACEHOLDER_RE.test(t);
+  const t = sanitizeCaptionText(text);
+  return (
+    t.length > 0 &&
+    !PLACEHOLDER_RE.test(t) &&
+    !PUNCTUATION_ONLY_RE.test(t)
+  );
+}
+
+/** Remove model pause placeholders without damaging punctuation in real words. */
+export function sanitizeCaptionText(text: string): string {
+  return text
+    .replace(/(^|\s)(?:\.{3,}|…+)(?=\s|$)/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export function wrapCaptionText(text: string, maxChars: number, maxLines = 2): string {
-  const words = text.trim().split(/\s+/).filter(Boolean);
+  const words = sanitizeCaptionText(text).split(/\s+/).filter(Boolean);
   if (words.length === 0) return "";
 
   const lines: string[] = [];

@@ -2,6 +2,11 @@ export function clipDownloadUrl(clipSuggestionId: string): string {
   return `/api/clips/${clipSuggestionId}/download`;
 }
 
+/** Generates the still on demand if missing. */
+export function clipThumbnailApiUrl(clipSuggestionId: string): string {
+  return `/api/clips/${clipSuggestionId}/thumbnail?inline=1`;
+}
+
 export { clipSharePath, clipShareUrl, clipStreamUrl } from "@/lib/clipShare";
 
 export function renderJobDownloadUrl(renderJobId: string): string {

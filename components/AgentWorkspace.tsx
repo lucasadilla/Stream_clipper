@@ -10,11 +10,12 @@ import {
   type ClipSuggestionData,
 } from "@/components/ClipSuggestionCard";
 import { AgentClipPickGrid } from "@/components/agent/AgentClipPickGrid";
-import { AgentLookPresetStep } from "@/components/agent/AgentLookPresetStep";
 import { AgentClipEditor } from "@/components/agent/AgentClipEditor";
 import { AgentCadenceChooser } from "@/components/agent/AgentCadenceChooser";
+import { AgentClipStudioModal } from "@/components/agent/AgentClipStudioModal";
 import { fetchJson } from "@/lib/apiClient";
 import { formatDuration, formatSeconds } from "@/lib/time";
+import { clipDownloadUrl, clipThumbnailApiUrl } from "@/lib/downloadUrls";
 import {
   readCaptionAppearancePreference,
   writeCaptionAppearancePreference,
@@ -56,7 +57,6 @@ import {
   defaultVerticalLayoutSelection,
   type VerticalLayoutSelection,
 } from "@/components/VerticalLayoutPicker";
-import { clipDownloadUrl } from "@/lib/downloadUrls";
 import { triggerFileDownload } from "@/lib/clientDownload";
 
 interface AgentSessionData {
@@ -86,8 +86,9 @@ type ChatTurn =
       error?: boolean;
     };
 
-const MIN_TRANSCRIPT_SECONDS = 45;
-const MIN_SEARCHABLE_CHUNKS = 3;
+const MIN_TRANSCRIPT_SECONDS = 20;
+const MIN_SEARCHABLE_CHUNKS = 1;
+const VOD_SUGGEST_ROLL_SECONDS = 180;
 
 const STEP_LABELS: Record<AgentWizardStep, string> = {
   transcribing: "Transcribing",
@@ -103,12 +104,12 @@ interface AgentWorkspaceProps {
 }
 
 function withThumbnails(
-  sessionId: string,
+  _sessionId: string,
   clips: ClipSuggestionData[]
 ): Array<ClipSuggestionData & { thumbnailUrl: string }> {
   return clips.map((clip) => ({
     ...clip,
-    thumbnailUrl: `/api/storage/frames/${sessionId}/clip_${clip.id}.jpg?inline=1`,
+    thumbnailUrl: clipThumbnailApiUrl(clip.id),
   }));
 }
 
@@ -122,6 +123,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   const [transcriptionError, setTranscriptionError] = useState<string | null>(
     null
   );
+  const [suggestionError, setSuggestionError] = useState<string | null>(null);
   const [transcribingActive, setTranscribingActive] = useState(false);
   const [transcribedSeconds, setTranscribedSeconds] = useState(0);
   const [searchableChunks, setSearchableChunks] = useState(0);
@@ -131,9 +133,8 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   });
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [suggesting, setSuggesting] = useState(false);
+  const [findingElapsedSec, setFindingElapsedSec] = useState(0);
   const [getMoreLoading, setGetMoreLoading] = useState(false);
-  const [analyzingFace, setAnalyzingFace] = useState(false);
-  const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportDoneUrl, setExportDoneUrl] = useState<string | null>(null);
@@ -142,6 +143,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   const [sending, setSending] = useState(false);
   const [showFindChat, setShowFindChat] = useState(false);
   const [newClipNotice, setNewClipNotice] = useState(false);
+  const [studioClipId, setStudioClipId] = useState<string | null>(null);
   const [captionAppearance, setCaptionAppearance] = useState<CaptionAppearance>(
     readCaptionAppearancePreference
   );
@@ -149,6 +151,11 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   const transcribeInFlight = useRef(false);
   const suggestStarted = useRef(false);
   const rollingInFlight = useRef(false);
+  const lastSessionRefreshAt = useRef(0);
+  const visibleClips = useMemo(
+    () => clips.filter((clip) => clip.status !== "rejected"),
+    [clips]
+  );
 
   const persistWizard = useCallback(
     async (patch: Partial<AgentWizardState>) => {
@@ -179,9 +186,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       throw new Error(data.error ?? "Session not found");
     }
     setSession(data.session);
-    if (data.session.clipSuggestions?.length) {
-      setClips(data.session.clipSuggestions);
-    }
+    setClips(data.session.clipSuggestions ?? []);
     const nextWizard = readAgentWizardState(data.session.metadataJson);
     setWizard(nextWizard);
     if (nextWizard.selectedClipIds.length) {
@@ -225,16 +230,24 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       });
   }, [sessionId, loadSession]);
 
-  const recordedSeconds = useMemo(
-    () =>
-      Math.max(
-        session?.liveRecording?.recordedSeconds ?? 0,
-        session?.sourceMedia?.[0]?.durationSeconds ?? 0,
-        session?.videoDurationSeconds ?? 0,
-        0
-      ),
-    [session]
-  );
+  const isLive =
+    session?.liveStatus === "live" || session?.liveStatus === "upcoming";
+
+  const recordedSeconds = useMemo(() => {
+    const localDuration = Math.max(
+      0,
+      ...(session?.sourceMedia ?? []).map(
+        (media) => media.durationSeconds ?? 0
+      )
+    );
+    const captured = session?.liveRecording?.recordedSeconds ?? 0;
+    const metadataDuration = session?.videoDurationSeconds ?? 0;
+
+    // A completed local VOD has been probed from the actual file and should
+    // beat stale platform/live-span metadata. Active streams still grow.
+    if (!isLive && localDuration > 0) return localDuration;
+    return Math.max(localDuration, captured, metadataDuration, 0);
+  }, [isLive, session]);
 
   const playbackUrl = useMemo(() => {
     const media = session?.sourceMedia?.[0];
@@ -245,9 +258,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     );
   }, [session]);
 
-  const isLive =
-    session?.liveStatus === "live" || session?.liveStatus === "upcoming";
-
   const streamEnded =
     !isLive ||
     session?.liveRecording?.status === "completed" ||
@@ -257,13 +267,39 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   const transcriptionBehind =
     recordedSeconds > 5 && transcribedSeconds < recordedSeconds - 15;
 
+  // Caught up with the recording — do NOT also require MIN_TRANSCRIPT_SECONDS here.
+  // That blocked short VODs at 100% forever (e.g. 40s stream needs 45s to "catch up").
   const transcriptionCaughtUp =
     recordedSeconds > 0 &&
-    transcribedSeconds >= Math.max(MIN_TRANSCRIPT_SECONDS, recordedSeconds * 0.92);
+    transcribedSeconds >= recordedSeconds * 0.92;
 
   const transcriptReady =
-    transcribedSeconds >= MIN_TRANSCRIPT_SECONDS &&
-    (searchableChunks >= MIN_SEARCHABLE_CHUNKS || transcriptionCaughtUp);
+    (transcribedSeconds >= MIN_TRANSCRIPT_SECONDS &&
+      (searchableChunks >= MIN_SEARCHABLE_CHUNKS || transcriptionCaughtUp)) ||
+    // Short VODs / thin transcripts: once we're caught up, proceed anyway.
+    (transcriptionCaughtUp &&
+      (searchableChunks >= 1 ||
+        recordedSeconds < MIN_TRANSCRIPT_SECONDS ||
+        transcribedSeconds >= Math.min(recordedSeconds, 20)));
+
+  // Keep the "finding" phase visible until clips arrive or we have a hard error.
+  // (Previously suggestRequested flipped finding off while the request was still
+  // in-flight or after a soft empty/stale state, which looked like a 100% hang.)
+  const findingClips =
+    suggesting ||
+    (transcriptReady &&
+      visibleClips.length === 0 &&
+      !transcriptionError &&
+      !suggestionError &&
+      !wizard.suggestRequested);
+
+  const awaitingSuggestRetry =
+    transcriptReady &&
+    visibleClips.length === 0 &&
+    wizard.suggestRequested &&
+    !suggesting &&
+    !transcriptionError &&
+    !suggestionError;
 
   const needsCadenceChoice = Boolean(session && isLive && !wizard.cadence);
 
@@ -275,6 +311,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     }): Promise<boolean> => {
       if (opts?.extra) setGetMoreLoading(true);
       else setSuggesting(true);
+      setSuggestionError(null);
       try {
         const through = opts?.throughSeconds ?? transcribedSeconds;
         const { ok, data } = await fetchJson<{
@@ -282,6 +319,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
           wizard?: AgentWizardState;
           created?: number;
           error?: string;
+          emptyReason?: string;
         }>(`/api/sessions/${sessionId}/suggest-clips`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -296,7 +334,8 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
           }),
         });
         if (!ok) throw new Error(data.error ?? "Suggest failed");
-        if (data.clips) setClips(data.clips);
+        const nextClips = data.clips ?? [];
+        setClips(nextClips);
         if (data.wizard) setWizard(data.wizard);
         else {
           await persistWizard({
@@ -305,6 +344,12 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
             lastSuggestThroughSeconds: through,
           });
         }
+        if (nextClips.length === 0) {
+          throw new Error(
+            data.emptyReason ??
+              "No usable speech was found for clip suggestions. Check the transcript, then try again."
+          );
+        }
         if ((data.created ?? 0) > 0) {
           setNewClipNotice(true);
           window.setTimeout(() => setNewClipNotice(false), 5000);
@@ -312,7 +357,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
         setTimeout(() => void loadSession().catch(() => {}), 2500);
         return true;
       } catch (err) {
-        setTranscriptionError(
+        setSuggestionError(
           err instanceof Error ? err.message : "Failed to suggest clips"
         );
         return false;
@@ -329,6 +374,19 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       wizard.cadence,
     ]
   );
+
+  useEffect(() => {
+    if (!findingClips) {
+      setFindingElapsedSec(0);
+      return;
+    }
+    const started = Date.now();
+    setFindingElapsedSec(0);
+    const id = window.setInterval(() => {
+      setFindingElapsedSec(Math.max(0, Math.floor((Date.now() - started) / 1000)));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [findingClips]);
 
   // VOD sessions get vod_batch automatically; live waits for the chooser.
   useEffect(() => {
@@ -359,11 +417,8 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
         const { ok, data } = await fetchJson<{
           error?: string;
           transcribedThrough?: number;
-          transcriptChunks?: Array<{
-            endTimeSeconds: number;
-            text: string;
-            rawJson?: { whisper?: boolean; cursorOnly?: boolean };
-          }>;
+          recordedSeconds?: number;
+          searchableChunks?: number;
         }>(`/api/sessions/${sessionId}/transcribe`, { method: "POST" });
 
         if (cancelled) return;
@@ -382,32 +437,14 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
           setTranscribedSeconds(data.transcribedThrough);
         }
 
-        // /transcribe does not return chunks — load them from /events for the ready gate.
-        const events = await fetchJson<{
-          transcriptChunks?: Array<{
-            endTimeSeconds: number;
-            text: string;
-            rawJson?: { whisper?: boolean; cursorOnly?: boolean } | null;
-          }>;
-        }>(`/api/sessions/${sessionId}/events`);
-        if (cancelled) return;
-
-        const chunks = events.ok ? (events.data.transcriptChunks ?? []) : [];
-        if (chunks.length > 0) {
-          const usable = chunks.filter((c) => {
-            const raw = c.rawJson;
-            const isWhisper = !raw || raw.whisper !== false;
-            return (
-              isWhisper &&
-              !raw?.cursorOnly &&
-              c.text !== "[silence]" &&
-              c.text !== "[processing error]" &&
-              c.text.trim().length > 8
-            );
-          });
-          setSearchableChunks(usable.length);
+        // Agent transcription returns its readiness aggregate in the same response.
+        if (typeof data.searchableChunks === "number") {
+          setSearchableChunks(data.searchableChunks);
         }
-        void loadSession().catch(() => {});
+        if (Date.now() - lastSessionRefreshAt.current >= 10_000) {
+          lastSessionRefreshAt.current = Date.now();
+          void loadSession().catch(() => {});
+        }
       } catch {
         // worker may still be progressing
       } finally {
@@ -437,6 +474,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     if (!wizard.cadence) return;
     if (wizard.cadence === "after_stream" && !streamEnded) return;
     if (!transcriptReady) return;
+    if (transcriptionError || suggestionError) return;
 
     if (wizard.cadence === "live_now") {
       const last = wizard.lastSuggestThroughSeconds ?? 0;
@@ -447,8 +485,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       if (!needFirst && !needRoll) return;
       if (rollingInFlight.current || suggesting || getMoreLoading) return;
 
-      const visible = clips.filter((c) => c.status !== "rejected").length;
-      if (visible >= LIVE_NOW_SUGGESTION_CAP) return;
+      if (visibleClips.length >= LIVE_NOW_SUGGESTION_CAP) return;
 
       rollingInFlight.current = true;
       void runSuggest({
@@ -461,18 +498,46 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     }
 
     // vod_batch or after_stream (stream ended)
-    if (wizard.suggestRequested || suggestStarted.current) return;
-    if (clips.length >= 10) {
-      void persistWizard({
-        step: "pick",
-        suggestRequested: true,
-        lastSuggestThroughSeconds: transcribedSeconds,
+    if (suggesting || getMoreLoading) return;
+    if (wizard.suggestRequested) {
+      const last = wizard.lastSuggestThroughSeconds ?? 0;
+      const newCoverage = transcribedSeconds - last;
+      const shouldRoll =
+        visibleClips.length < 10 &&
+        (newCoverage >= VOD_SUGGEST_ROLL_SECONDS ||
+          (transcriptionCaughtUp && newCoverage >= 2));
+      if (!shouldRoll || rollingInFlight.current) return;
+
+      rollingInFlight.current = true;
+      void runSuggest({
+        extra: Math.min(5, Math.max(1, 10 - visibleClips.length)),
+        throughSeconds: transcribedSeconds,
+      }).finally(() => {
+        rollingInFlight.current = false;
       });
       return;
     }
+
+    if (visibleClips.length >= 10) {
+      if (!wizard.suggestRequested) {
+        void persistWizard({
+          step: "pick",
+          suggestRequested: true,
+          lastSuggestThroughSeconds: transcribedSeconds,
+        });
+      }
+      return;
+    }
+
+    if (suggestStarted.current) return;
+
     suggestStarted.current = true;
     void runSuggest({ throughSeconds: transcribedSeconds }).then((ok) => {
-      if (!ok) suggestStarted.current = false;
+      if (!ok) {
+        suggestStarted.current = false;
+        // Allow another attempt after clearing the sticky flag if it was set.
+        void persistWizard({ suggestRequested: false });
+      }
     });
   }, [
     wizard.cadence,
@@ -480,10 +545,60 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     wizard.lastSuggestThroughSeconds,
     streamEnded,
     transcriptReady,
+    transcriptionCaughtUp,
     transcribedSeconds,
-    clips.length,
+    visibleClips.length,
     suggesting,
     getMoreLoading,
+    transcriptionError,
+    suggestionError,
+    runSuggest,
+    persistWizard,
+  ]);
+
+  // Watchdog: at ~100% transcript with no clips and no in-flight suggest, force a try.
+  useEffect(() => {
+    if (!wizard.cadence) return;
+    if (wizard.cadence === "after_stream" && !streamEnded) return;
+    if (!transcriptionCaughtUp || visibleClips.length > 0) return;
+    if (
+      suggesting ||
+      getMoreLoading ||
+      transcriptionError ||
+      suggestionError
+    ) {
+      return;
+    }
+
+    const id = window.setTimeout(() => {
+      if (suggestStarted.current || suggesting) return;
+      suggestStarted.current = true;
+      void (async () => {
+        if (wizard.suggestRequested) {
+          await persistWizard({
+            step: "transcribing",
+            suggestRequested: false,
+          });
+        }
+        const ok = await runSuggest({ throughSeconds: transcribedSeconds });
+        if (!ok) {
+          suggestStarted.current = false;
+          await persistWizard({ suggestRequested: false });
+        }
+      })();
+    }, 2500);
+    return () => window.clearTimeout(id);
+  }, [
+    wizard.cadence,
+    wizard.suggestRequested,
+    streamEnded,
+    transcriptionCaughtUp,
+    visibleClips.length,
+    suggesting,
+    getMoreLoading,
+    transcriptionError,
+    suggestionError,
+    transcribedSeconds,
     runSuggest,
     persistWizard,
   ]);
@@ -493,6 +608,9 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     [...selectedIds][wizard.queueIndex] ??
     null;
   const activeClip = clips.find((c) => c.id === activeClipId) ?? null;
+  const studioClip = studioClipId
+    ? clips.find((c) => c.id === studioClipId) ?? null
+    : null;
 
   async function handleDeleteSession() {
     const size = session?.storageLabel ? ` (${session.storageLabel})` : "";
@@ -566,10 +684,10 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       })
     );
     await persistWizard({
-      step: "look",
+      step: "edit",
       selectedClipIds: ids,
       queueIndex: 0,
-      lookPreset: null,
+      lookPreset: "auto",
       faceAnalysisJobId: null,
     });
     setExportDoneUrl(null);
@@ -581,101 +699,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     });
   }
 
-  async function applyLookPreset(presetId: ContentLookPresetId) {
-    if (!activeClip) return;
-    setAnalysisError(null);
-    const preset = getContentLookPreset(presetId);
-    await persistWizard({ lookPreset: presetId });
-
-    await fetchJson(`/api/clips/${activeClip.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ suggestedLayout: preset.layout }),
-    });
-
-    if (!preset.needsFaceAnalysis) {
-      await persistWizard({
-        lookPreset: presetId,
-        faceAnalysisJobId: null,
-        step: "edit",
-      });
-      return;
-    }
-
-    setAnalyzingFace(true);
-    try {
-      const { ok, data } = await fetchJson<{
-        analysisJobId?: string;
-        error?: string;
-      }>(`/api/sessions/${sessionId}/face-analysis`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          startSeconds: activeClip.startTimeSeconds,
-          endSeconds: activeClip.endTimeSeconds,
-          clipSuggestionId: activeClip.id,
-        }),
-      });
-      if (!ok || !data.analysisJobId) {
-        setAnalysisError(data.error ?? "Face analysis did not start");
-        await persistWizard({
-          lookPreset: presetId,
-          faceAnalysisJobId: null,
-        });
-        return;
-      }
-
-      let jobId = data.analysisJobId;
-      for (let i = 0; i < 40; i++) {
-        await new Promise((r) => setTimeout(r, 1500));
-        const poll = await fetchJson<{
-          status?: string;
-          errorMessage?: string | null;
-        }>(`/api/face-analysis/${jobId}`);
-        if (!poll.ok) continue;
-        if (poll.data.status === "completed") break;
-        if (poll.data.status === "failed") {
-          setAnalysisError(poll.data.errorMessage ?? "Face analysis failed");
-          jobId = data.analysisJobId;
-          break;
-        }
-      }
-
-      const selection = buildVerticalSelection(
-        presetId,
-        jobId,
-        wizard.includeCaptions
-      );
-      await fetchJson(`/api/clips/${activeClip.id}/vertical-layout`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(selection),
-      });
-
-      await persistWizard({
-        lookPreset: presetId,
-        faceAnalysisJobId: jobId,
-        step: "edit",
-      });
-    } catch (err) {
-      setAnalysisError(
-        err instanceof Error ? err.message : "Face analysis failed"
-      );
-    } finally {
-      setAnalyzingFace(false);
-    }
-  }
-
-  async function continueFromLook() {
-    if (!wizard.lookPreset) {
-      alert("Choose a look preset first.");
-      return;
-    }
-    if (wizard.step !== "edit") {
-      await applyLookPreset(wizard.lookPreset);
-    }
-  }
-
   async function continueFromEdit() {
     await persistWizard({
       step: "export",
@@ -684,22 +707,52 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   }
 
   async function renderActiveClip() {
-    if (!activeClip || !wizard.lookPreset) return;
+    if (!activeClip) return;
     setExporting(true);
     setExportError(null);
     setExportDoneUrl(null);
     posthog.capture("agent_clip_export", {
       session_id: sessionId,
       clip_id: activeClip.id,
-      look_preset: wizard.lookPreset,
+      look_preset: wizard.lookPreset ?? "auto",
     });
 
     try {
-      const selection = buildVerticalSelection(
-        wizard.lookPreset,
-        wizard.faceAnalysisJobId,
-        wizard.includeCaptions
-      );
+      // Prefer the auto-prepared (or user-overridden) saved layout.
+      const layoutRes = await fetchJson<{
+        configuration?: {
+          layout: string;
+          faceAnalysisJobId?: string | null;
+          faceSelection?: VerticalLayoutSelection["faceSelection"];
+          settings?: Record<string, unknown>;
+        } | null;
+      }>(`/api/clips/${activeClip.id}/vertical-layout`);
+
+      let selection: VerticalLayoutSelection;
+      const config = layoutRes.ok ? layoutRes.data.configuration : null;
+      if (config) {
+        const base = defaultVerticalLayoutSelection();
+        const settings = (config.settings ?? {}) as Partial<
+          VerticalLayoutSelection
+        >;
+        selection = {
+          ...base,
+          ...settings,
+          layout: (config.layout as VerticalLayoutSelection["layout"]) ?? "auto",
+          faceAnalysisJobId: config.faceAnalysisJobId ?? undefined,
+          faceSelection: config.faceSelection ?? { mode: "auto" },
+          captions: {
+            enabled: wizard.includeCaptions,
+            position: settings.captions?.position ?? "lower",
+          },
+        };
+      } else {
+        selection = buildVerticalSelection(
+          wizard.lookPreset ?? "auto",
+          wizard.faceAnalysisJobId,
+          wizard.includeCaptions
+        );
+      }
 
       const res = await fetch(`/api/clips/${activeClip.id}/render`, {
         method: "POST",
@@ -739,14 +792,13 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       return;
     }
     await persistWizard({
-      step: "look",
+      step: "edit",
       queueIndex: nextIndex,
-      lookPreset: null,
+      lookPreset: "auto",
       faceAnalysisJobId: null,
     });
     setExportDoneUrl(null);
     setExportError(null);
-    setAnalysisError(null);
   }
 
   async function handleSend() {
@@ -881,7 +933,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   const stepOrder: AgentWizardStep[] = [
     "transcribing",
     "pick",
-    "look",
     "edit",
     "export",
     "done",
@@ -917,7 +968,25 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                 ? ` · ${formatSeconds(recordedSeconds)} ${isLive ? "captured" : "total"}`
                 : ""}
             </span>
-            {(transcribingActive || transcriptionBehind) && (
+            {findingClips && (
+              <span className="flex items-center gap-1.5 text-[var(--color-accent)]">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-accent)]" />
+                Finding clips
+                {findingElapsedSec > 0 ? ` · ${findingElapsedSec}s` : ""}
+              </span>
+            )}
+            {!findingClips &&
+              transcriptionCaughtUp &&
+              !transcriptReady &&
+              visibleClips.length === 0 && (
+              <span className="flex items-center gap-1.5 text-[var(--color-accent)]">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-accent)]" />
+                Preparing transcript…
+              </span>
+            )}
+            {!findingClips &&
+              !transcriptionCaughtUp &&
+              (transcribingActive || transcriptionBehind) && (
               <span className="flex items-center gap-1.5 text-[var(--color-accent)]">
                 <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-accent)]" />
                 Ingesting
@@ -931,11 +1000,22 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                 {transcriptionError}
               </span>
             )}
+            {suggestionError && !sourceError && !transcriptionError && (
+              <span className="text-[var(--color-warning,#e6b84d)]">
+                {suggestionError}
+              </span>
+            )}
           </div>
-          {recordedSeconds > 0 && (
-            <span className="tabular-nums font-semibold text-[var(--color-foreground)]">
-              {progressPct}%
+          {findingClips ? (
+            <span className="font-semibold text-[var(--color-accent)]">
+              Working…
             </span>
+          ) : (
+            recordedSeconds > 0 && (
+              <span className="tabular-nums font-semibold text-[var(--color-foreground)]">
+                {progressPct}%
+              </span>
+            )
           )}
         </div>
         <div
@@ -943,31 +1023,59 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
           role="progressbar"
           aria-valuemin={0}
           aria-valuemax={100}
-          aria-valuenow={progressPct}
-          aria-label="Transcription progress"
+          aria-valuenow={findingClips ? undefined : progressPct}
+          aria-label={
+            findingClips ? "Finding top clips" : "Transcription progress"
+          }
         >
-          <div
-            className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-500"
-            style={{ width: `${progressPct}%` }}
-          />
+          {findingClips ? (
+            <div className="relative h-full w-full">
+              <div className="absolute inset-0 bg-[var(--color-accent)]/25" />
+              <div className="absolute inset-y-0 w-2/5 animate-[agent-indeterminate_1.35s_ease-in-out_infinite] rounded-full bg-[var(--color-accent)]" />
+            </div>
+          ) : (
+            <div
+              className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-500"
+              style={{ width: `${progressPct}%` }}
+            />
+          )}
         </div>
         <div className="mt-3 flex flex-wrap gap-2">
           {stepOrder.map((step) => {
             const active = wizard.step === step;
             const idx = stepOrder.indexOf(wizard.step);
-            const done = stepOrder.indexOf(step) < idx;
+            const stepIdx = stepOrder.indexOf(step);
+            const done = stepIdx < idx;
+            const canJump =
+              step !== "transcribing" &&
+              step !== "done" &&
+              stepIdx <= idx &&
+              (step === "pick"
+                ? wizard.suggestRequested || visibleClips.length > 0
+                : wizard.selectedClipIds.length > 0);
+            const className = cn(
+              "rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide",
+              active
+                ? "bg-[var(--color-accent)] text-black"
+                : done
+                  ? "bg-[#1a2418] text-[var(--color-accent)]"
+                  : "bg-[#141414] text-[var(--color-muted)]",
+              canJump && !active && "cursor-pointer hover:ring-1 hover:ring-[var(--color-accent)]"
+            );
+            if (canJump && !active) {
+              return (
+                <button
+                  key={step}
+                  type="button"
+                  className={className}
+                  onClick={() => void persistWizard({ step })}
+                >
+                  {STEP_LABELS[step]}
+                </button>
+              );
+            }
             return (
-              <span
-                key={step}
-                className={cn(
-                  "rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide",
-                  active
-                    ? "bg-[var(--color-accent)] text-black"
-                    : done
-                      ? "bg-[#1a2418] text-[var(--color-accent)]"
-                      : "bg-[#141414] text-[var(--color-muted)]"
-                )}
-              >
+              <span key={step} className={className}>
                 {STEP_LABELS[step]}
               </span>
             );
@@ -1001,31 +1109,39 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                 progressPct={progressPct}
                 isLive={isLive}
                 transcriptionError={transcriptionError}
+                phase="transcribing"
               />
             </div>
           )}
 
           {!needsCadenceChoice &&
             !(wizard.cadence === "after_stream" && !streamEnded) &&
-            (wizard.step === "transcribing" ||
-              (!transcriptReady &&
-                wizard.step === "pick" &&
-                clips.length === 0)) &&
-            !(wizard.suggestRequested && clips.length > 0) && (
+            visibleClips.length === 0 &&
+            (wizard.step === "transcribing" || wizard.step === "pick") &&
+            (findingClips ||
+              !transcriptReady ||
+              Boolean(transcriptionError) ||
+              Boolean(suggestionError) ||
+              suggesting) &&
+            !(awaitingSuggestRetry && !transcriptionError && !suggestionError) && (
             <div className="mx-auto flex w-full max-w-lg flex-col items-center justify-center gap-5 py-16 text-center">
               <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--color-accent)] border-t-transparent" />
               <div className="space-y-1">
                 <p className="text-sm font-medium text-[var(--color-foreground)]">
-                  {suggesting || (transcriptReady && !wizard.suggestRequested)
+                  {findingClips || suggesting
                     ? "Finding your top clips…"
-                    : transcriptionCaughtUp
-                      ? "Transcription complete — preparing clips…"
-                      : "Transcribing your stream…"}
+                    : transcriptionCaughtUp && !transcriptReady
+                      ? "Transcription at 100% — finishing searchable text…"
+                      : transcriptionCaughtUp
+                        ? "Transcription complete — starting clip search…"
+                        : "Transcribing your stream…"}
                 </p>
                 <p className="text-xs text-[var(--color-muted)]">
-                  {suggesting || transcriptReady
-                    ? "Scoring moments from the transcript and audio."
-                    : wizard.cadence === "live_now"
+                  {findingClips || suggesting
+                    ? "Transcript is ready. Scoring moments from the transcript and audio — usually under a minute."
+                    : transcriptionCaughtUp && !transcriptReady
+                      ? "The bar is full, but we still need a bit of searchable transcript before suggesting clips."
+                      : wizard.cadence === "live_now"
                       ? `Once we have about ${formatDuration(MIN_TRANSCRIPT_SECONDS)} of searchable transcript, clip suggestions will start rolling in.`
                       : `Once we have about ${formatDuration(MIN_TRANSCRIPT_SECONDS)} of searchable transcript, we\u2019ll propose 10 clips automatically.`}
                 </p>
@@ -1036,12 +1152,19 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                 progressPct={progressPct}
                 isLive={isLive}
                 transcriptionError={transcriptionError}
+                phase={
+                  findingClips || suggesting ? "finding_clips" : "transcribing"
+                }
+                findingElapsedSec={findingElapsedSec}
               />
-              {transcriptionCaughtUp && !suggesting && transcriptionError && (
+              {!suggesting && (transcriptionError || suggestionError) && (
                 <Button
                   type="button"
                   onClick={() => {
                     suggestStarted.current = false;
+                    setTranscriptionError(null);
+                    setSuggestionError(null);
+                    void persistWizard({ suggestRequested: false });
                     void runSuggest({ throughSeconds: transcribedSeconds });
                   }}
                 >
@@ -1053,7 +1176,11 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
 
           {!needsCadenceChoice &&
             wizard.step === "pick" &&
-            (transcriptReady || clips.length > 0 || wizard.suggestRequested) &&
+            !findingClips &&
+            !suggesting &&
+            (transcriptReady ||
+              visibleClips.length > 0 ||
+              wizard.suggestRequested) &&
             !(wizard.cadence === "after_stream" && !streamEnded) && (
             <div className="space-y-4">
               {newClipNotice && (
@@ -1073,10 +1200,14 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
               <AgentClipPickGrid
                 clips={withThumbnails(
                   sessionId,
-                  clips.filter((c) => c.status !== "rejected")
+                  visibleClips
                 )}
                 selectedIds={selectedIds}
                 onToggle={toggleClip}
+                onOpenClip={(id) => {
+                  setStudioClipId(id);
+                  setSelectedIds((prev) => new Set(prev).add(id));
+                }}
                 onGetMore={() =>
                   void runSuggest({
                     extra: 5,
@@ -1085,6 +1216,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                 }
                 getMoreLoading={getMoreLoading}
                 suggesting={suggesting}
+                findingElapsedSec={findingElapsedSec}
               />
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <button
@@ -1094,35 +1226,53 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                 >
                   {showFindChat ? "Hide find chat" : "Find another moment"}
                 </button>
-                <Button
-                  type="button"
-                  disabled={selectedIds.size === 0}
-                  onClick={() => void continueFromPick()}
-                >
-                  Continue with {selectedIds.size || 0} clip
-                  {selectedIds.size === 1 ? "" : "s"}
-                </Button>
+                <div className="flex flex-wrap gap-2">
+                  {selectedIds.size === 1 && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => {
+                        const id = [...selectedIds][0];
+                        if (id) setStudioClipId(id);
+                      }}
+                    >
+                      Open studio
+                    </Button>
+                  )}
+                  <Button
+                    type="button"
+                    disabled={selectedIds.size === 0}
+                    onClick={() => void continueFromPick()}
+                  >
+                    Batch wizard · {selectedIds.size || 0}
+                  </Button>
+                </div>
               </div>
             </div>
           )}
 
           {wizard.step === "look" && activeClip && (
-            <div className="mx-auto w-full max-w-3xl space-y-4">
-              <p className="text-xs text-[var(--color-muted)]">
-                Clip {wizard.queueIndex + 1} of {wizard.selectedClipIds.length}:{" "}
-                {activeClip.title}
+            <div className="mx-auto flex w-full max-w-lg flex-col items-center gap-4 py-16 text-center">
+              <p className="text-sm text-[var(--color-muted)]">
+                Looks are applied automatically from face detection. Open a clip
+                from Pick to change the look, or continue editing.
               </p>
-              <AgentLookPresetStep
-                value={wizard.lookPreset}
-                onChange={(id) => void applyLookPreset(id)}
-                analyzing={analyzingFace}
-                analysisError={analysisError}
-              />
-              <div className="flex justify-end">
+              <div className="flex gap-2">
                 <Button
                   type="button"
-                  disabled={!wizard.lookPreset || analyzingFace}
-                  onClick={() => void continueFromLook()}
+                  variant="outline"
+                  onClick={() => void persistWizard({ step: "pick" })}
+                >
+                  Back to picks
+                </Button>
+                <Button
+                  type="button"
+                  onClick={() =>
+                    void persistWizard({
+                      step: "edit",
+                      lookPreset: wizard.lookPreset ?? "auto",
+                    })
+                  }
                 >
                   Continue to edit
                 </Button>
@@ -1152,13 +1302,13 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                   );
                 }}
               />
-              <div className="flex justify-end gap-2">
+              <div className="flex justify-between gap-2">
                 <Button
                   type="button"
                   variant="outline"
-                  onClick={() => void persistWizard({ step: "look" })}
+                  onClick={() => void persistWizard({ step: "pick" })}
                 >
-                  Back
+                  Back to picks
                 </Button>
                 <Button type="button" onClick={() => void continueFromEdit()}>
                   Continue to export
@@ -1171,11 +1321,10 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
             <div className="mx-auto w-full max-w-lg space-y-4 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-6">
               <h2 className="text-lg font-semibold">Export</h2>
               <p className="text-sm text-[var(--color-muted)]">
-                Render “{activeClip.title}” as a vertical Short
-                {wizard.lookPreset
-                  ? ` (${getContentLookPreset(wizard.lookPreset).label})`
-                  : ""}
-                {wizard.includeCaptions ? " with captions" : " without captions"}.
+                Render “{activeClip.title}” as a vertical Short with auto face
+                positioning
+                {wizard.includeCaptions ? " and captions" : ""}. Change the look
+                anytime by opening the clip from Pick.
               </p>
               {exportError && (
                 <p className="text-sm text-[var(--color-danger)]">{exportError}</p>
@@ -1186,6 +1335,13 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                 </p>
               )}
               <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void persistWizard({ step: "edit" })}
+                >
+                  Back to edit
+                </Button>
                 <Button
                   type="button"
                   disabled={exporting}
@@ -1344,6 +1500,31 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
           </div>
         </aside>
       </div>
+
+      {studioClip && (
+        <AgentClipStudioModal
+          open={Boolean(studioClipId)}
+          sessionId={sessionId}
+          clip={studioClip}
+          playbackUrl={playbackUrl}
+          sourceDuration={recordedSeconds}
+          includeCaptions={wizard.includeCaptions}
+          captionAppearance={captionAppearance}
+          onIncludeCaptionsChange={(value) => {
+            void persistWizard({ includeCaptions: value });
+          }}
+          onCaptionAppearanceChange={(next) => {
+            setCaptionAppearance(next);
+            writeCaptionAppearancePreference(next);
+          }}
+          onClipChange={(next) => {
+            setClips((prev) =>
+              prev.map((c) => (c.id === next.id ? next : c))
+            );
+          }}
+          onClose={() => setStudioClipId(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1376,73 +1557,152 @@ function buildVerticalSelection(
   };
 }
 
+const FINDING_CLIP_TIPS = [
+  "Scoring punchy moments…",
+  "Ranking by clip-worthiness…",
+  "Picking titles and thumbnails…",
+  "Almost there…",
+] as const;
+
 function TranscriptionProgressCard({
   transcribedSeconds,
   recordedSeconds,
   progressPct,
   isLive,
   transcriptionError,
+  phase = "transcribing",
+  findingElapsedSec = 0,
 }: {
   transcribedSeconds: number;
   recordedSeconds: number;
   progressPct: number;
   isLive: boolean;
   transcriptionError: string | null;
+  phase?: "transcribing" | "finding_clips";
+  findingElapsedSec?: number;
 }) {
+  const finding = phase === "finding_clips";
+  const txDone = finding || progressPct >= 92;
+  const tipIndex =
+    findingElapsedSec > 0
+      ? Math.floor(findingElapsedSec / 4) % FINDING_CLIP_TIPS.length
+      : 0;
+
   return (
-    <div className="w-full space-y-2 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] px-4 py-4 text-left">
-      <div className="flex items-end justify-between gap-3">
-        <div>
-          <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8f9b89]">
-            Transcription progress
-          </p>
-          <p className="mt-1 text-sm text-[var(--color-foreground)]">
-            <span className="font-semibold tabular-nums text-[var(--color-accent)]">
-              {formatSeconds(transcribedSeconds)}
-            </span>
-            <span className="text-[var(--color-muted)]"> transcribed</span>
-            {recordedSeconds > 0 && (
-              <>
-                <span className="text-[var(--color-muted)]"> of </span>
-                <span className="font-semibold tabular-nums">
-                  {formatSeconds(recordedSeconds)}
-                </span>
-                <span className="text-[var(--color-muted)]">
-                  {isLive ? " captured so far" : " stream length"}
-                </span>
-              </>
+    <div className="w-full space-y-3 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] px-4 py-4 text-left">
+      <ol className="space-y-2">
+        <li className="flex items-start gap-2.5 text-sm">
+          <span
+            className={cn(
+              "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-bold",
+              txDone
+                ? "bg-[var(--color-accent)] text-black"
+                : "border border-[var(--color-card-border)] text-[var(--color-muted)]"
             )}
-          </p>
-        </div>
-        <p className="shrink-0 text-lg font-semibold tabular-nums text-[var(--color-accent)]">
-          {recordedSeconds > 0 ? `${progressPct}%` : "…"}
-        </p>
-      </div>
+          >
+            {txDone ? "✓" : "1"}
+          </span>
+          <span>
+            <span
+              className={cn(
+                "font-medium",
+                txDone
+                  ? "text-[var(--color-muted)]"
+                  : "text-[var(--color-foreground)]"
+              )}
+            >
+              {txDone ? "Transcription complete" : "Transcribing stream"}
+            </span>
+            {!finding && (
+              <span className="mt-0.5 block text-xs tabular-nums text-[var(--color-muted)]">
+                {formatSeconds(transcribedSeconds)}
+                {recordedSeconds > 0
+                  ? ` of ${formatSeconds(recordedSeconds)}${
+                      isLive ? " captured" : ""
+                    }`
+                  : ""}
+                {recordedSeconds > 0 ? ` · ${progressPct}%` : ""}
+              </span>
+            )}
+          </span>
+        </li>
+        <li className="flex items-start gap-2.5 text-sm">
+          <span
+            className={cn(
+              "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-bold",
+              finding
+                ? "border border-[var(--color-accent)] text-[var(--color-accent)]"
+                : "border border-[var(--color-card-border)] text-[var(--color-muted)]"
+            )}
+          >
+            {finding ? (
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-accent)]" />
+            ) : (
+              "2"
+            )}
+          </span>
+          <span>
+            <span
+              className={cn(
+                "font-medium",
+                finding
+                  ? "text-[var(--color-foreground)]"
+                  : "text-[var(--color-muted)]"
+              )}
+            >
+              {finding ? "Finding top clips…" : "Find top clips"}
+            </span>
+            {finding && (
+              <span className="mt-0.5 block text-xs text-[var(--color-muted)]">
+                {FINDING_CLIP_TIPS[tipIndex]}
+                {findingElapsedSec > 0
+                  ? ` · ${findingElapsedSec}s elapsed`
+                  : ""}
+              </span>
+            )}
+          </span>
+        </li>
+      </ol>
+
       <div
         className="h-2.5 overflow-hidden rounded-full bg-[#141814]"
         role="progressbar"
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-valuenow={progressPct}
-        aria-label="Transcription progress"
+        aria-valuenow={finding ? undefined : progressPct}
+        aria-label={finding ? "Finding top clips" : "Transcription progress"}
       >
-        <div
-          className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-500 ease-out"
-          style={{
-            width: `${recordedSeconds > 0 ? progressPct : Math.min(8, transcribedSeconds > 0 ? 4 : 2)}%`,
-          }}
-        />
+        {finding ? (
+          <div className="relative h-full w-full">
+            <div className="absolute inset-0 bg-[var(--color-accent)]/20" />
+            <div className="absolute inset-y-0 w-2/5 animate-[agent-indeterminate_1.35s_ease-in-out_infinite] rounded-full bg-[var(--color-accent)]" />
+          </div>
+        ) : (
+          <div
+            className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-500 ease-out"
+            style={{
+              width: `${
+                recordedSeconds > 0
+                  ? progressPct
+                  : Math.min(8, transcribedSeconds > 0 ? 4 : 2)
+              }%`,
+            }}
+          />
+        )}
       </div>
-      <div className="flex justify-between text-[10px] tabular-nums text-[var(--color-muted)]">
-        <span>0:00</span>
-        <span>
-          {recordedSeconds > 0
-            ? formatSeconds(recordedSeconds)
+
+      <p className="text-[11px] text-[var(--color-muted)]">
+        {finding
+          ? "Still working — this step has no percent. Hang tight, clips appear when scoring finishes."
+          : recordedSeconds > 0
+            ? isLive
+              ? "Live capture keeps growing; the bar is transcript vs captured so far."
+              : "Bar is transcribed time vs full stream length."
             : isLive
               ? "Waiting for capture…"
               : "Measuring length…"}
-        </span>
-      </div>
+      </p>
+
       {transcriptionError && (
         <p className="text-[11px] text-[var(--color-warning,#e6b84d)]">
           {transcriptionError}

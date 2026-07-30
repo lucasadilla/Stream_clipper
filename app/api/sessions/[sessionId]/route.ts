@@ -52,6 +52,17 @@ export async function GET(
     }
 
     const storage = await getSessionStorageInfo(sessionId);
+    const primarySource = session.sourceMedia
+      .filter(
+        (media) =>
+          !media.originalFilename.toLowerCase().startsWith("segment-") &&
+          media.originalFilename.toLowerCase() !== "preview.mp4"
+      )
+      .sort(
+        (a, b) =>
+          (b.durationSeconds ?? 0) - (a.durationSeconds ?? 0) ||
+          Number(b.sizeBytes - a.sizeBytes)
+      )[0] ?? session.sourceMedia[0];
 
     return jsonResponse({
       session: {
@@ -74,7 +85,7 @@ export async function GET(
             }
           : null,
         sourceMedia: await Promise.all(
-          session.sourceMedia.map(async (m) => {
+          (primarySource ? [primarySource] : []).map(async (m) => {
           const hasFile = m.filePath ? fileExists(m.filePath) : false;
           let sourceVersion = Date.now();
           if (hasFile && m.filePath) {

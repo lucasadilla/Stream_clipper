@@ -83,7 +83,9 @@ describe("buildPictureInPictureFilter", () => {
     });
     expect(filter).toContain("split=2");
     expect(filter).toContain("overlay=");
-    const scaleMatch = /scale=(\d+):(\d+):flags/.exec(filter);
+    const scaleMatch = /scale=(\d+):(\d+)(?::force_original_aspect_ratio=increase)?:flags/.exec(
+      filter
+    );
     expect(scaleMatch).not.toBeNull();
     expect(Number(scaleMatch![1]) % 2).toBe(0);
     expect(Number(scaleMatch![2]) % 2).toBe(0);
@@ -100,7 +102,9 @@ describe("buildPictureInPictureFilter", () => {
     const y = Number(overlayMatch![2]);
     // Total PiP height = scaled facecam height + border padding (if any).
     const padMatch = /pad=(\d+):(\d+):/.exec(filter);
-    const scaleMatch = /scale=(\d+):(\d+):flags/.exec(filter);
+    const scaleMatch = /scale=(\d+):(\d+)(?::force_original_aspect_ratio=increase)?:flags/.exec(
+      filter
+    );
     const totalHeight = Number(padMatch?.[2] ?? scaleMatch![2]);
     // The PiP bottom edge must sit above the bottom 14% platform-controls zone.
     expect(y + totalHeight).toBeLessThanOrEqual(1920 - Math.round(1920 * 0.14));

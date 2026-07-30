@@ -188,7 +188,13 @@ export async function getStreamSession(sessionId: string) {
   return prisma.streamSession.findUnique({
     where: { id: sessionId },
     include: {
-      sourceMedia: { orderBy: { createdAt: "desc" }, take: 1 },
+      sourceMedia: {
+        orderBy: [
+          { isLiveRecording: "desc" },
+          { durationSeconds: "desc" },
+          { sizeBytes: "desc" },
+        ],
+      },
       clipSuggestions: { orderBy: { createdAt: "desc" } },
       renderJobs: { orderBy: { createdAt: "desc" }, take: 10 },
       chatTracking: true,
