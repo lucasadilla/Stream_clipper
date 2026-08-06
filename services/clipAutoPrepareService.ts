@@ -51,9 +51,9 @@ export function buildAutoVerticalLayoutRequest(
         hideOriginalFacecam: "blur",
       },
       subjectCrop: {
-        smoothing: isConversation ? 0.9 : 0.45,
-        deadZoneRatio: isConversation ? 0.08 : 0.45,
-        maxPanSpeed: isConversation ? 2 : 0.45,
+        smoothing: isConversation ? 0.28 : 0.35,
+        deadZoneRatio: isConversation ? 0.2 : 0.45,
+        maxPanSpeed: isConversation ? 0.55 : 0.4,
         fallback: "hold",
       },
       captions: { enabled: true, position: "lower" },
@@ -87,16 +87,11 @@ export async function prepareSuggestedClips(
       .map((c) => c.clipSuggestionId)
   );
 
-  // Limit concurrency so suggest doesn't stampede the face worker.
+  // Prepare serially. Each range can require a temporary media segment, and
+  // parallel warm-up can exhaust a small Railway volume before cleanup runs.
   const queue = clips.filter((c) => !ready.has(c.id));
-  const concurrency = 3;
-  for (let i = 0; i < queue.length; i += concurrency) {
-    const batch = queue.slice(i, i + concurrency);
-    await Promise.all(
-      batch.map((clip) =>
-        prepareOneSuggestedClip(streamSessionId, clip).catch(() => null)
-      )
-    );
+  for (const clip of queue) {
+    await prepareOneSuggestedClip(streamSessionId, clip).catch(() => null);
   }
 }
 

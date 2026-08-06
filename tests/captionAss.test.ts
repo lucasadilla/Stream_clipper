@@ -220,4 +220,34 @@ describe("caption text cleanup", () => {
       "won",
     ]);
   });
+
+  it("clamps word timings to their transcript chunk", () => {
+    const cues = buildCaptionTrack([
+      {
+        id: "chunk",
+        startTimeSeconds: 10,
+        endTimeSeconds: 12,
+        text: "hello world",
+        rawJson: {
+          words: [
+            { start: 9.5, end: 10.5, word: "hello" },
+            { start: 11.5, end: 12.8, word: "world" },
+          ],
+        },
+      },
+    ]);
+    expect(cues[0]!.startTimeSeconds).toBe(10);
+    expect(cues.at(-1)!.endTimeSeconds).toBe(12);
+    const words = cues.flatMap((cue) => cue.words ?? []);
+    expect(words[0]!.start).toBe(10);
+    expect(words.at(-1)!.end).toBe(12);
+  });
+
+  it("removes overlaps between adjacent transcript chunks", () => {
+    const cues = buildCaptionTrack([
+      { id: "a", startTimeSeconds: 0, endTimeSeconds: 2, text: "first" },
+      { id: "b", startTimeSeconds: 1.5, endTimeSeconds: 3, text: "second" },
+    ]);
+    expect(cues[0]!.endTimeSeconds).toBeLessThan(cues[1]!.startTimeSeconds);
+  });
 });

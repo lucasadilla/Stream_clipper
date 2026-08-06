@@ -28,9 +28,11 @@ import {
 } from "@/lib/verticalLayout";
 
 const FACE_ANALYSIS_WORKER_ID = `face-worker-${process.pid}`;
+const FACE_ANALYSIS_VERSION = 2;
 
 /** Result JSON stored on the job row (adds source info to the shared shape). */
 export interface StoredFaceAnalysisResult extends FacecamAnalysisResult {
+  analysisVersion?: number;
   sourceWidth: number;
   sourceHeight: number;
   /** Representative frame for UI overlays (relative storage path). */
@@ -183,6 +185,18 @@ export async function requestFaceAnalysis(options: {
   const end = Math.max(start + 0.5, options.endSeconds);
   const sampleFps = Math.min(8, Math.max(1, options.sampleFps ?? 2.5));
 
+  // Opening Clip Studio is more important than speculative warm-up. Reclaim
+  // old per-clip segments first so the requested analysis has working space.
+  if (options.priority) {
+    const { reclaimEphemeralStorage } = await import(
+      "@/services/storageReclaimService"
+    );
+    await reclaimEphemeralStorage({
+      keepSessionId: options.streamSessionId,
+      pruneSessionSegments: true,
+    }).catch(() => null);
+  }
+
   if (!options.force) {
     const existing = await prisma.faceAnalysisJob.findFirst({
       where: {
@@ -207,19 +221,32 @@ export async function requestFaceAnalysis(options: {
         },
       },
       orderBy: { createdAt: "desc" },
-      select: { id: true, status: true, progress: true },
+      select: { id: true, status: true, progress: true, resultJson: true },
     });
     if (existing) {
-      if (options.priority && existing.status === "queued") {
-        await prisma.faceAnalysisJob.update({
-          where: { id: existing.id },
-          data: { progress: Math.max(1, existing.progress) },
-        });
-        void import("@/services/workerService")
-          .then(({ runWorkerTick }) => runWorkerTick())
-          .catch(() => {});
+      const existingResult =
+        existing.resultJson &&
+        typeof existing.resultJson === "object" &&
+        !Array.isArray(existing.resultJson)
+          ? (existing.resultJson as { analysisVersion?: unknown })
+          : null;
+      const reusable =
+        existing.status !== "completed" ||
+        existingResult?.analysisVersion === FACE_ANALYSIS_VERSION;
+      if (!reusable) {
+        // Re-analyze once when detection/validation behavior changes.
+      } else {
+        if (options.priority && existing.status === "queued") {
+          await prisma.faceAnalysisJob.update({
+            where: { id: existing.id },
+            data: { progress: Math.max(1, existing.progress) },
+          });
+          void import("@/services/workerService")
+            .then(({ runWorkerTick }) => runWorkerTick())
+            .catch(() => {});
+        }
+        return { jobId: existing.id, status: existing.status };
       }
-      return { jobId: existing.id, status: existing.status };
     }
   }
 
@@ -337,6 +364,12 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
     }
   );
 
+  if (worker.sampledFrames < 2) {
+    throw new Error(
+      "The source video did not produce decodable frames for face tracking. Re-prepare the source or upload a playable MP4."
+    );
+  }
+
   await updateAnalysisProgress(jobId, "tracking_faces", 72);
 
   // Shift detection timestamps from file time back onto the session timeline
@@ -450,6 +483,7 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
   });
 
   const result: StoredFaceAnalysisResult = {
+    analysisVersion: FACE_ANALYSIS_VERSION,
     id: jobId,
     sourceMediaId: sourceMedia.id,
     clipId: job.clipSuggestionId ?? undefined,

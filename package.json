@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "node scripts/copy-mediapipe-assets.mjs",
     "dev": "next dev",
+    "prebuild": "node scripts/copy-mediapipe-assets.mjs",
     "build": "next build",
     "start": "node scripts/start-production.js",
     "start:next": "next start",
@@ -20,6 +22,7 @@
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.2",
+    "@mediapipe/tasks-vision": "^1.0.1",
     "@paper-design/shaders-react": "^0.0.77",
     "@prisma/client": "^6.9.0",
     "archiver": "^8.0.0",

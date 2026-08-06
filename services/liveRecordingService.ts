@@ -44,7 +44,11 @@ function liveFormat(): string {
         : 1080;
   // Prefer an explicit video+audio merge. Putting `best[ext=mp4]` first often
   // selects YouTube DASH video-only (e.g. f299) and leaves Whisper with no audio.
-  return `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/best`;
+  return (
+    `bestvideo[vcodec^=avc1][height<=${height}]+bestaudio[acodec^=mp4a]/` +
+    `bestvideo[vcodec^=avc1][height<=${height}]+bestaudio/` +
+    `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/best`
+  );
 }
 
 const MIN_RECORDED_SECONDS = 3;

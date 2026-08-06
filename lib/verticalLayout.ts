@@ -814,13 +814,13 @@ export function buildActiveSpeakerCropPlan(
     clipEndSeconds,
     cropWidthRatio,
     {
-      smoothing: 0.9,
-      deadZoneRatio: 0.08,
-      maxPanSpeed: 2,
+      smoothing: 0.28,
+      deadZoneRatio: 0.2,
+      maxPanSpeed: 0.55,
       fallback: "hold",
       holdSeconds: 2.5,
-      minKeyframeSpacingSeconds: 0.25,
-      minMovement: 0.008,
+      minKeyframeSpacingSeconds: 0.5,
+      minMovement: 0.012,
     }
   );
 }

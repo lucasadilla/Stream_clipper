@@ -15,7 +15,9 @@ import {
   getPreviewVideoRelativePath,
   previewMp4Ready,
 } from "@/services/previewVideoService";
-import { fileExists } from "@/lib/storage";
+import { fileExists, resolveStoragePath } from "@/lib/storage";
+import { canDecodeVideoFrame } from "@/lib/ffmpeg";
+import { acquireSourceMedia } from "@/services/liveRecordingService";
 
 export async function GET(
   _request: NextRequest,
@@ -87,19 +89,29 @@ export async function GET(
         sourceMedia: await Promise.all(
           (primarySource ? [primarySource] : []).map(async (m) => {
           const hasFile = m.filePath ? fileExists(m.filePath) : false;
+          const absoluteSourcePath =
+            hasFile && m.filePath ? resolveStoragePath(m.filePath) : null;
+          const sourceIsDecodable = absoluteSourcePath
+            ? m.isLiveRecording ||
+              (await canDecodeVideoFrame(absoluteSourcePath))
+            : false;
+          if (absoluteSourcePath && !m.isLiveRecording && !sourceIsDecodable) {
+            void acquireSourceMedia(sessionId).catch((error) => {
+              console.warn("[session] source repair failed", error);
+            });
+          }
           let sourceVersion = Date.now();
-          if (hasFile && m.filePath) {
+          if (sourceIsDecodable && absoluteSourcePath) {
             try {
               const { statSync } = await import("fs");
-              const { resolveStoragePath } = await import("@/lib/storage");
               sourceVersion = Math.floor(
-                statSync(resolveStoragePath(m.filePath)).mtimeMs
+                statSync(absoluteSourcePath).mtimeMs
               );
             } catch {
               // keep Date.now()
             }
           }
-          const sourceVideoUrl = hasFile
+          const sourceVideoUrl = sourceIsDecodable
             ? `/api/storage/${m.filePath!.replace(/\\/g, "/")}?inline=1&v=${sourceVersion}`
             : null;
           const previewRelative = getPreviewVideoRelativePath(sessionId);
@@ -107,7 +119,8 @@ export async function GET(
           const previewVideoUrl = previewReady
             ? buildPreviewVideoUrl(previewRelative)
             : null;
-          const sourceIsPlayableMp4 = isBrowserPlayableVideoUrl(sourceVideoUrl);
+          const sourceIsPlayableMp4 =
+            sourceIsDecodable && isBrowserPlayableVideoUrl(sourceVideoUrl);
           return {
             id: m.id,
             durationSeconds: m.durationSeconds,

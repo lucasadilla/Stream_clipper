@@ -2,6 +2,7 @@ import path from "path";
 import { existsSync } from "fs";
 import { prisma } from "@/lib/db";
 import {
+  canDecodeVideoFrame,
   getFfmpegPath,
   hasAudioStream,
   hasVideoStream,
@@ -202,6 +203,11 @@ async function muxedClipSourceForRange(
     }
   }
   if (!muxed) return null;
+  if (!(await canDecodeVideoFrame(muxed.path))) {
+    const fs = await import("fs/promises");
+    await fs.unlink(muxed.path).catch(() => {});
+    return null;
+  }
 
   const muxedMedia = await ensureSourceMediaRow(streamSessionId, muxed.path, {
     originalFilename: path.basename(muxed.path),
@@ -437,7 +443,11 @@ export async function ensureClipSourceForRender(
   if (existsSync(previewPath)) {
     try {
       const previewProbe = await probeMedia(previewPath);
-      if (previewProbe.videoCodec && previewProbe.durationSeconds >= MIN_CLIP_SECONDS) {
+      if (
+        previewProbe.videoCodec &&
+        previewProbe.durationSeconds >= MIN_CLIP_SECONDS &&
+        (await canDecodeVideoFrame(previewPath))
+      ) {
         const previewMedia = await ensureSourceMediaRow(streamSessionId, previewPath, {
           originalFilename: "preview.mp4",
           durationSeconds: previewProbe.durationSeconds,
@@ -477,27 +487,33 @@ export async function ensureClipSourceForRender(
         isLiveRecording: activelyRecording,
       }));
 
-    const duration = await resolveFileDurationSeconds(
-      mainAbsolute,
-      liveRecordedSeconds,
-      existing.isLiveRecording,
-      endTimeSeconds
-    );
-
-    const local = localClipFromSource({
-      sourceMediaId: existing.id,
-      startTimeSeconds,
-      endTimeSeconds,
-      availableDuration: duration,
-    });
-    if (local) {
-      return preferAudibleClipSource(
-        streamSessionId,
+    const decodable =
+      existing.isLiveRecording || (await canDecodeVideoFrame(mainAbsolute));
+    if (decodable) {
+      const duration = await resolveFileDurationSeconds(
         mainAbsolute,
-        local,
-        startTimeSeconds,
+        liveRecordedSeconds,
+        existing.isLiveRecording,
         endTimeSeconds
       );
+
+      const local = localClipFromSource({
+        sourceMediaId: existing.id,
+        startTimeSeconds,
+        endTimeSeconds,
+        availableDuration: duration,
+      });
+      if (local) {
+        return preferAudibleClipSource(
+          streamSessionId,
+          mainAbsolute,
+          local,
+          startTimeSeconds,
+          endTimeSeconds
+        );
+      }
+    } else {
+      console.warn(`[render] ignoring undecodable source ${mainAbsolute}`);
     }
   }
 
@@ -520,6 +536,12 @@ export async function ensureClipSourceForRender(
     if (!fileExists(sourceMedia.filePath)) continue;
 
     const absolutePath = resolveStoragePath(sourceMedia.filePath);
+    if (
+      !sourceMedia.isLiveRecording &&
+      !(await canDecodeVideoFrame(absolutePath))
+    ) {
+      continue;
+    }
     if (
       (sourceMedia.width ?? 0) <= 0 &&
       !(await hasVideoStream(absolutePath))
@@ -571,6 +593,7 @@ export async function ensureClipSourceForRender(
   // a local live buffer exists but hasn't reached the clip end yet.
   const localMainExists = Boolean(mainAbsolute && existsSync(mainAbsolute));
   if (
+    activelyRecording &&
     localMainExists &&
     liveRecordedSeconds > 0 &&
     startTimeSeconds < liveRecordedSeconds - 0.25
@@ -639,11 +662,16 @@ export async function ensureClipSourceForRender(
   const segmentStart = Math.max(0, startTimeSeconds - leadIn);
   const segmentEnd = endTimeSeconds + trailOut;
 
-  await ensureDir(uploadDir);
   const segmentName = `segment-${Math.floor(segmentStart)}-${Math.floor(segmentEnd)}.mp4`;
   const absolutePath = path.join(uploadDir, segmentName);
 
-  if (!existsSync(absolutePath)) {
+  const createSegment = async () => {
+    await ensureDir(uploadDir);
+    if (existsSync(absolutePath)) {
+      if (await canDecodeVideoFrame(absolutePath)) return;
+      const fs = await import("fs/promises");
+      await fs.unlink(absolutePath).catch(() => {});
+    }
     const fetchLiveFromStart =
       session.platform !== "kick" &&
       (session.liveStatus === "live" ||
@@ -657,6 +685,25 @@ export async function ensureClipSourceForRender(
       absolutePath,
       { liveFromStart: fetchLiveFromStart }
     );
+  };
+
+  try {
+    await createSegment();
+  } catch (error) {
+    if (!isNoSpaceError(error)) throw error;
+
+    const fs = await import("fs/promises");
+    await fs.unlink(absolutePath).catch(() => {});
+    await reclaimEphemeralStorage({
+      keepSessionId: streamSessionId,
+      pruneSessionSegments: true,
+    });
+    try {
+      await createSegment();
+    } catch (retryError) {
+      if (isNoSpaceError(retryError)) throw noSpaceLeftError();
+      throw retryError;
+    }
   }
 
   const relativePath = toRelativeStoragePath(absolutePath);

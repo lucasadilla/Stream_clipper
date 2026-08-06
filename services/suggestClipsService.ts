@@ -13,7 +13,14 @@ import {
   type ClipContentProfile,
   type ClipContentType,
 } from "@/lib/clipContentProfile";
-import { rankClipCandidatesWithAI } from "@/services/clipRankingService";
+import {
+  isSpecificClickableTitle,
+  rankClipCandidatesWithAI,
+  sanitizeRankedClipTitle,
+} from "@/services/clipRankingService";
+import { refineClipToCompleteSpeech } from "@/lib/clipBoundaries";
+
+export const CLIP_SUGGESTION_VERSION = 4;
 
 const MIN_SCORE = 6;
 const OVERLAP_RATIO = 0.45;
@@ -28,7 +35,23 @@ type ClipCandidate = {
   worth: number;
   contentType: ClipContentType;
   context: string;
+  focusTimeSeconds: number;
+  rankingEvidence?: string;
+  titleAccuracyScore?: number;
+  clickabilityScore?: number;
+  boundaryAdjusted?: boolean;
+  endingComplete?: boolean;
 };
+
+function rankingCandidateId(candidate: ClipCandidate, index: number): string {
+  return [
+    "candidate",
+    index,
+    Math.round(candidate.start * 1000),
+    Math.round(candidate.end * 1000),
+    candidate.source,
+  ].join("_");
+}
 
 type TranscriptSnippetChunk = {
   startTimeSeconds: number;
@@ -71,6 +94,35 @@ function transcriptSnippetFromChunks(
     if (text.length >= take) break;
   }
   return text.join(" ");
+}
+
+function normalizeEvidenceText(value: string): string {
+  return value
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function evidenceTimeFromChunks(
+  chunks: TranscriptSnippetChunk[],
+  start: number,
+  end: number,
+  evidence: string
+): number | null {
+  const needle = normalizeEvidenceText(evidence);
+  if (!needle) return null;
+  for (const chunk of chunks) {
+    if (chunk.startTimeSeconds > end) break;
+    if (chunk.endTimeSeconds < start) continue;
+    if (normalizeEvidenceText(chunk.text).includes(needle)) {
+      return Math.max(
+        start,
+        Math.min(end, (chunk.startTimeSeconds + chunk.endTimeSeconds) / 2)
+      );
+    }
+  }
+  return null;
 }
 
 function chatInRange(
@@ -293,6 +345,10 @@ export async function autoSuggestClips(
       confidence: Math.min(0.95, 0.5 + w.score / 50),
       source: "event_window",
       contentType,
+      focusTimeSeconds: Math.max(
+        clamped.start,
+        Math.min(clamped.end, (w.startTimeSeconds + w.endTimeSeconds) / 2)
+      ),
       context: [
         transcript,
         w.summary,
@@ -347,6 +403,10 @@ export async function autoSuggestClips(
       confidence: Math.min(0.92, 0.45 + a.score / 18 + tw / 100),
       source: "audio_event",
       contentType,
+      focusTimeSeconds: Math.max(
+        start,
+        Math.min(end, (a.startTimeSeconds + a.endTimeSeconds) / 2)
+      ),
       context: [transcript, a.summary].filter(Boolean).join(" | "),
       worth:
         sourceBonus("audio_event", profile) +
@@ -400,6 +460,7 @@ export async function autoSuggestClips(
         confidence: Math.min(0.88, 0.4 + score / 80),
         source: "transcript_density",
         contentType,
+        focusTimeSeconds: mid,
         context: better,
         worth: sourceBonus("transcript_density", profile) + score,
       });
@@ -450,6 +511,7 @@ export async function autoSuggestClips(
         confidence: Math.min(0.55, 0.3 + tw / 100),
         source: "even_sample",
         contentType,
+        focusTimeSeconds: center,
         context,
         worth: Math.max(1, tw),
       });
@@ -460,13 +522,20 @@ export async function autoSuggestClips(
 
   const aiPoolSize = Math.min(20, Math.max(10, targetCount * 2));
   const aiPool = candidates.slice(0, aiPoolSize);
+  const aiCandidateEntries = aiPool.map((candidate, index) => ({
+    id: rankingCandidateId(candidate, index),
+    candidate,
+  }));
+  const aiCandidatesById = new Map(
+    aiCandidateEntries.map((entry) => [entry.id, entry.candidate])
+  );
   const aiRanking = await rankClipCandidatesWithAI({
     streamTitle: session?.title,
     streamDescription: session?.description,
     channelTitle: session?.channelTitle,
     contentType,
-    candidates: aiPool.map((candidate, index) => ({
-      id: String(index),
+    candidates: aiCandidateEntries.map(({ id, candidate }) => ({
+      id,
       startTimeSeconds: candidate.start,
       endTimeSeconds: candidate.end,
       source: candidate.source,
@@ -477,13 +546,23 @@ export async function autoSuggestClips(
   });
   if (aiRanking?.length) {
     const rankedCandidates = aiRanking.flatMap((ranked) => {
-      const candidate = aiPool[Number.parseInt(ranked.id, 10)];
+      const candidate = aiCandidatesById.get(ranked.id);
       if (!candidate) return [];
       return [
         {
           ...candidate,
           title: ranked.title,
           reason: `${ranked.rationale} ${candidate.reason}`.slice(0, 2000),
+          rankingEvidence: ranked.evidence,
+          titleAccuracyScore: ranked.titleAccuracyScore,
+          clickabilityScore: ranked.clickabilityScore,
+          focusTimeSeconds:
+            evidenceTimeFromChunks(
+              transcriptChunks,
+              candidate.start,
+              candidate.end,
+              ranked.evidence
+            ) ?? candidate.focusTimeSeconds,
           worth: candidate.worth * 0.35 + ranked.interestScore,
           confidence: Math.max(
             candidate.confidence,
@@ -519,7 +598,26 @@ export async function autoSuggestClips(
 
   for (const c of candidates) {
     if (selected.length >= targetCount) break;
+    const boundary = refineClipToCompleteSpeech({
+      start: c.start,
+      end: c.end,
+      transcriptChunks: usableTranscriptChunks,
+      maximumDurationSeconds: Math.min(
+        90,
+        profile.targetMaxSeconds +
+          (contentType === "podcast" || contentType === "talking" ? 20 : 12)
+      ),
+      postRollSeconds:
+        contentType === "gaming" || contentType === "gameplay_only" ? 1.25 : 0.4,
+    });
+    if (!boundary.endingComplete) continue;
+    c.start = boundary.start;
+    c.end = boundary.end;
+    c.boundaryAdjusted = boundary.adjusted;
+    c.endingComplete = boundary.endingComplete;
     if (isTooSimilar(c, accepted)) continue;
+    const cleanTitle = sanitizeRankedClipTitle(c.title);
+    if (!isSpecificClickableTitle(cleanTitle)) continue;
     if (
       c.source === "even_sample" &&
       selected.length >= Math.ceil(targetCount * 0.6)
@@ -527,6 +625,7 @@ export async function autoSuggestClips(
       continue;
     }
 
+    c.title = cleanTitle;
     selected.push(c);
     accepted.push({
       startTimeSeconds: c.start,
@@ -548,9 +647,16 @@ export async function autoSuggestClips(
           status: "suggested",
           rawAiJson: toJsonValue({
             source: "auto_suggest",
+            suggestionVersion: CLIP_SUGGESTION_VERSION,
             kind: candidate.source,
             worth: candidate.worth,
             contentType: candidate.contentType,
+            focusTimeSeconds: candidate.focusTimeSeconds,
+            rankingEvidence: candidate.rankingEvidence,
+            titleAccuracyScore: candidate.titleAccuracyScore,
+            clickabilityScore: candidate.clickabilityScore,
+            boundaryAdjusted: candidate.boundaryAdjusted,
+            endingComplete: candidate.endingComplete,
           }),
         },
       })

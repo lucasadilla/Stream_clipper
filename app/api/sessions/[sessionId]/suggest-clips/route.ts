@@ -1,7 +1,10 @@
 import { NextRequest } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
-import { autoSuggestClips } from "@/services/suggestClipsService";
+import {
+  autoSuggestClips,
+  CLIP_SUGGESTION_VERSION,
+} from "@/services/suggestClipsService";
 import { errorResponse, jsonResponse, toJsonValue } from "@/lib/utils";
 import { getBillingAccountIdFromRequest } from "@/services/billingService";
 import {
@@ -16,6 +19,7 @@ import {
 } from "@/lib/agentWizard";
 import { ensureClipSuggestionThumbnails } from "@/services/clipThumbnailService";
 import { prepareSuggestedClips } from "@/services/clipAutoPrepareService";
+import { reclaimEphemeralStorage } from "@/services/storageReclaimService";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -58,6 +62,33 @@ export async function POST(
       body.cap ??
       (currentWizard.cadence === "live_now" ? LIVE_NOW_SUGGESTION_CAP : 40);
 
+    // Refresh only untouched suggestions made before title/evidence grounding.
+    // Selected, saved, and rendered clips remain exactly as the creator left them.
+    const suggestedRows = await prisma.clipSuggestion.findMany({
+      where: { streamSessionId: sessionId, status: "suggested" },
+      select: { id: true, rawAiJson: true },
+    });
+    const legacyIds = suggestedRows.flatMap((row) => {
+      const raw = row.rawAiJson;
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+      const record = raw as {
+        source?: unknown;
+        suggestionVersion?: unknown;
+      };
+      return record.source === "auto_suggest" &&
+        record.suggestionVersion !== CLIP_SUGGESTION_VERSION
+        ? [row.id]
+        : [];
+    });
+    if (legacyIds.length > 0) {
+      await prisma.$transaction([
+        prisma.faceAnalysisJob.deleteMany({
+          where: { clipSuggestionId: { in: legacyIds } },
+        }),
+        prisma.clipSuggestion.deleteMany({ where: { id: { in: legacyIds } } }),
+      ]);
+    }
+
     const existingCount = await prisma.clipSuggestion.count({
       where: { streamSessionId: sessionId, status: { not: "rejected" } },
     });
@@ -95,18 +126,26 @@ export async function POST(
       ...result.clips.map((c) => c.id),
       ...clips.map((c) => c.id),
     ].filter((id, i, arr) => arr.indexOf(id) === i);
-    void ensureClipSuggestionThumbnails(sessionId, thumbIds).catch(() => {});
+    void (async () => {
+      await reclaimEphemeralStorage({
+        keepSessionId: sessionId,
+        pruneSessionSegments: true,
+      });
+      await ensureClipSuggestionThumbnails(sessionId, thumbIds);
 
     // Auto-compose vertical layouts (face detection → recommended crop).
     // Fire-and-forget so the pick grid isn't blocked.
-    void prepareSuggestedClips(
-      sessionId,
-      clips.slice(0, 12).map((c) => ({
-        id: c.id,
-        startTimeSeconds: c.startTimeSeconds,
-        endTimeSeconds: c.endTimeSeconds,
-      }))
-    ).catch(() => {});
+      await prepareSuggestedClips(
+        sessionId,
+        clips.slice(0, 3).map((c) => ({
+          id: c.id,
+          startTimeSeconds: c.startTimeSeconds,
+          endTimeSeconds: c.endTimeSeconds,
+        }))
+      );
+    })().catch((error) => {
+      console.warn("[suggest-clips] asset warmup failed", error);
+    });
 
     const hasClips = clips.length > 0;
     const isLaterStep =

@@ -1,5 +1,6 @@
 import path from "path";
-import { existsSync } from "fs";
+import { existsSync, statSync } from "fs";
+import { unlink } from "fs/promises";
 import {
   extractFastTimelineFrame,
   extractSoloTimelineFrame,
@@ -11,9 +12,8 @@ import {
   fileExists,
   toRelativeStoragePath,
 } from "@/lib/storage";
-import { findLocalSourceMedia } from "@/services/sourceMediaRepairService";
+import { ensureClipSourceForRender } from "@/services/clipSourceService";
 import { prisma } from "@/lib/db";
-import { getPreviewMp4Path } from "@/services/previewVideoService";
 
 const activeThumbnailJobs = new Map<string, Promise<string | null>>();
 
@@ -42,17 +42,35 @@ export function clipThumbnailApiUrl(clipSuggestionId: string): string {
   return `/api/clips/${clipSuggestionId}/thumbnail?inline=1`;
 }
 
-async function resolveThumbInput(
-  streamSessionId: string
-): Promise<string | null> {
-  const previewPath = getPreviewMp4Path(streamSessionId);
-  if (existsSync(previewPath)) return previewPath;
-
-  const sourceMedia = await findLocalSourceMedia(streamSessionId);
-  if (sourceMedia?.filePath && fileExists(sourceMedia.filePath)) {
-    return resolveStoragePath(sourceMedia.filePath);
+function validThumbnail(filePath: string): boolean {
+  if (!existsSync(filePath)) return false;
+  try {
+    return statSync(filePath).size >= 1_024;
+  } catch {
+    return false;
   }
-  return null;
+}
+
+async function resolveThumbInput(
+  streamSessionId: string,
+  startTimeSeconds: number,
+  endTimeSeconds: number
+): Promise<{ inputPath: string; seekOffsetSeconds: number } | null> {
+  const clipSource = await ensureClipSourceForRender(
+    streamSessionId,
+    startTimeSeconds,
+    endTimeSeconds
+  );
+  const sourceMedia = await prisma.sourceMedia.findUnique({
+    where: { id: clipSource.sourceMediaId },
+    select: { filePath: true },
+  });
+  if (!sourceMedia?.filePath || !fileExists(sourceMedia.filePath)) return null;
+
+  return {
+    inputPath: resolveStoragePath(sourceMedia.filePath),
+    seekOffsetSeconds: clipSource.renderStart - startTimeSeconds,
+  };
 }
 
 export async function ensureClipSuggestionThumbnail(
@@ -88,40 +106,62 @@ async function generateClipSuggestionThumbnail(
   const framesDir = getFramesDir(streamSessionId);
   await ensureDir(framesDir);
   const dest = path.join(framesDir, `clip_${clipSuggestionId}.jpg`);
-  if (existsSync(dest)) {
+  if (validThumbnail(dest)) {
     return clipThumbPublicUrl(streamSessionId, clipSuggestionId, Date.now());
   }
+  await unlink(dest).catch(() => {});
 
-  const inputPath = await resolveThumbInput(streamSessionId);
-  if (!inputPath) return null;
+  const input = await resolveThumbInput(
+    streamSessionId,
+    clip.startTimeSeconds,
+    clip.endTimeSeconds
+  );
+  if (!input) return null;
 
-  const mid =
-    (clip.startTimeSeconds + clip.endTimeSeconds) / 2 ||
-    clip.startTimeSeconds + 1;
+  const mid = (clip.startTimeSeconds + clip.endTimeSeconds) / 2;
+  const raw = clip.rawAiJson;
+  const storedFocus =
+    raw &&
+    typeof raw === "object" &&
+    !Array.isArray(raw) &&
+    typeof raw.focusTimeSeconds === "number" &&
+    Number.isFinite(raw.focusTimeSeconds) &&
+    raw.focusTimeSeconds >= clip.startTimeSeconds &&
+    raw.focusTimeSeconds <= clip.endTimeSeconds
+      ? raw.focusTimeSeconds
+      : null;
   // Prefer a beat slightly into the clip — mid is often a reaction face.
   const seekTimes = [
-    mid,
-    clip.startTimeSeconds + Math.min(4, (clip.endTimeSeconds - clip.startTimeSeconds) * 0.35),
+    storedFocus,
+    mid || clip.startTimeSeconds + 1,
+    clip.startTimeSeconds +
+      Math.min(4, (clip.endTimeSeconds - clip.startTimeSeconds) * 0.35),
     clip.startTimeSeconds + 1,
-  ];
+  ].filter(
+    (value, index, values): value is number =>
+      value != null && values.indexOf(value) === index
+  );
 
   for (const t of seekTimes) {
+    const seekTime = Math.max(0, t + input.seekOffsetSeconds);
     try {
-      await extractSoloTimelineFrame(inputPath, dest, Math.max(0, t), 480, 3);
-      if (existsSync(dest)) {
+      await extractSoloTimelineFrame(input.inputPath, dest, seekTime, 480, 3);
+      if (validThumbnail(dest)) {
         return clipThumbPublicUrl(streamSessionId, clipSuggestionId, Date.now());
       }
     } catch {
       // try next
     }
+    await unlink(dest).catch(() => {});
     try {
-      await extractFastTimelineFrame(inputPath, dest, Math.max(0, t), 480, 3);
-      if (existsSync(dest)) {
+      await extractFastTimelineFrame(input.inputPath, dest, seekTime, 480, 3);
+      if (validThumbnail(dest)) {
         return clipThumbPublicUrl(streamSessionId, clipSuggestionId, Date.now());
       }
     } catch {
       // try next seek
     }
+    await unlink(dest).catch(() => {});
   }
 
   return null;
@@ -133,7 +173,7 @@ export async function ensureClipSuggestionThumbnails(
 ): Promise<void> {
   // Parallelize a bit — sequential was slow and clients timed out waiting.
   const ids = clipIds.slice(0, 20);
-  const concurrency = 3;
+  const concurrency = 2;
   for (let i = 0; i < ids.length; i += concurrency) {
     const wave = ids.slice(i, i + concurrency);
     await Promise.all(

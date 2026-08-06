@@ -310,6 +310,11 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
         detector.close()
         cap.release()
 
+    if sampled_frames < 2:
+        raise RuntimeError(
+            "The video did not produce enough decodable frames for face analysis"
+        )
+
     return {
         "ok": True,
         "sourceWidth": src_w,

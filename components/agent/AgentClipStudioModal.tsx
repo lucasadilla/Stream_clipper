@@ -131,6 +131,12 @@ export function AgentClipStudioModal({
     width: number;
     height: number;
   } | null>(null);
+  const [faceKeyframes, setFaceKeyframes] = useState<
+    Array<{ timestampSeconds: number; centerX: number }>
+  >([]);
+  const [analyzingFace, setAnalyzingFace] = useState(false);
+  const [analysisProgress, setAnalysisProgress] = useState(0);
+  const [faceTrackingReady, setFaceTrackingReady] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const lookGenRef = useRef(0);
   const userChoseLookRef = useRef(false);
@@ -188,13 +194,20 @@ export function AgentClipStudioModal({
     setLookPreset("auto");
     setFaceJobId(null);
     setFaceRect(null);
+    setFaceKeyframes([]);
+    setAnalyzingFace(true);
+    setAnalysisProgress(0);
+    setFaceTrackingReady(false);
     setAnalysisError(null);
 
     void (async () => {
       const loadFaceFromJob = async (jobId: string) => {
         const poll = await fetchJson<{
+          error?: string;
           job?: {
             status?: string;
+            progress?: number;
+            errorMessage?: string | null;
             primaryCandidate?: {
               faceRect?: {
                 x: number;
@@ -209,19 +222,57 @@ export function AgentClipStudioModal({
                 height: number;
               } | null;
             } | null;
+            previewKeyframes?: Array<{
+              timestampSeconds: number;
+              centerX: number;
+            }>;
+            warnings?: string[];
           };
         }>(`/api/face-analysis/${jobId}`);
-        if (
-          cancelled ||
-          !poll.ok ||
-          poll.data.job?.status !== "completed"
-        ) {
-          return false;
+        if (cancelled) return "cancelled" as const;
+        if (!poll.ok || !poll.data.job) {
+          setAnalyzingFace(false);
+          setAnalysisError(
+            poll.data.error ?? "Face analysis could not be loaded."
+          );
+          return "failed" as const;
         }
-        const candidate = poll.data.job.primaryCandidate;
+        const job = poll.data.job;
+        setAnalysisProgress(Math.max(0, Math.min(100, job.progress ?? 0)));
+        if (job.status === "failed") {
+          setAnalyzingFace(false);
+          setAnalysisError(
+            job.errorMessage ?? "Face analysis failed. Try the clip again."
+          );
+          return "failed" as const;
+        }
+        if (job.status !== "completed") {
+          setAnalyzingFace(true);
+          setAnalysisError(null);
+          return "pending" as const;
+        }
+        const candidate = job.primaryCandidate;
         const rect = candidate?.faceRect ?? candidate?.rect ?? null;
         if (rect) setFaceRect(rect);
-        return true;
+        const keyframes = (job.previewKeyframes ?? []).filter(
+          (keyframe) =>
+            Number.isFinite(keyframe.timestampSeconds) &&
+            Number.isFinite(keyframe.centerX)
+        );
+        setFaceKeyframes(keyframes);
+        setAnalyzingFace(false);
+        setAnalysisProgress(100);
+        setFaceTrackingReady(Boolean(rect || keyframes.length > 0));
+        if (!rect && keyframes.length === 0) {
+          setAnalysisError(
+            job.warnings?.[0] ??
+              "No reliable face was found. This look will use a centered crop."
+          );
+          // Old jobs could be marked completed after decoding zero frames.
+          // Request the current analysis once instead of trusting that cache.
+          return "empty" as const;
+        }
+        return "completed" as const;
       };
 
       const { ok, data } = await fetchJson<{
@@ -239,14 +290,18 @@ export function AgentClipStudioModal({
         }
         if (data.configuration.faceAnalysisJobId) {
           setFaceJobId(data.configuration.faceAnalysisJobId);
-          const ready = await loadFaceFromJob(
+          const status = await loadFaceFromJob(
             data.configuration.faceAnalysisJobId
           );
-          if (ready) return;
+          if (status === "completed") return;
         }
       }
 
-      const face = await fetchJson<{ analysisJobId?: string; status?: string }>(
+      const face = await fetchJson<{
+        analysisJobId?: string;
+        status?: string;
+        error?: string;
+      }>(
         `/api/sessions/${sessionId}/face-analysis`,
         {
           method: "POST",
@@ -260,9 +315,18 @@ export function AgentClipStudioModal({
           }),
         }
       );
-      if (cancelled || !face.ok || !face.data.analysisJobId) return;
+      if (cancelled) return;
+      if (!face.ok || !face.data.analysisJobId) {
+        setAnalyzingFace(false);
+        setAnalysisError(
+          face.data.error ?? "Face tracking could not be started."
+        );
+        return;
+      }
       const jobId = face.data.analysisJobId;
       setFaceJobId(jobId);
+      setAnalyzingFace(true);
+      setAnalysisError(null);
       if (
         !userChoseLookRef.current &&
         lookGenRef.current === initialLookGeneration
@@ -283,8 +347,15 @@ export function AgentClipStudioModal({
       // Poll briefly so the preview can snap to the detected face.
       for (let i = 0; i < 60; i++) {
         if (cancelled) return;
-        if (await loadFaceFromJob(jobId)) return;
+        const status = await loadFaceFromJob(jobId);
+        if (status === "completed" || status === "failed") return;
         await new Promise((r) => setTimeout(r, i < 20 ? 500 : 1000));
+      }
+      if (!cancelled) {
+        setAnalyzingFace(false);
+        setAnalysisError(
+          "Face tracking is taking too long. Reopen this clip to retry."
+        );
       }
     })();
 
@@ -681,6 +752,18 @@ export function AgentClipStudioModal({
                     {analysisError}
                   </p>
                 )}
+                {analyzingFace && (
+                  <p className="mt-2 flex items-center gap-2 text-xs text-[var(--color-muted)]">
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-accent)]" />
+                    Tracking faces… {analysisProgress}%
+                  </p>
+                )}
+                {faceTrackingReady && !analyzingFace && !analysisError && (
+                  <p className="mt-2 flex items-center gap-2 text-xs text-[var(--color-accent)]">
+                    <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-accent)]" />
+                    Face tracking ready
+                  </p>
+                )}
               </div>
 
               <AgentClipEditor
@@ -695,6 +778,7 @@ export function AgentClipStudioModal({
                 onClipChange={onClipChange}
                 lookPreset={lookPreset}
                 faceRect={faceRect}
+                faceKeyframes={faceKeyframes}
               />
             </div>
           )}

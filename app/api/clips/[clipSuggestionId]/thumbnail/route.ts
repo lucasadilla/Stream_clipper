@@ -25,7 +25,11 @@ export async function GET(
     const { clipSuggestionId } = await params;
     const clip = await prisma.clipSuggestion.findUnique({
       where: { id: clipSuggestionId },
-      select: { id: true, streamSessionId: true },
+      select: {
+        id: true,
+        streamSessionId: true,
+        streamSession: { select: { thumbnailUrl: true } },
+      },
     });
     if (!clip) return errorResponse("Clip not found", 404);
 
@@ -44,7 +48,11 @@ export async function GET(
       clip.id
     );
     if (!url) {
-      return errorResponse("Thumbnail not ready", 404);
+      const fallbackUrl = clip.streamSession.thumbnailUrl;
+      if (fallbackUrl && /^https?:\/\//i.test(fallbackUrl)) {
+        return Response.redirect(fallbackUrl, 307);
+      }
+      return errorResponse("Thumbnail not ready", 503);
     }
 
     const dest = path.join(

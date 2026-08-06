@@ -1,7 +1,11 @@
 import path from "path";
 import { stat } from "fs/promises";
 import { prisma } from "@/lib/db";
-import { hasVideoStream, probeMedia } from "@/lib/ffmpeg";
+import {
+  canDecodeVideoFrame,
+  hasVideoStream,
+  probeMedia,
+} from "@/lib/ffmpeg";
 import {
   fileExists,
   findBestSourceFileInDir,
@@ -95,7 +99,12 @@ export async function findLocalSourceMedia(streamSessionId: string) {
       return sourceMediaFromFoundFile(streamSessionId, found, sourceMedia?.id);
     }
 
-    if ((sourceMedia!.width ?? 0) > 0) return sourceMedia!;
+    if (
+      (sourceMedia!.width ?? 0) > 0 &&
+      (sourceMedia!.isLiveRecording || (await canDecodeVideoFrame(found)))
+    ) {
+      return sourceMedia!;
+    }
     if (await hasVideoStream(found)) {
       return sourceMediaFromFoundFile(streamSessionId, found, sourceMedia!.id);
     }
@@ -103,7 +112,13 @@ export async function findLocalSourceMedia(streamSessionId: string) {
 
   if (sourceMedia?.filePath && fileExists(sourceMedia.filePath)) {
     const absolutePath = resolveStoragePath(sourceMedia.filePath);
-    if ((sourceMedia.width ?? 0) > 0) return sourceMedia;
+    if (
+      (sourceMedia.width ?? 0) > 0 &&
+      (sourceMedia.isLiveRecording ||
+        (await canDecodeVideoFrame(absolutePath)))
+    ) {
+      return sourceMedia;
+    }
     if (await hasVideoStream(absolutePath)) {
       return sourceMediaFromFoundFile(
         streamSessionId,

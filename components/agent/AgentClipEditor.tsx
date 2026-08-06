@@ -31,6 +31,13 @@ import { fetchJson } from "@/lib/apiClient";
 import { LookVideoStage } from "@/components/agent/AgentStudioPreviews";
 import type { ContentLookPresetId } from "@/lib/contentLookPresets";
 import { getContentLookPreset } from "@/lib/contentLookPresets";
+import {
+  detectBrowserFaces,
+  loadBrowserFaceDetector,
+  selectBrowserTrackedFace,
+  smoothBrowserFaceRect,
+  type BrowserFaceRect,
+} from "@/lib/browserFaceTracking";
 
 interface TranscriptChunk {
   id: string;
@@ -54,6 +61,32 @@ interface AgentClipEditorProps {
   lookPreset?: ContentLookPresetId;
   /** Normalized face box for centering look crops. */
   faceRect?: { x: number; y: number; width: number; height: number } | null;
+  faceKeyframes?: Array<{ timestampSeconds: number; centerX: number }>;
+}
+
+function trackedCenterAt(
+  keyframes: Array<{ timestampSeconds: number; centerX: number }>,
+  relativeTime: number
+): number | null {
+  if (keyframes.length === 0) return null;
+  if (relativeTime <= keyframes[0]!.timestampSeconds) {
+    return keyframes[0]!.centerX;
+  }
+  for (let index = 1; index < keyframes.length; index++) {
+    const next = keyframes[index]!;
+    if (relativeTime > next.timestampSeconds) continue;
+    const previous = keyframes[index - 1]!;
+    const span = Math.max(
+      0.001,
+      next.timestampSeconds - previous.timestampSeconds
+    );
+    const progress = Math.min(
+      1,
+      Math.max(0, (relativeTime - previous.timestampSeconds) / span)
+    );
+    return previous.centerX + (next.centerX - previous.centerX) * progress;
+  }
+  return keyframes[keyframes.length - 1]!.centerX;
 }
 
 export function AgentClipEditor({
@@ -68,6 +101,7 @@ export function AgentClipEditor({
   onClipChange,
   lookPreset = "auto",
   faceRect = null,
+  faceKeyframes = [],
 }: AgentClipEditorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
@@ -82,6 +116,11 @@ export function AgentClipEditor({
   const [editingCueId, setEditingCueId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
   const [previewHeight, setPreviewHeight] = useState(400);
+  const [browserFaceRect, setBrowserFaceRect] =
+    useState<BrowserFaceRect | null>(null);
+  const [browserTrackingStatus, setBrowserTrackingStatus] = useState<
+    "idle" | "loading" | "ready" | "unavailable"
+  >("idle");
   const startRef = useRef(clip.startTimeSeconds);
   const endRef = useRef(clip.endTimeSeconds);
   startRef.current = clip.startTimeSeconds;
@@ -164,6 +203,106 @@ export function AgentClipEditor({
         captionAppearance.capitalization
       )
     : null;
+  const trackedFaceCenterX = useMemo(
+    () =>
+      trackedCenterAt(
+        faceKeyframes,
+        Math.max(0, currentTime - clip.startTimeSeconds)
+      ),
+    [faceKeyframes, currentTime, clip.startTimeSeconds]
+  );
+  const needsFaceTracking = getContentLookPreset(lookPreset).needsFaceAnalysis;
+  const hasServerTracking = faceKeyframes.length > 0;
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !playbackUrl || !needsFaceTracking || hasServerTracking) {
+      setBrowserTrackingStatus("idle");
+      setBrowserFaceRect(null);
+      return;
+    }
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let loading = false;
+    let detector: Awaited<ReturnType<typeof loadBrowserFaceDetector>> | null =
+      null;
+    let previousRect: BrowserFaceRect | null = faceRect;
+    let lastVideoTime = -1;
+
+    const schedule = (delay: number) => {
+      if (cancelled) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => void analyze(false), delay);
+    };
+
+    const analyze = async (force: boolean) => {
+      if (cancelled || loading) return;
+      if (video.readyState < 2 || video.videoWidth <= 0) {
+        schedule(400);
+        return;
+      }
+      if (!force && Math.abs(video.currentTime - lastVideoTime) < 0.02) {
+        schedule(video.paused ? 700 : 320);
+        return;
+      }
+
+      loading = true;
+      try {
+        if (!detector) {
+          setBrowserTrackingStatus("loading");
+          detector = await loadBrowserFaceDetector();
+          if (cancelled) return;
+        }
+        const detections = detectBrowserFaces(detector, video);
+        lastVideoTime = video.currentTime;
+        const selected = selectBrowserTrackedFace(
+          detections,
+          video.videoWidth,
+          video.videoHeight,
+          previousRect
+        );
+        if (selected) {
+          previousRect = smoothBrowserFaceRect(previousRect, selected);
+          setBrowserFaceRect(previousRect);
+          setBrowserTrackingStatus("ready");
+        }
+      } catch {
+        setBrowserTrackingStatus("unavailable");
+        cancelled = true;
+      } finally {
+        loading = false;
+        if (!cancelled) schedule(video.paused ? 700 : 320);
+      }
+    };
+
+    const analyzeNow = () => void analyze(true);
+    video.addEventListener("loadeddata", analyzeNow);
+    video.addEventListener("play", analyzeNow);
+    video.addEventListener("seeked", analyzeNow);
+    void analyze(true);
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      video.removeEventListener("loadeddata", analyzeNow);
+      video.removeEventListener("play", analyzeNow);
+      video.removeEventListener("seeked", analyzeNow);
+    };
+  }, [
+    playbackUrl,
+    clip.id,
+    needsFaceTracking,
+    hasServerTracking,
+    faceRect,
+  ]);
+
+  const effectiveFaceRect = faceRect ?? browserFaceRect;
+  const effectiveFaceCenterX =
+    trackedFaceCenterX ??
+    (browserFaceRect
+      ? browserFaceRect.x + browserFaceRect.width / 2
+      : null);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -182,7 +321,7 @@ export function AgentClipEditor({
 
   const commitRange = useCallback(
     async (start: number, end: number) => {
-      let s = Math.max(0, Math.min(start, maxTime));
+      const s = Math.max(0, Math.min(start, maxTime));
       let e = Math.max(0, Math.min(end, maxTime));
       if (e - s < MIN_CLIP_SECONDS) e = Math.min(s + MIN_CLIP_SECONDS, maxTime);
       if (e - s > MAX_CLIP_SECONDS) e = s + MAX_CLIP_SECONDS;
@@ -314,7 +453,8 @@ export function AgentClipEditor({
             presetId={lookPreset}
             playbackUrl={playbackUrl}
             videoRef={videoRef}
-            faceRect={faceRect}
+            faceRect={effectiveFaceRect}
+            faceCenterX={effectiveFaceCenterX}
             className="mx-auto max-h-[56vh] w-full rounded-none border-0"
             onTimeUpdate={(e) => {
               const t = e.currentTarget.currentTime;
@@ -327,6 +467,25 @@ export function AgentClipEditor({
               }
             }}
           >
+            {needsFaceTracking && !hasServerTracking && (
+              <div className="pointer-events-none absolute left-2 top-2 z-20 rounded bg-black/70 px-2 py-1 text-[10px] font-semibold text-white">
+                <span
+                  className={cn(
+                    "mr-1.5 inline-block h-1.5 w-1.5 rounded-full",
+                    browserTrackingStatus === "ready"
+                      ? "bg-[var(--color-accent)]"
+                      : browserTrackingStatus === "unavailable"
+                        ? "bg-[var(--color-warning,#e6b84d)]"
+                        : "animate-pulse bg-white/70"
+                  )}
+                />
+                {browserTrackingStatus === "ready"
+                  ? "Preview tracking"
+                  : browserTrackingStatus === "unavailable"
+                    ? "Server tracking"
+                    : "Loading preview tracking"}
+              </div>
+            )}
             {includeCaptions ? (
               <div className="absolute inset-0 overflow-hidden">
                 <div style={previewStyles.container}>

@@ -2,8 +2,12 @@ import { existsSync } from "fs";
 import path from "path";
 import fs from "fs/promises";
 import { prisma } from "@/lib/db";
-import { runCommand, getFfmpegPath } from "@/lib/ffmpeg";
-import { probeMedia } from "@/lib/ffmpeg";
+import {
+  canDecodeVideoFrame,
+  getFfmpegPath,
+  probeMedia,
+  runCommand,
+} from "@/lib/ffmpeg";
 import { toJsonValue } from "@/lib/utils";
 import {
   parseStreamUrl,
@@ -16,6 +20,7 @@ import {
   toRelativeStoragePath,
   findBestSourceFileInDir,
   fileExists,
+  resolveStoragePath,
 } from "@/lib/storage";
 import { getYtDlpInvocationCandidates, type YtDlpInvocation } from "@/lib/ytDlp";
 
@@ -552,6 +557,8 @@ function sourceMaxHeight(): number {
 function sourceFormatChains(): string[] {
   const height = sourceMaxHeight();
   return [
+    `bestvideo[vcodec^=avc1][height<=${height}]+bestaudio[acodec^=mp4a]/best[ext=mp4][vcodec^=avc1][height<=${height}]`,
+    `bestvideo[vcodec^=avc1][height<=${height}]+bestaudio/best[ext=mp4][height<=${height}]`,
     `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]`,
     `best[height<=${height}][ext=mp4]/best[height<=${height}]`,
     "bestvideo+bestaudio/best",
@@ -586,6 +593,14 @@ async function runYtDlpWithFormatFallback(
 
     try {
       await runYtDlp(args, url);
+      const outputIndex = args.indexOf("-o");
+      const outputPath = outputIndex >= 0 ? args[outputIndex + 1] : undefined;
+      if (outputPath && !(await canDecodeVideoFrame(outputPath))) {
+        await fs.unlink(outputPath).catch(() => {});
+        throw new Error(
+          `yt-dlp produced video that FFmpeg could not decode for format ${format}`
+        );
+      }
       return;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
@@ -606,7 +621,19 @@ export async function isYtDlpAvailable(): Promise<boolean> {
 export async function downloadSourceFromYouTube(streamSessionId: string) {
   const session = await prisma.streamSession.findUnique({
     where: { id: streamSessionId },
-    include: { sourceMedia: { take: 1 } },
+    include: {
+      sourceMedia: {
+        where: {
+          isLiveRecording: false,
+          NOT: [
+            { originalFilename: { startsWith: "segment-" } },
+            { originalFilename: "preview.mp4" },
+          ],
+        },
+        orderBy: { createdAt: "desc" },
+        take: 1,
+      },
+    },
   });
 
   if (!session) throw new Error("Session not found");
@@ -619,7 +646,13 @@ export async function downloadSourceFromYouTube(streamSessionId: string) {
     (existing.durationSeconds ?? 0) > 0 &&
     fileExists(existing.filePath)
   ) {
-    return existing;
+    const existingPath = resolveStoragePath(existing.filePath);
+    if (await canDecodeVideoFrame(existingPath)) return existing;
+
+    // A valid MP4 header is not enough: broken AV1/DASH packets can still make
+    // every thumbnail, face job and render fail. Remove only the unusable copy.
+    await fs.unlink(existingPath).catch(() => {});
+    await prisma.sourceMedia.delete({ where: { id: existing.id } }).catch(() => {});
   }
 
   const available = await isYtDlpAvailable();
@@ -630,6 +663,13 @@ export async function downloadSourceFromYouTube(streamSessionId: string) {
   }
 
   const uploadDir = getUploadDir(streamSessionId);
+  const { reclaimEphemeralStorage } = await import(
+    "@/services/storageReclaimService"
+  );
+  await reclaimEphemeralStorage({
+    keepSessionId: streamSessionId,
+    pruneSessionSegments: true,
+  });
   await ensureDir(uploadDir);
 
   const outputPath = path.join(uploadDir, "source.mp4");
@@ -721,6 +761,8 @@ export async function downloadClipSegmentFromStream(
   const section = `*${startTime}-${endTime}`;
   const platform = detectDownloadPlatform(streamUrl);
   const formatFallbacks = [
+    "bestvideo[vcodec^=avc1][height<=1080]+bestaudio[acodec^=mp4a]/best[ext=mp4][vcodec^=avc1][height<=1080]",
+    "bestvideo[vcodec^=avc1][height<=1080]+bestaudio/best[ext=mp4][height<=1080]",
     "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
     "bestvideo+bestaudio/best",
     "best",
@@ -735,7 +777,7 @@ export async function downloadClipSegmentFromStream(
         section,
         "--force-keyframes-at-cuts",
         "-f",
-        "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+        formatFallbacks[0]!,
         "-o",
         outputPath,
       ],

@@ -9,6 +9,10 @@ import {
   getFaceAnalysisJob,
   parseStoredFaceAnalysisResult,
 } from "@/services/faceAnalysisService";
+import {
+  buildActiveSpeakerCropPlan,
+  buildSubjectCropPlan,
+} from "@/lib/verticalLayout";
 
 export const runtime = "nodejs";
 
@@ -54,15 +58,49 @@ export async function GET(
       return jsonResponse({ job: base });
     }
 
+    const cropWidthRatio = Math.min(
+      0.95,
+      Math.max(
+        0.1,
+        (9 / 16) * (result.sourceHeight / Math.max(1, result.sourceWidth))
+      )
+    );
+    const primaryTrack = result.primaryCandidate
+      ? result.tracks.find(
+          (track) => track.id === result.primaryCandidate?.trackId
+        )
+      : undefined;
+    const usableTracks = result.tracks.filter(
+      (track) => track.points.length >= 3
+    );
+    const previewKeyframes =
+      result.classification === "multiple_faces" && usableTracks.length >= 2
+        ? buildActiveSpeakerCropPlan(
+            usableTracks,
+            result.startSeconds,
+            result.endSeconds,
+            cropWidthRatio
+          )
+        : primaryTrack
+          ? buildSubjectCropPlan(
+              primaryTrack.points,
+              result.startSeconds,
+              result.endSeconds,
+              cropWidthRatio
+            )
+          : [];
+
     return jsonResponse({
       job: {
         ...base,
+        analysisVersion: result.analysisVersion ?? 1,
         sourceWidth: result.sourceWidth,
         sourceHeight: result.sourceHeight,
         primaryCandidate: result.primaryCandidate ?? null,
         alternativeCandidates: result.alternativeCandidates,
         recommendation: result.recommendation,
         warnings: result.warnings,
+        previewKeyframes,
         frameUrl: result.frameStoragePath
           ? `/api/storage/${result.frameStoragePath.replace(/\\/g, "/")}?inline=1`
           : null,

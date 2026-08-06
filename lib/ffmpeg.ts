@@ -1,5 +1,5 @@
 import { spawn } from "child_process";
-import { existsSync } from "fs";
+import { existsSync, statSync } from "fs";
 import path from "path";
 import type { RenderFormat } from "@/lib/renderFormat";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
@@ -313,6 +313,64 @@ export async function probeMedia(filePath: string): Promise<MediaProbeResult> {
     audioCodec: audioStream?.codec_name ?? null,
     raw: data as unknown as Record<string, unknown>,
   };
+}
+
+/** A container probe can succeed even when every video packet is corrupt. */
+const videoDecodeCache = new Map<
+  string,
+  { size: number; mtimeMs: number; decodable: boolean }
+>();
+
+export async function canDecodeVideoFrame(
+  filePath: string,
+  timeSeconds = 1
+): Promise<boolean> {
+  let signature: { size: number; mtimeMs: number } | null = null;
+  try {
+    const stat = statSync(filePath);
+    signature = { size: stat.size, mtimeMs: stat.mtimeMs };
+    const cached = videoDecodeCache.get(filePath);
+    if (
+      cached &&
+      cached.size === signature.size &&
+      cached.mtimeMs === signature.mtimeMs
+    ) {
+      return cached.decodable;
+    }
+  } catch {
+    return false;
+  }
+
+  let decodable = false;
+  try {
+    await runCommand(
+      getFfmpegPath(),
+      [
+        "-v",
+        "error",
+        "-ss",
+        String(Math.max(0, timeSeconds)),
+        "-i",
+        filePath,
+        "-map",
+        "0:v:0",
+        "-an",
+        "-sn",
+        "-dn",
+        "-frames:v",
+        "1",
+        "-f",
+        "null",
+        "-",
+      ],
+      { timeoutMs: 30_000 }
+    );
+    decodable = true;
+  } catch {
+    decodable = false;
+  }
+  videoDecodeCache.set(filePath, { ...signature, decodable });
+  return decodable;
 }
 
 /**

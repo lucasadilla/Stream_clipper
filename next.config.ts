@@ -45,6 +45,15 @@ const nextConfig: NextConfig = {
         source: "/api/storage/:path*",
         headers: [{ key: "Cache-Control", value: "private, max-age=3600" }],
       },
+      {
+        source: "/mediapipe/:path*",
+        headers: [
+          {
+            key: "Cache-Control",
+            value: "public, max-age=86400, stale-while-revalidate=604800",
+          },
+        ],
+      },
     ];
   },
 };

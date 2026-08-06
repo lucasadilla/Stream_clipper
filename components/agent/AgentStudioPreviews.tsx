@@ -162,6 +162,7 @@ export function LookVideoStage({
   children,
   onTimeUpdate,
   faceRect,
+  faceCenterX,
 }: {
   presetId: ContentLookPresetId;
   playbackUrl: string | null;
@@ -171,6 +172,8 @@ export function LookVideoStage({
   onTimeUpdate?: (event: SyntheticEvent<HTMLVideoElement>) => void;
   /** Normalized face box (0..1) — keeps the face centered in look crops. */
   faceRect?: { x: number; y: number; width: number; height: number } | null;
+  /** Current tracked horizontal focus, normalized to 0..1. */
+  faceCenterX?: number | null;
 }) {
   const layout = getContentLookPreset(presetId).layout;
   const mirrorRef = useRef<HTMLVideoElement>(null);
@@ -180,7 +183,7 @@ export function LookVideoStage({
     layout === "facecam_pip" ||
     layout === "subject_aware_crop";
 
-  const facePos = faceObjectPosition(faceRect);
+  const facePos = faceObjectPosition(faceRect, faceCenterX);
 
   useEffect(() => {
     const main = videoRef.current;
@@ -262,8 +265,8 @@ export function LookVideoStage({
 
   const mirrorVideoClass =
     layout === "subject_aware_crop"
-      ? "h-full w-full scale-110 object-cover opacity-35 blur-[2px]"
-      : "h-full w-full scale-[1.85] object-cover";
+      ? "h-full w-full scale-110 object-cover opacity-35 blur-[2px] transition-[object-position] duration-500 ease-out motion-reduce:transition-none"
+      : "h-full w-full scale-[1.85] object-cover transition-[object-position] duration-500 ease-out motion-reduce:transition-none";
 
   return (
     <div
@@ -317,7 +320,10 @@ export function LookVideoStage({
         {playbackUrl ? (
           <video
             ref={videoRef}
-            className={primaryVideoClass}
+            className={cn(
+              primaryVideoClass,
+              "transition-[object-position] duration-500 ease-out motion-reduce:transition-none"
+            )}
             style={{
               objectPosition:
                 layout === "subject_aware_crop" ||
@@ -340,8 +346,13 @@ export function LookVideoStage({
 }
 
 function faceObjectPosition(
-  faceRect?: { x: number; y: number; width: number; height: number } | null
+  faceRect?: { x: number; y: number; width: number; height: number } | null,
+  trackedCenterX?: number | null
 ): string {
+  const trackedX =
+    typeof trackedCenterX === "number" && Number.isFinite(trackedCenterX)
+      ? Math.min(1, Math.max(0, trackedCenterX))
+      : null;
   if (
     !faceRect ||
     !Number.isFinite(faceRect.x) ||
@@ -349,9 +360,11 @@ function faceObjectPosition(
     faceRect.width <= 0 ||
     faceRect.height <= 0
   ) {
-    return "50% 42%";
+    return `${((trackedX ?? 0.5) * 100).toFixed(1)}% 42%`;
   }
-  const cx = Math.min(1, Math.max(0, faceRect.x + faceRect.width / 2));
+  const cx =
+    trackedX ??
+    Math.min(1, Math.max(0, faceRect.x + faceRect.width / 2));
   const cy = Math.min(1, Math.max(0, faceRect.y + faceRect.height / 2));
   return `${(cx * 100).toFixed(1)}% ${(cy * 100).toFixed(1)}%`;
 }

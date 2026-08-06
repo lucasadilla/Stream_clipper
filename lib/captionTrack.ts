@@ -126,6 +126,28 @@ function cuesFromWords(
   return cues;
 }
 
+function wordsWithinChunk(
+  words: WhisperWord[],
+  chunkStart: number,
+  chunkEnd: number
+): WhisperWord[] {
+  return words
+    .flatMap((word) => {
+      if (
+        !Number.isFinite(word.start) ||
+        !Number.isFinite(word.end) ||
+        word.end <= word.start
+      ) {
+        return [];
+      }
+      const start = Math.max(chunkStart, Math.min(chunkEnd, word.start));
+      const end = Math.max(start, Math.min(chunkEnd, word.end));
+      if (end - start < 0.01) return [];
+      return [{ ...word, start, end }];
+    })
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+}
+
 /** Build a sorted caption timeline from transcript chunks (independent of video layer). */
 export function buildCaptionTrack(
   chunks: TranscriptChunkInput[],
@@ -140,8 +162,15 @@ export function buildCaptionTrack(
 
     const meta = chunkMeta(chunk.rawJson);
     if (meta?.words && meta.words.length > 0) {
-      cues.push(...cuesFromWords(meta.words, chunk.id, maxChars));
-      continue;
+      const words = wordsWithinChunk(
+        meta.words,
+        chunk.startTimeSeconds,
+        chunk.endTimeSeconds
+      );
+      if (words.length > 0) {
+        cues.push(...cuesFromWords(words, chunk.id, maxChars));
+        continue;
+      }
     }
 
     if (meta?.estimatedTiming) {
@@ -171,9 +200,11 @@ export function buildCaptionTrack(
     });
   }
 
-  return cues
-    .filter((c) => c.text.trim().length > 0)
-    .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
+  return resolveCaptionOverlaps(
+    cues
+      .filter((c) => c.text.trim().length > 0)
+      .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds)
+  );
 }
 
 /** Binary search for the active cue at `timeSeconds`. */

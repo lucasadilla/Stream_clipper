@@ -293,6 +293,14 @@ describe("buildActiveSpeakerCropPlan", () => {
     expect(plan[0]!.centerX).toBeLessThan(0.4);
     expect(plan[plan.length - 1]!.centerX).toBeGreaterThan(0.6);
     expect(plan.length).toBeLessThan(20);
+    for (let index = 1; index < plan.length; index++) {
+      const previous = plan[index - 1]!;
+      const current = plan[index]!;
+      const speed =
+        Math.abs(current.centerX - previous.centerX) /
+        (current.timestampSeconds - previous.timestampSeconds);
+      expect(speed).toBeLessThanOrEqual(0.551);
+    }
   });
 
   it("falls back to normal subject tracking for one visible person", () => {
