@@ -129,7 +129,10 @@ describe("generateAss karaoke", () => {
     const ass = generateAss({
       width: 1080,
       height: 1920,
-      appearance: DEFAULT_CAPTION_APPEARANCE,
+      appearance: {
+        ...DEFAULT_CAPTION_APPEARANCE,
+        smartEmphasisEnabled: false,
+      },
       cues: [
         { startTimeSeconds: 0, endTimeSeconds: 1, text: "..." },
         { startTimeSeconds: 1, endTimeSeconds: 2, text: "Real words" },

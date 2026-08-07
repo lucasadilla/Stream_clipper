@@ -1,5 +1,10 @@
 import { NextRequest } from "next/server";
-import { isSocialPlatform, type SocialPlatform, type SocialPublishSettings } from "@/lib/social/types";
+import {
+  isSocialPlatform,
+  type SocialGeneratedContent,
+  type SocialPlatform,
+  type SocialPublishSettings,
+} from "@/lib/social/types";
 import { jsonResponse } from "@/lib/utils";
 import {
   requireClipAccessForUser,
@@ -20,6 +25,7 @@ export async function POST(
         platform: string;
         destinationId?: string | null;
         settings?: SocialPublishSettings;
+        content?: SocialGeneratedContent;
       }>;
     };
 
@@ -30,6 +36,7 @@ export async function POST(
         platform: d.platform as SocialPlatform,
         destinationId: d.destinationId,
         settings: d.settings,
+        content: d.content,
       }));
 
     const group = await createPublishGroup({

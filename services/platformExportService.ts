@@ -59,6 +59,7 @@ function parseSettings(value: unknown): PlatformExportSettings {
     includeCaptions: Boolean(raw.includeCaptions),
     burnSubtitles: Boolean(raw.burnSubtitles),
     generateCopy: raw.generateCopy !== false,
+    useCopyOverride: raw.useCopyOverride === true,
     xQuoteCard: Boolean(raw.xQuoteCard),
     xQuoteLayout:
       raw.xQuoteLayout === "quote_bottom" || raw.xQuoteLayout === "overlay"
@@ -78,6 +79,30 @@ function copyData(copy: PlatformCopy) {
     quoteText: copy.quoteText,
     thumbnailText: copy.thumbnailText,
     pinnedComment: copy.pinnedComment,
+  };
+}
+
+function storedCopyData(value: {
+  title: string | null;
+  caption: string | null;
+  postText: string | null;
+  description: string | null;
+  hashtags: unknown;
+  tags: unknown;
+  quoteText: string | null;
+  thumbnailText: string | null;
+  pinnedComment: string | null;
+}): PlatformCopy {
+  return {
+    title: value.title,
+    caption: value.caption,
+    postText: value.postText,
+    description: value.description,
+    hashtags: stringArray(value.hashtags),
+    tags: stringArray(value.tags),
+    quoteText: value.quoteText,
+    thumbnailText: value.thumbnailText,
+    pinnedComment: value.pinnedComment,
   };
 }
 
@@ -167,23 +192,28 @@ export async function createPlatformExportPack(
       streamSessionId: clip.streamSessionId,
       name: `${clip.title} - Platform Export Pack`,
       exports: {
-        create: platforms.map((platform) => ({
-          clipSuggestionId: clip.id,
-          streamSessionId: clip.streamSessionId,
-          renderJobId: renderJob.id,
-          platform,
-          presetName: PLATFORM_PRESETS[platform].name,
-          exportSettings: toJsonValue(
-            platformSettings(platform, {
-              outputId: input.outputOptions?.[platform],
-              includeCaptions: input.includeCaptions,
-              burnSubtitles: input.burnSubtitles,
-              generateCopy: input.generateCopy,
-              xQuoteCard: input.xQuoteCard,
-              xQuoteLayout: input.xQuoteLayout,
-            })
-          ),
-        })),
+        create: platforms.map((platform) => {
+          const copyOverride = input.copyOverrides?.[platform];
+          return {
+            clipSuggestionId: clip.id,
+            streamSessionId: clip.streamSessionId,
+            renderJobId: renderJob.id,
+            platform,
+            presetName: PLATFORM_PRESETS[platform].name,
+            ...(copyOverride ? copyData(copyOverride) : {}),
+            exportSettings: toJsonValue(
+              platformSettings(platform, {
+                outputId: input.outputOptions?.[platform],
+                includeCaptions: input.includeCaptions,
+                burnSubtitles: input.burnSubtitles,
+                generateCopy: copyOverride ? false : input.generateCopy,
+                useCopyOverride: Boolean(copyOverride),
+                xQuoteCard: input.xQuoteCard,
+                xQuoteLayout: input.xQuoteLayout,
+              })
+            ),
+          };
+        }),
       },
     },
     include: {
@@ -373,7 +403,9 @@ export async function executePlatformExport(platformExportId: string) {
   const { platformExport, copyInput, transcriptChunks } = context;
   const settings = parseSettings(platformExport.exportSettings);
   const platform = platformExport.platform as PlatformKey;
-  const copy = settings.generateCopy
+  const copy = settings.useCopyOverride
+    ? storedCopyData(platformExport)
+    : settings.generateCopy
     ? await generatePlatformCopy(copyInput)
     : {
         title: null,

@@ -134,7 +134,8 @@ export async function renderClip(
   onProgress?: (update: RenderProgressUpdate) => void,
   editorState?: EditorState,
   signal?: AbortSignal,
-  verticalLayout?: unknown
+  verticalLayout?: unknown,
+  dynamicPunchIn = false
 ) {
   if (signal?.aborted) throw new RenderAbortedError();
   onProgress?.({ progress: 5, status: "queued" });
@@ -151,6 +152,7 @@ export async function renderClip(
         captionCues,
         editorState,
         verticalLayout: format === "vertical" ? verticalLayout : undefined,
+        dynamicPunchIn,
       }),
       signal,
     });

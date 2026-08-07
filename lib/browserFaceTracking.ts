@@ -10,6 +10,8 @@ export type BrowserFaceRect = {
 let detectorPromise: Promise<FaceDetector> | null = null;
 let lastDetectorTimestamp = 0;
 
+const XNNPACK_INFO_MESSAGE = /Created TensorFlow Lite XNNPACK delegate for CPU/i;
+
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
@@ -31,14 +33,29 @@ export async function loadBrowserFaceDetector(): Promise<FaceDetector> {
         const vision = await FilesetResolver.forVisionTasks(
           `${root}/mediapipe/wasm`
         );
-        return FaceDetector.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath: `${root}/mediapipe/models/blaze_face_short_range.tflite`,
-          },
-          runningMode: "VIDEO",
-          minDetectionConfidence: 0.42,
-          minSuppressionThreshold: 0.3,
-        });
+
+        // Emscripten binds console.error while it creates the WASM module and
+        // retains that bound function for subsequent inference logs. Install
+        // the narrow filter during initialization so Next's dev overlay does
+        // not present TensorFlow Lite's one-time INFO message as an error.
+        const originalError = console.error;
+        console.error = (...args: unknown[]) => {
+          const message = args.map(String).join(" ");
+          if (XNNPACK_INFO_MESSAGE.test(message)) return;
+          originalError(...args);
+        };
+        try {
+          return await FaceDetector.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: `${root}/mediapipe/models/blaze_face_short_range.tflite`,
+            },
+            runningMode: "VIDEO",
+            minDetectionConfidence: 0.42,
+            minSuppressionThreshold: 0.3,
+          });
+        } finally {
+          console.error = originalError;
+        }
       })
       .catch((error) => {
         detectorPromise = null;
@@ -52,19 +69,7 @@ export function detectBrowserFaces(
   detector: FaceDetector,
   video: HTMLVideoElement
 ): Detection[] {
-  // MediaPipe emits this initialization message through console.error even
-  // though it is informational. Next dev otherwise presents it as an error.
-  const originalError = console.error;
-  console.error = (...args: unknown[]) => {
-    const message = args.map(String).join(" ");
-    if (/Created TensorFlow Lite XNNPACK delegate for CPU/i.test(message)) return;
-    originalError(...args);
-  };
-  try {
-    return detector.detectForVideo(video, nextDetectorTimestamp()).detections;
-  } finally {
-    console.error = originalError;
-  }
+  return detector.detectForVideo(video, nextDetectorTimestamp()).detections;
 }
 
 /** Select one stable subject instead of jumping to every high-score face. */

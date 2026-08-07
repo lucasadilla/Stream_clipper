@@ -16,6 +16,7 @@ import {
   type CaptionCue,
   type CaptionWord,
 } from "@/lib/captionTrack";
+import { selectCaptionEmphasisWordIndex } from "@/lib/captionEmphasis";
 
 export interface GenerateAssOptions {
   cues: Array<
@@ -140,7 +141,9 @@ function karaokeAssBody(
   capitalization: CaptionAppearance["capitalization"],
   maxChars: number,
   baseColor: string,
-  highlightColor: string
+  highlightColor: string,
+  karaokeEnabled: boolean,
+  smartEmphasisEnabled: boolean
 ): string {
   const usable = words
     .map((word) => {
@@ -156,6 +159,9 @@ function karaokeAssBody(
     Math.max(0, Math.round((seconds - cueStart) * 1000));
 
   const parts: string[] = [];
+  const emphasisIndex = smartEmphasisEnabled
+    ? selectCaptionEmphasisWordIndex(usable.map((word) => word.word))
+    : null;
   let lineLen = 0;
   let linesUsed = 1;
   const maxLines = 2;
@@ -172,15 +178,45 @@ function karaokeAssBody(
     const spacer = index < usable.length - 1 ? " " : "";
     const startMs = toMs(word.start);
     const endMs = Math.max(startMs + 1, toMs(word.end));
+    const emphasized = emphasisIndex === index;
+    const startColor =
+      emphasized && !karaokeEnabled ? highlightColor : baseColor;
+    const timedColor = karaokeEnabled
+      ? `\\t(${startMs},${startMs},\\c${highlightColor}&)\\t(${endMs},${endMs},\\c${baseColor}&)`
+      : "";
+    const bold = emphasized ? "\\b1" : "\\b0";
     // Start in base color; flip to highlight for this word's window; restore base.
     // Override form is \c&HBBGGRR& (trailing & required).
     parts.push(
-      `{\\c${baseColor}&\\t(${startMs},${startMs},\\c${highlightColor}&)\\t(${endMs},${endMs},\\c${baseColor}&)}${escapeAssText(piece)}${spacer}`
+      `{\\c${startColor}&${timedColor}${bold}}${escapeAssText(piece)}${spacer}`
     );
     lineLen = lineLen > 0 ? lineLen + 1 + piece.length : piece.length;
   }
 
   return parts.join("");
+}
+
+function smartPlainAssBody(
+  text: string,
+  capitalization: CaptionAppearance["capitalization"],
+  baseColor: string,
+  highlightColor: string
+): string {
+  const tokens = text.split(/(\s+)/);
+  const wordTokens = tokens.filter((token) => token && !/^\s+$/.test(token));
+  const emphasisIndex = selectCaptionEmphasisWordIndex(wordTokens);
+  let wordIndex = -1;
+  return tokens
+    .map((token) => {
+      if (/^\s+$/.test(token)) return escapeAssText(token);
+      wordIndex += 1;
+      const label = escapeAssText(
+        applyCaptionCapitalization(token, capitalization)
+      );
+      if (wordIndex !== emphasisIndex) return label;
+      return `{\\c${highlightColor}&\\b1}${label}{\\c${baseColor}&\\b0}`;
+    })
+    .join("");
 }
 
 /** Build a full ASS script matching CaptionAppearance for libass burn-in. */
@@ -290,7 +326,9 @@ export function generateAss(options: GenerateAssOptions): string {
     const start = formatAssTime(cue.startTimeSeconds);
     const end = formatAssTime(cue.endTimeSeconds);
     const words =
-      app.karaokeEnabled && cue.words && cue.words.length > 0
+      (app.karaokeEnabled || app.smartEmphasisEnabled) &&
+      cue.words &&
+      cue.words.length > 0
         ? cue.words
         : null;
 
@@ -305,12 +343,21 @@ export function generateAss(options: GenerateAssOptions): string {
         app.capitalization,
         maxChars,
         baseColor,
-        highlightColor
+        highlightColor,
+        app.karaokeEnabled,
+        app.smartEmphasisEnabled
       );
       if (!body) {
-        const fallback = escapeAssText(
-          applyCaptionCapitalization(cue.text, app.capitalization)
-        );
+        const fallback = app.smartEmphasisEnabled
+          ? smartPlainAssBody(
+              cue.text,
+              app.capitalization,
+              baseColor,
+              highlightColor
+            )
+          : escapeAssText(
+              applyCaptionCapitalization(cue.text, app.capitalization)
+            );
         const style = plainStyleLine ? "Plain" : "Default";
         dialogueLines.push(
           `Dialogue: 0,${start},${end},${style},,0,0,0,,${override}${fallback}`
@@ -323,9 +370,16 @@ export function generateAss(options: GenerateAssOptions): string {
       continue;
     }
 
-    const body = escapeAssText(
-      applyCaptionCapitalization(cue.text, app.capitalization)
-    );
+    const body = app.smartEmphasisEnabled
+      ? smartPlainAssBody(
+          cue.text,
+          app.capitalization,
+          baseColor,
+          highlightColor
+        )
+      : escapeAssText(
+          applyCaptionCapitalization(cue.text, app.capitalization)
+        );
     const style = plainStyleLine ? "Plain" : "Default";
     dialogueLines.push(
       `Dialogue: 0,${start},${end},${style},,0,0,0,,${override}${body}`

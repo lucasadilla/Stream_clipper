@@ -437,6 +437,24 @@ export function CaptionAppearancePanel({
               )}
             </div>
 
+            <div className="space-y-1">
+              <SectionLabel>Smart emphasis</SectionLabel>
+              <div className="flex items-center gap-2">
+                <PosBtn
+                  label={appearance.smartEmphasisEnabled ? "On" : "Off"}
+                  active={appearance.smartEmphasisEnabled}
+                  onClick={() =>
+                    patch({
+                      smartEmphasisEnabled: !appearance.smartEmphasisEnabled,
+                    })
+                  }
+                />
+                <span className="text-[10px] leading-4 text-[var(--color-muted)]">
+                  Highlights one meaningful word per caption.
+                </span>
+              </div>
+            </div>
+
             <label className="block space-y-1">
               <SectionLabel>Animation</SectionLabel>
               <select

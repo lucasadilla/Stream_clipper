@@ -104,6 +104,7 @@ export function platformSettings(
     generateCopy: boolean;
     xQuoteCard: boolean;
     xQuoteLayout?: XQuoteLayout;
+    useCopyOverride?: boolean;
   }
 ): PlatformExportSettings {
   const preset = PLATFORM_PRESETS[platform];
@@ -117,6 +118,7 @@ export function platformSettings(
     includeCaptions: options.includeCaptions,
     burnSubtitles: options.burnSubtitles,
     generateCopy: options.generateCopy,
+    useCopyOverride: options.useCopyOverride,
     xQuoteCard: platform === "x" && options.xQuoteCard,
     xQuoteLayout: options.xQuoteLayout ?? "quote_top",
   };
