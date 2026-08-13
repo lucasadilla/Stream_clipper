@@ -14,6 +14,7 @@ import {
 import {
   DEFAULT_AGENT_WIZARD_STATE,
   LIVE_NOW_SUGGESTION_CAP,
+  liveSuggestionWindow,
   readAgentWizardState,
   withAgentWizardState,
 } from "@/lib/agentWizard";
@@ -31,7 +32,7 @@ const bodySchema = z.object({
   /** Transcript frontier watermark for live_now rolling. */
   throughSeconds: z.number().min(0).optional(),
   /** Soft cap for live rolling suggestions. */
-  cap: z.number().int().min(1).max(40).optional(),
+  cap: z.number().int().min(1).max(LIVE_NOW_SUGGESTION_CAP).optional(),
 });
 
 export async function POST(
@@ -52,15 +53,20 @@ export async function POST(
 
     const session = await prisma.streamSession.findUnique({
       where: { id: sessionId },
-      select: { id: true, metadataJson: true },
+      select: { id: true, mode: true, liveStatus: true, metadataJson: true },
     });
     if (!session) return errorResponse("Session not found", 404);
 
     const body = bodySchema.parse(await request.json().catch(() => ({})));
-    const currentWizard = readAgentWizardState(session.metadataJson);
+    const storedWizard = readAgentWizardState(session.metadataJson);
+    const isLiveAgent =
+      session.mode === "agent" && session.liveStatus === "live";
+    const currentWizard = isLiveAgent
+      ? { ...storedWizard, cadence: "live_now" as const }
+      : storedWizard;
     const cap =
       body.cap ??
-      (currentWizard.cadence === "live_now" ? LIVE_NOW_SUGGESTION_CAP : 40);
+      (isLiveAgent ? LIVE_NOW_SUGGESTION_CAP : 40);
 
     // Refresh only untouched suggestions made before title/evidence grounding.
     // Selected, saved, and rendered clips remain exactly as the creator left them.
@@ -97,19 +103,28 @@ export async function POST(
       created: 0,
       clips: [],
     };
+    const rollingWindow =
+      isLiveAgent && body.throughSeconds != null
+        ? liveSuggestionWindow(
+            currentWizard.lastSuggestThroughSeconds,
+            body.throughSeconds
+          )
+        : {};
 
     if (existingCount < cap) {
       if (body.extra > 0) {
         const room = Math.max(0, cap - existingCount);
         result = await autoSuggestClips(sessionId, 0, {
           extraLimit: Math.min(body.extra, room),
+          ...rollingWindow,
         });
       } else if (existingCount >= body.limit) {
         result = { created: 0, clips: [] };
       } else {
         result = await autoSuggestClips(
           sessionId,
-          Math.min(body.limit - existingCount, cap - existingCount)
+          Math.min(body.limit - existingCount, cap - existingCount),
+          rollingWindow
         );
       }
     }
@@ -117,14 +132,14 @@ export async function POST(
     const clips = await prisma.clipSuggestion.findMany({
       where: { streamSessionId: sessionId, status: { not: "rejected" } },
       orderBy: [{ confidence: "desc" }, { createdAt: "desc" }],
-      take: 40,
+      take: LIVE_NOW_SUGGESTION_CAP,
     });
 
     // Clip cards use a lazy thumbnail endpoint, so never hold the first picks
     // behind a batch of FFmpeg seeks. Warm the files in the background.
     const thumbIds = [
       ...result.clips.map((c) => c.id),
-      ...clips.map((c) => c.id),
+      ...clips.slice(0, 3).map((c) => c.id),
     ].filter((id, i, arr) => arr.indexOf(id) === i);
     void (async () => {
       await reclaimEphemeralStorage({
@@ -137,7 +152,7 @@ export async function POST(
     // Fire-and-forget so the pick grid isn't blocked.
       await prepareSuggestedClips(
         sessionId,
-        clips.slice(0, 3).map((c) => ({
+        (result.clips.length > 0 ? result.clips : clips.slice(0, 3)).map((c) => ({
           id: c.id,
           startTimeSeconds: c.startTimeSeconds,
           endTimeSeconds: c.endTimeSeconds,

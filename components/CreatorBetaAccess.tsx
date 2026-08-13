@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import type { BillingAccountSummary } from "@/services/billingService";
 
 const BENEFITS = [
-  "Free access during the beta",
+  "Free access for 30 days",
   "AI clip suggestions",
   "Video rendering",
   "Platform-ready exports",
@@ -15,14 +15,14 @@ const BENEFITS = [
 ];
 
 const LIMITS = [
-  "25 rendered clips per month",
+  "25 finished videos during your 30-day beta",
   "10 video uploads per month",
   "Maximum source video length: 3 hours",
   "Maximum rendered clip length: 60 seconds",
 ];
 
 const TERMS = [
-  "You can use the product for free during the beta.",
+  "You can use the product for free for 30 days after redeeming your code.",
   "You are responsible for having rights to the videos you upload.",
   "Your videos are processed to provide the service.",
   "We will not use your clips for marketing unless you explicitly approve a specific clip.",
@@ -33,7 +33,6 @@ const TERMS = [
 export function CreatorBetaAccess() {
   const router = useRouter();
   const [account, setAccount] = useState<BillingAccountSummary | null>(null);
-  const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [accepted, setAccepted] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -48,7 +47,6 @@ export function CreatorBetaAccess() {
       .then((body) => {
         setAccount(body.account ?? null);
         setBetaActive(Boolean(body.active));
-        if (body.account?.email) setEmail(body.account.email);
       })
       .finally(() => setChecking(false));
   }, []);
@@ -64,7 +62,6 @@ export function CreatorBetaAccess() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           code,
-          email: account ? undefined : email,
           termsAccepted: accepted,
         }),
       });
@@ -73,7 +70,7 @@ export function CreatorBetaAccess() {
       setAccount(body.account);
       setBetaActive(true);
       setSuccess(
-        "Creator Beta unlocked. You now have access to free beta clip creation."
+        "Creator Beta unlocked. You have 25 free videos for the next 30 days."
       );
       router.refresh();
     } catch (reason) {
@@ -115,7 +112,7 @@ export function CreatorBetaAccess() {
               <div className="mt-7 border-l-2 border-[#95ff00] bg-[#0a1008] p-4">
                 <p className="font-bold text-[#95ff00]">Creator Beta: Active</p>
                 <p className="mt-2 text-sm text-[#c5cec0]">
-                  Creator Beta unlocked. You now have access to free beta clip creation.
+                  You have 25 free videos during your 30-day Creator Beta.
                 </p>
                 <Link
                   href="/#analyze"
@@ -124,23 +121,22 @@ export function CreatorBetaAccess() {
                   Start creating clips
                 </Link>
               </div>
+            ) : !account && !checking ? (
+              <div className="mt-7 border-l-2 border-[#95ff00] bg-[#0a1008] p-4">
+                <p className="font-bold text-white">Sign in to continue</p>
+                <p className="mt-2 text-sm leading-6 text-[#c5cec0]">
+                  Creator Beta codes are attached to your Clipper account after
+                  you sign in.
+                </p>
+                <Link
+                  href="/login"
+                  className="mt-5 inline-flex bg-[#95ff00] px-4 py-3 text-xs font-black text-black hover:bg-[#b2ff48]"
+                >
+                  Sign in
+                </Link>
+              </div>
             ) : (
               <form onSubmit={(event) => void unlock(event)} className="mt-7 space-y-5">
-                {!account && !checking && (
-                  <label className="block space-y-2">
-                    <span className="font-mono text-[9px] font-bold uppercase text-[#7e8978]">
-                      Email for sign in
-                    </span>
-                    <input
-                      type="email"
-                      required
-                      value={email}
-                      onChange={(event) => setEmail(event.target.value)}
-                      placeholder="creator@example.com"
-                      className="h-12 w-full border border-[#34402f] bg-[#020302] px-4 text-sm text-white outline-none placeholder:text-[#596253] focus:border-[#95ff00]"
-                    />
-                  </label>
-                )}
                 <label className="block space-y-2">
                   <span className="font-mono text-[9px] font-bold uppercase text-[#7e8978]">
                     Access code
@@ -219,7 +215,8 @@ export function CreatorBetaAccess() {
             <p className="font-mono text-[9px] font-bold uppercase text-[#95ff00]">How it works</p>
             <h2 className="mt-3 font-[var(--font-display)] text-5xl leading-none">One code. One clear beta.</h2>
             <p className="mt-5 text-sm leading-6 text-[#8d9888]">
-              If you have a Creator Beta code, enter it to unlock access. Once unlocked, you can start creating clips during the beta for free within the monthly limits.
+              Sign in, enter your Creator Beta code, and unlock 25 free videos
+              for 30 days. Your usage and access end date stay visible in account settings.
             </p>
           </div>
           <div className="border-y border-[#2a3327] py-6">

@@ -17,19 +17,6 @@ import type {
 } from "@/services/billingService";
 import type { UsageSnapshot } from "@/services/usageService";
 
-function formatHours(seconds: number): string {
-  const hours = seconds / 3600;
-  if (hours < 0.1) return `${Math.round(seconds / 60)}m`;
-  return `${hours.toFixed(1)}h`;
-}
-
-function formatStorageBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
-}
-
 function formatLimit(used: string, limit: number | null): string {
   if (limit === null) return `${used} / Unlimited`;
   return `${used} / ${limit}`;
@@ -221,19 +208,18 @@ export default function ProfilePage() {
         minute: "2-digit",
       })
     : null;
+  const betaExpiresAt = account.betaExpiresAt
+    ? new Date(account.betaExpiresAt).toLocaleDateString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      })
+    : null;
 
-  const processedLabel = formatHours(usage?.usage.processedSeconds ?? 0);
-  const hoursLimit = usage?.entitlements?.processingHoursLimit ?? null;
   const exportsUsed = usage?.usage.renderedExports ?? 0;
   const exportsLimit = usage?.entitlements?.exportsLimit ?? null;
   const uploadsUsed = usage?.usage.videoUploads ?? usage?.usage.streamStarts ?? 0;
   const uploadsLimit = usage?.entitlements?.uploadsLimit ?? null;
-  const storageUsed = usage?.usage.storedMediaBytes ?? 0;
-  const storageLimit = usage?.entitlements?.storageLimitBytes ?? null;
-  const storageLabel =
-    storageLimit === null
-      ? `${formatStorageBytes(storageUsed)} / Unlimited`
-      : `${formatStorageBytes(storageUsed)} / ${formatStorageBytes(storageLimit)}`;
   const nextInvoice = formatMoney(
     stripeDetails?.nextInvoiceAmountCents ?? null,
     stripeDetails?.currency ?? null
@@ -257,8 +243,11 @@ export default function ProfilePage() {
             Creator Beta: Active
           </p>
           <div className="mt-3 grid gap-2 text-sm text-white/80 sm:grid-cols-2">
-            <p>Renders used this month: {exportsUsed} / 25</p>
+            <p>Videos used: {exportsUsed} / 25</p>
             <p>Uploads used this month: {uploadsUsed} / 10</p>
+            {betaExpiresAt && (
+              <p className="sm:col-span-2">Access ends: {betaExpiresAt}</p>
+            )}
           </div>
         </div>
       )}
@@ -269,7 +258,7 @@ export default function ProfilePage() {
             You&apos;re near your plan limits
           </p>
           <p className="mt-1 text-sm text-white/75">
-            Upgrade to keep processing and exporting without interruption.
+            Upgrade to keep creating finished videos without interruption.
           </p>
           <Link
             href="/#pricing"
@@ -371,6 +360,12 @@ export default function ProfilePage() {
                   </p>
                 </div>
               )}
+              {isCreatorBeta && betaExpiresAt && (
+                <div>
+                  <p className="text-xs uppercase text-white/50">Access ends</p>
+                  <p className="mt-1 text-sm text-white/80">{betaExpiresAt}</p>
+                </div>
+              )}
               {account.canManageBilling && stripeDetails?.paymentMethodLast4 && (
                 <div>
                   <p className="text-xs uppercase text-white/50">Payment</p>
@@ -446,11 +441,13 @@ export default function ProfilePage() {
             )}
         </AccountSettingsPanel>
 
-        <AccountSettingsPanel title="Usage this month">
+        <AccountSettingsPanel
+          title={isCreatorBeta ? "Creator Beta usage" : "Usage this month"}
+        >
             {isCreatorBeta ? (
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="border border-[var(--color-card-border)] bg-[#020302] px-4 py-4">
-                  <p className="text-xs uppercase text-white/50">Rendered clips</p>
+                  <p className="text-xs uppercase text-white/50">Finished videos</p>
                   <p className="mt-2 text-xl font-semibold text-white">
                     {formatLimit(String(exportsUsed), exportsLimit ?? 25)}
                   </p>
@@ -463,25 +460,15 @@ export default function ProfilePage() {
                 </div>
               </div>
             ) : (
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div>
               <div className="border border-[var(--color-card-border)] bg-[#020302] px-4 py-4">
-                <p className="text-xs uppercase text-white/50">Processing</p>
-                <p className="mt-2 text-xl font-semibold text-white">
-                  {hoursLimit === null
-                    ? `${processedLabel} / Unlimited`
-                    : `${processedLabel} / ${hoursLimit}h`}
-                </p>
-              </div>
-              <div className="border border-[var(--color-card-border)] bg-[#020302] px-4 py-4">
-                <p className="text-xs uppercase text-white/50">Exports</p>
+                <p className="text-xs uppercase text-white/50">Finished videos</p>
                 <p className="mt-2 text-xl font-semibold text-white">
                   {formatLimit(String(exportsUsed), exportsLimit)}
                 </p>
-              </div>
-              <div className="border border-[var(--color-card-border)] bg-[#020302] px-4 py-4 sm:col-span-2">
-                <p className="text-xs uppercase text-white/50">Storage</p>
-                <p className="mt-2 text-xl font-semibold text-white">
-                  {storageLabel}
+                <p className="mt-2 text-sm leading-6 text-[var(--color-muted)]">
+                  Each clip counts once, even when you export or publish it to
+                  multiple platforms.
                 </p>
               </div>
             </div>

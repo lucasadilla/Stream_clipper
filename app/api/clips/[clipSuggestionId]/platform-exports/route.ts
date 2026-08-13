@@ -66,8 +66,9 @@ export async function POST(
     });
     const gate = await canRenderExport(
       billingAccountId,
-      input.platforms.length,
-      fullClip ? fullClip.endTimeSeconds - fullClip.startTimeSeconds : undefined
+      1,
+      fullClip ? fullClip.endTimeSeconds - fullClip.startTimeSeconds : undefined,
+      clipSuggestionId
     );
     if (!gate.allowed) {
       return errorResponse(gate.message ?? "Plan limit reached", gate.status ?? 402);

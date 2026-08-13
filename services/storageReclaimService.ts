@@ -1,6 +1,13 @@
 import path from "path";
 import { existsSync } from "fs";
-import { getStorageRoot, getUploadDir, getRendersDir } from "@/lib/storage";
+import {
+  getStorageRoot,
+  getUploadDir,
+  getRendersDir,
+  isMergedSourceFile,
+  isYtDlpSplitSourceFile,
+  isYtDlpTempFile,
+} from "@/lib/storage";
 import { prisma } from "@/lib/db";
 import { REPLACED_SESSION_STATUS } from "@/services/sessionCleanupService";
 
@@ -18,13 +25,14 @@ export function isNoSpaceError(err: unknown): boolean {
 
 export function noSpaceLeftError(): Error {
   return new Error(
-    "Server storage is full. Delete old sessions from the Sessions list, or free space on the Railway volume, then try exporting again."
+    "Server storage is full. Automatic cleanup is running; wait a moment and try again. If it stays full, verify the Railway volume mount and capacity."
   );
 }
 
 /**
- * Best-effort reclaim of disposable media: failed ffmpeg temps, quarantine,
- * and media for sessions already marked replaced. Safe to call before mux/render.
+ * Best-effort reclaim of disposable media: orphaned session directories,
+ * failed-process temps, redundant download tracks, and replaced-session media.
+ * Safe to call before mux/render.
  */
 export async function reclaimEphemeralStorage(options?: {
   /** Prefer keeping this session's current media. */
@@ -34,6 +42,7 @@ export async function reclaimEphemeralStorage(options?: {
 }): Promise<{ freedBytes: number; removed: number }> {
   const fs = await import("fs/promises");
   const root = getStorageRoot();
+  const tempCutoff = Date.now() - 15 * 60 * 1000;
   let freedBytes = 0;
   let removed = 0;
 
@@ -84,8 +93,18 @@ export async function reclaimEphemeralStorage(options?: {
   // 1. Quarantine from failed deletes
   await rmTree(path.join(root, ".orphaned"));
 
-  // 2. Temp files left by interrupted ffmpeg mux/encode
-  for (const bucket of ["uploads", "renders", "frames", "audio"]) {
+  const sessions = await prisma.streamSession.findMany({
+    select: {
+      id: true,
+      liveStatus: true,
+      liveRecording: { select: { status: true } },
+      sourceMedia: { select: { filePath: true } },
+    },
+  });
+  const sessionsById = new Map(sessions.map((session) => [session.id, session]));
+
+  // 2. Remove DB-orphaned directories and stale interrupted media files.
+  for (const bucket of ["uploads", "renders", "frames", "audio", "captions"]) {
     const bucketDir = path.join(root, bucket);
     if (!existsSync(bucketDir)) continue;
     let sessionDirs: string[] = [];
@@ -96,7 +115,25 @@ export async function reclaimEphemeralStorage(options?: {
     }
     for (const sessionId of sessionDirs) {
       const sessionDir = path.join(bucketDir, sessionId);
-      await walkAndDeleteTemps(sessionDir, unlinkFile);
+      const stat = await fs.stat(sessionDir).catch(() => null);
+      if (!stat?.isDirectory()) continue;
+      const session = sessionsById.get(sessionId);
+      if (!session || session.liveStatus === REPLACED_SESSION_STATUS) {
+        await rmTree(sessionDir);
+        continue;
+      }
+      await walkAndDeleteTemps(sessionDir, unlinkFile, tempCutoff);
+      if (
+        bucket === "uploads" &&
+        session.liveRecording?.status !== "recording"
+      ) {
+        await pruneRedundantSourceTracks(
+          sessionDir,
+          session.sourceMedia.map((media) => media.filePath),
+          unlinkFile,
+          tempCutoff
+        );
+      }
     }
   }
 
@@ -163,9 +200,50 @@ export async function reclaimEphemeralStorage(options?: {
   return { freedBytes, removed };
 }
 
+async function pruneRedundantSourceTracks(
+  uploadDir: string,
+  referencedPaths: string[],
+  unlinkFile: (filePath: string) => Promise<void>,
+  cutoffMs: number
+): Promise<void> {
+  const fs = await import("fs/promises");
+  const referencedNames = new Set(
+    referencedPaths.map((filePath) => path.basename(filePath).toLowerCase())
+  );
+  const hasFinalSource = [...referencedNames].some(
+    (name) => isMergedSourceFile(name) && existsSync(path.join(uploadDir, name))
+  );
+  // Keep format tracks until a stable audio sidecar exists. A merged DASH file
+  // can be video-only, and transcription must never lose its only audio source.
+  if (!hasFinalSource || !existsSync(path.join(uploadDir, "source.audio.m4a"))) {
+    return;
+  }
+
+  let entries: import("fs").Dirent[];
+  try {
+    entries = await fs.readdir(uploadDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const lower = entry.name.toLowerCase();
+    if (
+      !entry.isFile() ||
+      referencedNames.has(lower) ||
+      !isYtDlpSplitSourceFile(lower)
+    ) {
+      continue;
+    }
+    const full = path.join(uploadDir, entry.name);
+    const mtime = (await fs.stat(full).catch(() => null))?.mtimeMs;
+    if (mtime != null && mtime < cutoffMs) await unlinkFile(full);
+  }
+}
+
 async function walkAndDeleteTemps(
   dirPath: string,
-  unlinkFile: (filePath: string) => Promise<void>
+  unlinkFile: (filePath: string) => Promise<void>,
+  cutoffMs: number
 ): Promise<void> {
   const fs = await import("fs/promises");
   if (!existsSync(dirPath)) return;
@@ -178,16 +256,18 @@ async function walkAndDeleteTemps(
   for (const entry of entries) {
     const full = path.join(dirPath, entry.name);
     if (entry.isDirectory()) {
-      await walkAndDeleteTemps(full, unlinkFile);
+      await walkAndDeleteTemps(full, unlinkFile, cutoffMs);
       continue;
     }
     const lower = entry.name.toLowerCase();
+    const mtime = (await fs.stat(full).catch(() => null))?.mtimeMs;
     if (
-      lower.includes(".tmp.") ||
-      lower.endsWith(".tmp") ||
-      lower.endsWith(".tmp.mp4") ||
-      /\.cut\.mp4$/i.test(lower) ||
-      /\.memcap\.mp4$/i.test(lower)
+      mtime != null &&
+      mtime < cutoffMs &&
+      (isYtDlpTempFile(lower) ||
+        /\.cut\.mp4$/i.test(lower) ||
+        /\.memcap\.mp4$/i.test(lower) ||
+        /\.locked-\d+$/i.test(lower))
     ) {
       await unlinkFile(full);
     }

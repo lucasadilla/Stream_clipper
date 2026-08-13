@@ -18,10 +18,26 @@ export const AGENT_CADENCES = [
 ] as const;
 
 /** Seconds of new transcript before another live_now suggest wave. */
-export const LIVE_NOW_ROLL_SECONDS = 150;
+export const LIVE_NOW_ROLL_SECONDS = 60;
+
+/** Re-read a little prior context so moments crossing a wave boundary are complete. */
+export const LIVE_NOW_CONTEXT_OVERLAP_SECONDS = 30;
 
 /** Soft cap on non-rejected suggestions during live_now. */
-export const LIVE_NOW_SUGGESTION_CAP = 20;
+export const LIVE_NOW_SUGGESTION_CAP = 100;
+
+export function liveSuggestionWindow(
+  lastSuggestThroughSeconds: number,
+  throughSeconds: number
+): { fromSeconds: number; throughSeconds: number } {
+  return {
+    fromSeconds: Math.max(
+      0,
+      lastSuggestThroughSeconds - LIVE_NOW_CONTEXT_OVERLAP_SECONDS
+    ),
+    throughSeconds: Math.max(0, throughSeconds),
+  };
+}
 
 export interface AgentWizardState {
   step: AgentWizardStep;

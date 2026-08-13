@@ -20,6 +20,32 @@ export interface SessionDeleteResult {
   orphanedPaths: string[];
 }
 
+const accountSessionTails = new Map<string, Promise<void>>();
+
+/** Serialize create-and-replace operations for one account in this process. */
+export async function withAccountSessionLock<T>(
+  billingAccountId: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  const previous = accountSessionTails.get(billingAccountId) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => current);
+  accountSessionTails.set(billingAccountId, tail);
+
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (accountSessionTails.get(billingAccountId) === tail) {
+      accountSessionTails.delete(billingAccountId);
+    }
+  }
+}
+
 async function prepareSessionForDeletion(streamSessionId: string) {
   try {
     const session = await prisma.streamSession.findUnique({
@@ -214,7 +240,7 @@ export async function retireStreamSession(
 
 /**
  * One active workspace per account: retire every session except `keepSessionId`.
- * Runs best-effort and should not block the new session response.
+ * Each retirement is best-effort so one locked folder cannot block the rest.
  */
 export async function replacePriorSessionsForAccount(
   billingAccountId: string,
@@ -243,4 +269,45 @@ export async function replacePriorSessionsForAccount(
     }
   }
   return retired;
+}
+
+/** Repair legacy or concurrent accounts that have more than one workspace. */
+export async function enforceSingleSessionPerAccount(
+  scanLimit = 500
+): Promise<number> {
+  const sessions = await prisma.streamSession.findMany({
+    where: {
+      billingAccountId: { not: null },
+      NOT: { liveStatus: REPLACED_SESSION_STATUS },
+    },
+    select: { id: true, billingAccountId: true },
+    orderBy: { createdAt: "desc" },
+    take: scanLimit,
+  });
+
+  const duplicateIds = selectDuplicateSessionIds(sessions);
+  let retired = 0;
+  for (const sessionId of duplicateIds) {
+    try {
+      await retireStreamSession(sessionId);
+      retired += 1;
+    } catch (error) {
+      console.warn(`[sessions] failed to retire duplicate ${sessionId}:`, error);
+    }
+  }
+  return retired;
+}
+
+export function selectDuplicateSessionIds(
+  newestFirst: Array<{ id: string; billingAccountId: string | null }>
+): string[] {
+  const newestByAccount = new Set<string>();
+  const duplicateIds: string[] = [];
+  for (const session of newestFirst) {
+    const accountId = session.billingAccountId;
+    if (!accountId) continue;
+    if (newestByAccount.has(accountId)) duplicateIds.push(session.id);
+    else newestByAccount.add(accountId);
+  }
+  return duplicateIds;
 }

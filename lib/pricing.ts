@@ -23,8 +23,6 @@ export interface PlanEntitlements {
   maxClipDurationSeconds: number | null;
 }
 
-const GB = 1024 * 1024 * 1024;
-
 export interface PricingPlan {
   id: PlanId;
   name: string;
@@ -37,13 +35,6 @@ export interface PricingPlan {
   stripePriceEnvVars?: Partial<Record<BillingInterval, string>>;
   entitlements: PlanEntitlements;
   features: string[];
-}
-
-export interface UsagePack {
-  id: "processing_10h" | "exports_100";
-  name: string;
-  price: number;
-  description: string;
 }
 
 const yearly = (monthly: number) => monthly * 10;
@@ -64,10 +55,10 @@ export const PRICING_PLANS: PricingPlan[] = [
     highlight: "Start here",
     entitlements: {
       plan: "creator",
-      processingHoursLimit: 10,
-      exportsLimit: 50,
-      storageRetentionDays: 14,
-      storageLimitBytes: 5 * GB,
+      processingHoursLimit: null,
+      exportsLimit: 20,
+      storageRetentionDays: null,
+      storageLimitBytes: null,
       maxResolution: "1080p",
       watermarkEnabled: false,
       priorityQueue: false,
@@ -78,11 +69,11 @@ export const PRICING_PLANS: PricingPlan[] = [
       maxClipDurationSeconds: null,
     },
     features: [
-      "10 processing hours per month",
-      "50 watermark-free exports",
-      "1080p native and Shorts exports",
-      "Transcript search, captions, timeline editing",
-      "14-day storage · 5 GB",
+      "20 finished videos per month",
+      "One clip counts once across every platform",
+      "AI clip suggestions and transcript search",
+      "Captions, timeline editing, and face tracking",
+      "1080p native and vertical exports",
     ],
   },
   {
@@ -100,13 +91,13 @@ export const PRICING_PLANS: PricingPlan[] = [
     highlight: "Most useful",
     entitlements: {
       plan: "pro",
-      processingHoursLimit: 40,
-      exportsLimit: 250,
-      storageRetentionDays: 60,
-      storageLimitBytes: 25 * GB,
+      processingHoursLimit: null,
+      exportsLimit: 100,
+      storageRetentionDays: null,
+      storageLimitBytes: null,
       maxResolution: "1080p",
       watermarkEnabled: false,
-      priorityQueue: true,
+      priorityQueue: false,
       seatLimit: 1,
       streamStartsLimit: null,
       uploadsLimit: null,
@@ -114,11 +105,11 @@ export const PRICING_PLANS: PricingPlan[] = [
       maxClipDurationSeconds: null,
     },
     features: [
-      "40 processing hours per month",
-      "250 exports",
-      "Faster processing priority",
-      "Saved caption styles and templates",
-      "60-day storage · 25 GB",
+      "100 finished videos per month",
+      "One clip counts once across every platform",
+      "AI clip suggestions and transcript search",
+      "Captions, timeline editing, and face tracking",
+      "1080p native and vertical exports",
     ],
   },
   {
@@ -135,25 +126,25 @@ export const PRICING_PLANS: PricingPlan[] = [
     },
     entitlements: {
       plan: "studio",
-      processingHoursLimit: 100,
-      exportsLimit: 750,
-      storageRetentionDays: 90,
-      storageLimitBytes: 100 * GB,
+      processingHoursLimit: null,
+      exportsLimit: 200,
+      storageRetentionDays: null,
+      storageLimitBytes: null,
       maxResolution: "1080p",
       watermarkEnabled: false,
-      priorityQueue: true,
-      seatLimit: 3,
+      priorityQueue: false,
+      seatLimit: 1,
       streamStartsLimit: null,
       uploadsLimit: null,
       maxSourceDurationSeconds: null,
       maxClipDurationSeconds: null,
     },
     features: [
-      "100 processing hours per month",
-      "750 exports",
-      "3 seats",
-      "Priority queue and support",
-      "90-day storage · 100 GB",
+      "200 finished videos per month",
+      "One clip counts once across every platform",
+      "AI clip suggestions and transcript search",
+      "Captions, timeline editing, and face tracking",
+      "1080p native and vertical exports",
     ],
   },
   {
@@ -181,9 +172,9 @@ export const PRICING_PLANS: PricingPlan[] = [
     },
     features: [
       "Starts around $299/mo",
-      "Custom hours, seats, retention, and support",
+      "Custom monthly video volume",
       "Dedicated processing capacity",
-      "Optional API and bulk workflows later",
+      "Custom support and workflow options",
     ],
   },
 ];
@@ -212,7 +203,7 @@ export const CREATOR_BETA_PLAN: PricingPlan = {
     maxClipDurationSeconds: 60,
   },
   features: [
-    "25 rendered clips per month",
+    "25 finished videos for 30 days",
     "10 video uploads per month",
     "Source videos up to 3 hours",
     "Rendered clips up to 60 seconds",
@@ -220,21 +211,6 @@ export const CREATOR_BETA_PLAN: PricingPlan = {
 };
 
 export const CHECKOUT_PLAN_IDS: CheckoutPlanId[] = ["creator", "pro", "studio"];
-
-export const USAGE_PACKS: UsagePack[] = [
-  {
-    id: "processing_10h",
-    name: "10 processing hours",
-    price: 10,
-    description: "Add 10 extra hours of live or VOD analysis.",
-  },
-  {
-    id: "exports_100",
-    name: "100 exports",
-    price: 10,
-    description: "Add 100 extra rendered clips.",
-  },
-];
 
 export function getPricingPlan(planId: string | undefined | null): PricingPlan {
   return (

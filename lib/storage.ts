@@ -232,6 +232,8 @@ export function isYtDlpTempFile(filename: string): boolean {
     lower.endsWith(".part") ||
     lower.endsWith(".ytdl") ||
     lower.includes("-frag") ||
+    lower.includes(".temp.") ||
+    lower.includes(".tmp.") ||
     lower.endsWith(".tmp") ||
     lower.endsWith(".temp")
   );
@@ -239,6 +241,11 @@ export function isYtDlpTempFile(filename: string): boolean {
 
 export function isMergedSourceFile(filename: string): boolean {
   return /^source\.(mkv|mp4|webm|mov)$/i.test(filename);
+}
+
+/** Separate yt-dlp format tracks left behind after a successful merge. */
+export function isYtDlpSplitSourceFile(filename: string): boolean {
+  return /^source\.f[^.]+\.(m4a|mp4|mkv|webm)$/i.test(filename);
 }
 
 async function safeStatSize(filePath: string): Promise<number | null> {

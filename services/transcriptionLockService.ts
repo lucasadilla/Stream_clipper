@@ -67,6 +67,7 @@ export async function listSessionsNeedingTranscription(
   const sessions = await prisma.streamSession.findMany({
     where: {
       sourceMedia: { some: {} },
+      NOT: { liveStatus: "replaced" },
       OR: [
         { transcribeLockedAt: null },
         { transcribeLockedAt: { lt: cutoff } },

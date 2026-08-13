@@ -11,7 +11,6 @@ import {
 } from "@/components/ClipSuggestionCard";
 import { AgentClipPickGrid } from "@/components/agent/AgentClipPickGrid";
 import { AgentClipEditor } from "@/components/agent/AgentClipEditor";
-import { AgentCadenceChooser } from "@/components/agent/AgentCadenceChooser";
 import { AgentClipStudioModal } from "@/components/agent/AgentClipStudioModal";
 import { fetchJson } from "@/lib/apiClient";
 import { formatDuration, formatSeconds } from "@/lib/time";
@@ -45,7 +44,6 @@ import {
   LIVE_NOW_ROLL_SECONDS,
   LIVE_NOW_SUGGESTION_CAP,
   readAgentWizardState,
-  type AgentCadence,
   type AgentWizardState,
   type AgentWizardStep,
 } from "@/lib/agentWizard";
@@ -58,6 +56,7 @@ import {
   type VerticalLayoutSelection,
 } from "@/components/VerticalLayoutPicker";
 import { triggerFileDownload } from "@/lib/clientDownload";
+import { LIVE_TICK_MS } from "@/lib/timelineConstants";
 
 interface AgentSessionData {
   id: string;
@@ -113,6 +112,21 @@ function withThumbnails(
   }));
 }
 
+function mergeClipSuggestions(
+  current: ClipSuggestionData[],
+  incoming: ClipSuggestionData[]
+): ClipSuggestionData[] {
+  const incomingById = new Map(incoming.map((clip) => [clip.id, clip]));
+  const currentIds = new Set(current.map((clip) => clip.id));
+  return [
+    ...current.flatMap((clip) => {
+      const updated = incomingById.get(clip.id);
+      return updated ? [updated] : [];
+    }),
+    ...incoming.filter((clip) => !currentIds.has(clip.id)),
+  ];
+}
+
 export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   const router = useRouter();
   const [session, setSession] = useState<AgentSessionData | null>(null);
@@ -143,6 +157,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   const [sending, setSending] = useState(false);
   const [showFindChat, setShowFindChat] = useState(false);
   const [newClipNotice, setNewClipNotice] = useState(false);
+  const [unseenLiveClips, setUnseenLiveClips] = useState(0);
   const [studioClipId, setStudioClipId] = useState<string | null>(null);
   const [captionAppearance, setCaptionAppearance] = useState<CaptionAppearance>(
     readCaptionAppearancePreference
@@ -151,6 +166,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   const transcribeInFlight = useRef(false);
   const suggestStarted = useRef(false);
   const rollingInFlight = useRef(false);
+  const liveTickInFlight = useRef(false);
   const lastSessionRefreshAt = useRef(0);
   const visibleClips = useMemo(
     () => clips.filter((clip) => clip.status !== "rejected"),
@@ -186,7 +202,9 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       throw new Error(data.error ?? "Session not found");
     }
     setSession(data.session);
-    setClips(data.session.clipSuggestions ?? []);
+    setClips((current) =>
+      mergeClipSuggestions(current, data.session?.clipSuggestions ?? [])
+    );
     const nextWizard = readAgentWizardState(data.session.metadataJson);
     setWizard(nextWizard);
     if (nextWizard.selectedClipIds.length) {
@@ -232,6 +250,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
 
   const isLive =
     session?.liveStatus === "live" || session?.liveStatus === "upcoming";
+  const isActivelyLive = session?.liveStatus === "live";
 
   const recordedSeconds = useMemo(() => {
     const localDuration = Math.max(
@@ -301,8 +320,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     !transcriptionError &&
     !suggestionError;
 
-  const needsCadenceChoice = Boolean(session && isLive && !wizard.cadence);
-
   const runSuggest = useCallback(
     async (opts?: {
       extra?: number;
@@ -328,14 +345,14 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
               ? { extra: opts.extra }
               : { limit: opts?.limit ?? 10 }),
             throughSeconds: through,
-            ...(wizard.cadence === "live_now"
+            ...(isActivelyLive
               ? { cap: LIVE_NOW_SUGGESTION_CAP }
               : {}),
           }),
         });
         if (!ok) throw new Error(data.error ?? "Suggest failed");
         const nextClips = data.clips ?? [];
-        setClips(nextClips);
+        setClips((current) => mergeClipSuggestions(current, nextClips));
         if (data.wizard) setWizard(data.wizard);
         else {
           await persistWizard({
@@ -351,6 +368,9 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
           );
         }
         if ((data.created ?? 0) > 0) {
+          if (wizard.cadence === "live_now" && wizard.step !== "pick") {
+            setUnseenLiveClips((count) => count + (data.created ?? 0));
+          }
           setNewClipNotice(true);
           window.setTimeout(() => setNewClipNotice(false), 5000);
         }
@@ -372,6 +392,8 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       loadSession,
       transcribedSeconds,
       wizard.cadence,
+      wizard.step,
+      isActivelyLive,
     ]
   );
 
@@ -388,25 +410,46 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     return () => window.clearInterval(id);
   }, [findingClips]);
 
-  // VOD sessions get vod_batch automatically; live waits for the chooser.
+  // Active streams always receive rolling suggestions. VODs use one batch.
   useEffect(() => {
-    if (!session || loading || wizard.cadence) return;
-    if (isLive) return;
-    void persistWizard({ cadence: "vod_batch" });
-  }, [session, loading, wizard.cadence, isLive, persistWizard]);
+    if (!session || loading) return;
+    if (isActivelyLive && wizard.cadence !== "live_now") {
+      void persistWizard({ cadence: "live_now" });
+      return;
+    }
+    if (!isLive && !wizard.cadence) {
+      void persistWizard({ cadence: "vod_batch" });
+    }
+  }, [session, loading, wizard.cadence, isLive, isActivelyLive, persistWizard]);
 
-  async function chooseCadence(
-    cadence: Extract<AgentCadence, "live_now" | "after_stream">
-  ) {
-    await persistWizard({ cadence, step: "transcribing" });
-    posthog.capture("agent_cadence_chosen", {
-      session_id: sessionId,
-      cadence,
-    });
-  }
+  // Keep capture duration and platform live status fresh in Agent Mode.
+  useEffect(() => {
+    if (!session?.id || !isLive) return;
+    let cancelled = false;
+    const tick = async () => {
+      if (liveTickInFlight.current) return;
+      liveTickInFlight.current = true;
+      try {
+        await fetchJson(`/api/sessions/${sessionId}/live-tick`, {
+          method: "POST",
+        });
+        if (!cancelled) await loadSession();
+      } catch {
+        // Capture/transcription polling will retry independently.
+      } finally {
+        liveTickInFlight.current = false;
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), LIVE_TICK_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [session?.id, sessionId, isLive, loadSession]);
 
   useEffect(() => {
-    if (!session) return;
+    if (!session?.id) return;
 
     let cancelled = false;
     const tick = async () => {
@@ -489,7 +532,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
 
       rollingInFlight.current = true;
       void runSuggest({
-        ...(needFirst ? { limit: 6 } : { extra: 4 }),
+        ...(needFirst ? { limit: 6 } : { extra: 2 }),
         throughSeconds: transcribedSeconds,
       }).finally(() => {
         rollingInFlight.current = false;
@@ -555,6 +598,13 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     runSuggest,
     persistWizard,
   ]);
+
+  // Live mode treats provider failures as transient and retries the same wave.
+  useEffect(() => {
+    if (wizard.cadence !== "live_now" || !suggestionError) return;
+    const id = window.setTimeout(() => setSuggestionError(null), 20_000);
+    return () => window.clearTimeout(id);
+  }, [wizard.cadence, suggestionError]);
 
   // Watchdog: at ~100% transcript with no clips and no in-flight suggest, force a try.
   useEffect(() => {
@@ -1083,14 +1133,23 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
         </div>
       </div>
 
+      {isActivelyLive && unseenLiveClips > 0 && wizard.step !== "pick" && (
+        <button
+          type="button"
+          onClick={() => {
+            setUnseenLiveClips(0);
+            void persistWizard({ step: "pick" });
+          }}
+          className="shrink-0 border-b border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-4 py-2 text-left text-xs font-semibold text-[var(--color-accent)] hover:bg-[var(--color-accent)]/15"
+        >
+          {unseenLiveClips} new live clip suggestion
+          {unseenLiveClips === 1 ? "" : "s"} · View suggestions
+        </button>
+      )}
+
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
         <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-4">
-          {needsCadenceChoice && (
-            <AgentCadenceChooser onChoose={(c) => void chooseCadence(c)} />
-          )}
-
-          {!needsCadenceChoice &&
-            wizard.cadence === "after_stream" &&
+          {wizard.cadence === "after_stream" &&
             !streamEnded && (
             <div className="mx-auto flex w-full max-w-lg flex-col items-center justify-center gap-5 py-16 text-center">
               <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--color-accent)] border-t-transparent" />
@@ -1114,8 +1173,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
             </div>
           )}
 
-          {!needsCadenceChoice &&
-            !(wizard.cadence === "after_stream" && !streamEnded) &&
+          {!(wizard.cadence === "after_stream" && !streamEnded) &&
             visibleClips.length === 0 &&
             (wizard.step === "transcribing" || wizard.step === "pick") &&
             (findingClips ||
@@ -1174,8 +1232,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
             </div>
           )}
 
-          {!needsCadenceChoice &&
-            wizard.step === "pick" &&
+          {wizard.step === "pick" &&
             !findingClips &&
             !suggesting &&
             (transcriptReady ||
@@ -1191,10 +1248,8 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
               )}
               {wizard.cadence === "live_now" && isLive && (
                 <p className="text-xs text-[var(--color-muted)]">
-                  Live suggestions update about every{" "}
-                  {Math.round(LIVE_NOW_ROLL_SECONDS / 60)} minutes of new
-                  transcript (up to {LIVE_NOW_SUGGESTION_CAP}). Select clips
-                  anytime to edit and export.
+                  New suggestions appear about every minute as the transcript
+                  grows. Select clips anytime to edit and export.
                 </p>
               )}
               <AgentClipPickGrid

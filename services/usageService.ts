@@ -6,6 +6,8 @@ import {
   type PricingPlan,
 } from "@/lib/pricing";
 import { formatBytes } from "@/lib/storage";
+import { videoOutputUsageKeys } from "@/lib/videoUsage";
+import { getCreatorBetaExpiration } from "@/lib/creatorBeta";
 import {
   getBillingAccount,
   hasAppAccess,
@@ -114,13 +116,18 @@ function isNearLimit(
 export async function getUsageSnapshot(
   billingAccountId: string | null | undefined
 ): Promise<UsageSnapshot> {
-  const { periodStart, periodEnd } = monthWindow();
+  let { periodStart, periodEnd } = monthWindow();
   const account = await getBillingAccount(billingAccountId);
   if (!account || !hasAppAccess(account)) {
     return billingRequiredSnapshot(periodStart, periodEnd);
   }
 
   const betaOnly = account.betaAccess && !isActiveBillingStatus(account.status);
+  const betaExpiresAt = getCreatorBetaExpiration(account);
+  if (betaOnly && account.betaGrantedAt && betaExpiresAt) {
+    periodStart = account.betaGrantedAt;
+    periodEnd = betaExpiresAt;
+  }
   const plan = betaOnly ? CREATOR_BETA_PLAN : getPricingPlan(account.plan);
   const entitlements = account.unlimitedAccess
     ? unlimitedEntitlements()
@@ -145,19 +152,21 @@ export async function getUsageSnapshot(
         },
         select: { sizeBytes: true, durationSeconds: true },
       }),
-      prisma.renderJob.count({
+      prisma.renderJob.findMany({
         where: {
           streamSession: { billingAccountId: account.id },
           createdAt: { gte: periodStart, lt: periodEnd },
           status: "completed",
         },
+        select: { id: true, clipSuggestionId: true, params: true },
       }),
-      prisma.platformExport.count({
+      prisma.platformExport.findMany({
         where: {
           streamSession: { billingAccountId: account.id },
           createdAt: { gte: periodStart, lt: periodEnd },
           status: "completed",
         },
+        select: { clipSuggestionId: true },
       }),
       prisma.transcriptChunk.count({
         where: {
@@ -190,7 +199,10 @@ export async function getUsageSnapshot(
     streamStarts: sessions.length,
     videoUploads: sessions.length,
     processedSeconds: Math.max(sessionSeconds, mediaSeconds),
-    renderedExports: clipExports + platformExports,
+    renderedExports: videoOutputUsageKeys({
+      renderOutputs: clipExports,
+      platformOutputs: platformExports,
+    }).size,
     aiRequests: transcriptChunks + eventWindows,
     storedMediaBytes,
   };
@@ -279,7 +291,8 @@ export async function canProcessMoreSeconds(
 export async function canRenderExport(
   billingAccountId: string | null | undefined,
   nextExports = 1,
-  clipDurationSeconds?: number
+  clipDurationSeconds?: number,
+  clipSuggestionId?: string
 ): Promise<UsageGateResult> {
   const snapshot = await getUsageSnapshot(billingAccountId);
   if (!snapshot.plan || !snapshot.entitlements) return billingRequiredGate(snapshot);
@@ -299,14 +312,44 @@ export async function canRenderExport(
   }
 
   const limit = snapshot.entitlements.exportsLimit;
-  if (
-    limit !== null &&
-    snapshot.usage.renderedExports + Math.max(1, nextExports) > limit
-  ) {
+  let projectedVideoCount =
+    snapshot.usage.renderedExports + Math.max(1, nextExports);
+
+  if (limit !== null && clipSuggestionId && snapshot.billingAccount) {
+    const periodStart = new Date(snapshot.usage.periodStart);
+    const periodEnd = new Date(snapshot.usage.periodEnd);
+    const [renderOutputs, platformOutputs] = await Promise.all([
+      prisma.renderJob.findMany({
+        where: {
+          streamSession: { billingAccountId: snapshot.billingAccount.id },
+          createdAt: { gte: periodStart, lt: periodEnd },
+          status: { notIn: ["failed", "cancelled"] },
+        },
+        select: { id: true, clipSuggestionId: true, params: true },
+      }),
+      prisma.platformExport.findMany({
+        where: {
+          streamSession: { billingAccountId: snapshot.billingAccount.id },
+          createdAt: { gte: periodStart, lt: periodEnd },
+          status: { notIn: ["failed", "cancelled"] },
+        },
+        select: { clipSuggestionId: true },
+      }),
+    ]);
+    const reservedVideos = videoOutputUsageKeys({
+      renderOutputs,
+      platformOutputs,
+    });
+    const requestedVideoKey = `clip:${clipSuggestionId}`;
+    projectedVideoCount =
+      reservedVideos.size + (reservedVideos.has(requestedVideoKey) ? 0 : 1);
+  }
+
+  if (limit !== null && projectedVideoCount > limit) {
     return {
       allowed: false,
       status: 402,
-      message: `Your ${snapshot.plan.name} plan includes ${limit} exports per month. Upgrade your plan to render more clips.`,
+      message: `Your ${snapshot.plan.name} plan includes ${limit} finished videos per month. Upgrade your plan to create more videos.`,
       snapshot,
     };
   }

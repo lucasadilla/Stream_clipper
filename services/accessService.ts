@@ -8,11 +8,12 @@ import {
 } from "@/lib/accessConfig";
 import {
   canManageBillingForAccount,
+  getBillingAccount,
   serializeBillingAccount,
   type BillingAccountSummary,
 } from "@/services/billingService";
 import { getStripe } from "@/lib/stripe";
-import { isCreatorBetaEnabled } from "@/lib/creatorBeta";
+import { isCreatorBetaAccessActive } from "@/lib/creatorBeta";
 
 export interface LoginResult {
   account: BillingAccountSummary;
@@ -40,10 +41,17 @@ export async function loginWithEmail(params: {
     },
     orderBy: { createdAt: "asc" },
   });
-  if (betaAccount && isCreatorBetaEnabled()) {
+  if (betaAccount) {
+    const betaActive = isCreatorBetaAccessActive(betaAccount);
     const account = await prisma.billingAccount.update({
       where: { id: betaAccount.id },
-      data: { lastSignedInAt: new Date() },
+      data: {
+        lastSignedInAt: new Date(),
+        betaAccess: betaActive,
+        ...(!betaActive && betaAccount.status === "beta"
+          ? { status: "incomplete" }
+          : {}),
+      },
     });
     return {
       account: serializeBillingAccount(account),
@@ -101,9 +109,7 @@ export async function getLoggedInAccount(
   billingAccountId: string | null | undefined
 ): Promise<BillingAccountSummary | null> {
   if (!billingAccountId) return null;
-  const account = await prisma.billingAccount.findUnique({
-    where: { id: billingAccountId },
-  });
+  const account = await getBillingAccount(billingAccountId);
   return account ? serializeBillingAccount(account) : null;
 }
 

@@ -136,7 +136,8 @@ export async function POST(
       const usageGate = await canRenderExport(
         billingAccountId,
         1,
-        outputDuration
+        outputDuration,
+        clip.id
       );
       if (!usageGate.allowed) {
         return errorResponse(

@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import { auth } from "@/auth";
 import { BILLING_ACCOUNT_COOKIE } from "@/lib/stripe";
-import { getBillingAccountIdFromRequest } from "@/services/billingService";
+import { ensureBillingAccountForAuthUser } from "@/services/authAccountService";
 import {
   CreatorBetaUnlockError,
   unlockCreatorBeta,
@@ -10,16 +11,25 @@ import { errorResponse } from "@/lib/utils";
 
 const unlockSchema = z.object({
   code: z.string().min(1),
-  email: z.string().email().optional(),
   termsAccepted: z.literal(true),
 });
 
 export async function POST(request: NextRequest) {
   try {
     const input = unlockSchema.parse(await request.json());
+    const session = await auth();
+    if (!session?.user?.id) {
+      return errorResponse("Sign in before unlocking Creator Beta access.", 401);
+    }
+    const signedInAccount = await ensureBillingAccountForAuthUser({
+      userId: session.user.id,
+      email: session.user.email,
+      name: session.user.name,
+      provider: "session",
+      providerAccountId: session.user.id,
+    });
     const account = await unlockCreatorBeta({
-      accountId: getBillingAccountIdFromRequest(request),
-      email: input.email,
+      accountId: signedInAccount.id,
       code: input.code,
       termsAccepted: input.termsAccepted,
     });
@@ -27,7 +37,7 @@ export async function POST(request: NextRequest) {
       account,
       success: true,
       message:
-        "Creator Beta unlocked. You now have access to free beta clip creation.",
+        "Creator Beta unlocked. You have 25 free videos for the next 30 days.",
     });
     response.cookies.set(BILLING_ACCOUNT_COOKIE, account.id, {
       httpOnly: true,

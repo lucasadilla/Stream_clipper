@@ -1,5 +1,8 @@
 import type Stripe from "stripe";
-import { isCreatorBetaEnabled } from "@/lib/creatorBeta";
+import {
+  getCreatorBetaExpiration,
+  isCreatorBetaAccessActive,
+} from "@/lib/creatorBeta";
 import { prisma } from "@/lib/db";
 import {
   BILLING_ACCOUNT_COOKIE,
@@ -26,6 +29,7 @@ export interface BillingAccountSummary {
   unlimitedAccess: boolean;
   betaAccess: boolean;
   betaGrantedAt: string | null;
+  betaExpiresAt: string | null;
   canManageBilling: boolean;
   stripeCustomerId: string;
   stripeSubscriptionId: string | null;
@@ -46,8 +50,10 @@ export function canManageBillingForAccount(account: {
   unlimitedAccess?: boolean;
   betaAccess?: boolean;
   stripeCustomerId: string;
+  status?: string;
 }): boolean {
   if (account.unlimitedAccess) return false;
+  if (account.betaAccess && !isActiveBillingStatus(account.status)) return false;
   if (account.stripeCustomerId.startsWith("beta_")) return false;
   return !account.stripeCustomerId.startsWith("comp_");
 }
@@ -69,10 +75,12 @@ export function hasAppAccess(account: {
   status: string;
   unlimitedAccess?: boolean;
   betaAccess?: boolean;
+  betaGrantedAt?: Date | string | null;
+  betaExpiresAt?: Date | string | null;
 } | null | undefined): boolean {
   if (!account) return false;
   if (account.unlimitedAccess) return true;
-  if (account.betaAccess && isCreatorBetaEnabled()) return true;
+  if (isCreatorBetaAccessActive(account)) return true;
   return isActiveBillingStatus(account.status);
 }
 
@@ -85,6 +93,7 @@ export function serializeBillingAccount(account: {
   unlimitedAccess?: boolean;
   betaAccess?: boolean;
   betaGrantedAt?: Date | null;
+  betaExpiresAt?: Date | null;
   stripeCustomerId: string;
   stripeSubscriptionId: string | null;
   currentPeriodEnd: Date | null;
@@ -92,7 +101,8 @@ export function serializeBillingAccount(account: {
   lastSignedInAt?: Date | null;
 }): BillingAccountSummary {
   const unlimitedAccess = account.unlimitedAccess ?? false;
-  const betaAccess = account.betaAccess ?? false;
+  const betaAccess = isCreatorBetaAccessActive(account);
+  const betaExpiresAt = getCreatorBetaExpiration(account);
   return {
     id: account.id,
     email: account.email,
@@ -102,10 +112,12 @@ export function serializeBillingAccount(account: {
     unlimitedAccess,
     betaAccess,
     betaGrantedAt: account.betaGrantedAt?.toISOString() ?? null,
+    betaExpiresAt: betaExpiresAt?.toISOString() ?? null,
     canManageBilling: canManageBillingForAccount({
       unlimitedAccess,
       betaAccess,
       stripeCustomerId: account.stripeCustomerId,
+      status: account.status,
     }),
     stripeCustomerId: account.stripeCustomerId,
     stripeSubscriptionId: account.stripeSubscriptionId,
@@ -117,7 +129,18 @@ export function serializeBillingAccount(account: {
 
 export async function getBillingAccount(accountId: string | null | undefined) {
   if (!accountId) return null;
-  return prisma.billingAccount.findUnique({ where: { id: accountId } });
+  const account = await prisma.billingAccount.findUnique({ where: { id: accountId } });
+  if (!account) return null;
+  if (account.betaAccess && !isCreatorBetaAccessActive(account)) {
+    return prisma.billingAccount.update({
+      where: { id: account.id },
+      data: {
+        betaAccess: false,
+        ...(account.status === "beta" ? { status: "incomplete" } : {}),
+      },
+    });
+  }
+  return account;
 }
 
 export async function createCheckoutSession(params: {

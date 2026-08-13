@@ -13,6 +13,7 @@ export default function WelcomePage() {
   const router = useRouter();
   const [account, setAccount] = useState<BillingAccountSummary | null>(null);
   const [creatorCode, setCreatorCode] = useState("");
+  const [termsAccepted, setTermsAccepted] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -59,15 +60,14 @@ export default function WelcomePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           code: creatorCode,
-          email: account?.email,
-          termsAccepted: true,
+          termsAccepted,
         }),
       });
       if (!ok || !data.account) {
         throw new Error(data.error ?? "Could not redeem code");
       }
       setAccount(data.account);
-      setMessage("Creator Program access unlocked.");
+      setMessage("Creator Beta unlocked for 30 days with 25 free videos.");
       router.push("/#analyze");
       router.refresh();
     } catch (err) {
@@ -118,7 +118,8 @@ export default function WelcomePage() {
               Have an invite code?
             </h2>
             <p className="mt-2 text-sm leading-6 text-[var(--color-muted)]">
-              Enter the private code minted for you. One code unlocks one seat.
+              Enter the private code you received from Clipper. It unlocks 25
+              free videos for 30 days.
             </p>
             <input
               type="text"
@@ -130,6 +131,17 @@ export default function WelcomePage() {
                 "placeholder:text-[var(--color-muted)] focus:border-[var(--color-accent)] focus:outline-none"
               )}
             />
+            <label className="mt-4 flex cursor-pointer items-start gap-3">
+              <input
+                type="checkbox"
+                checked={termsAccepted}
+                onChange={(event) => setTermsAccepted(event.target.checked)}
+                className="mt-1 h-4 w-4 accent-[var(--color-accent)]"
+              />
+              <span className="text-sm leading-6 text-[var(--color-muted)]">
+                I understand and accept the Creator Beta terms.
+              </span>
+            </label>
             {error && (
               <p className="mt-3 text-sm text-[var(--color-danger)]">{error}</p>
             )}
@@ -138,10 +150,10 @@ export default function WelcomePage() {
             )}
             <button
               type="submit"
-              disabled={redeeming || !creatorCode.trim()}
+              disabled={redeeming || !creatorCode.trim() || !termsAccepted}
               className="mt-5 h-11 w-full bg-[var(--color-accent)] text-sm font-semibold text-black hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
             >
-              {redeeming ? "Unlocking…" : "Join Creator Program"}
+              {redeeming ? "Unlocking…" : "Unlock Creator Beta"}
             </button>
           </form>
 
@@ -153,7 +165,7 @@ export default function WelcomePage() {
               Buy a plan
             </h2>
             <p className="mt-2 text-sm leading-6 text-[var(--color-muted)]">
-              Start a paid subscription to unlock processing hours and exports.
+              Start a paid subscription to unlock your monthly video allowance.
             </p>
             <div className="mt-5 space-y-4">
               {paidPlans.map((plan) => (

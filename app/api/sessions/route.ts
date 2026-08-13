@@ -4,6 +4,7 @@ import { createStreamSession } from "@/services/youtubeService";
 import {
   listSessionsWithStorage,
   replacePriorSessionsForAccount,
+  withAccountSessionLock,
 } from "@/services/sessionCleanupService";
 import { parseStreamUrl } from "@/lib/streamPlatform";
 import { errorResponse, jsonResponse, parseRequestJson } from "@/lib/utils";
@@ -63,20 +64,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const session = await createStreamSession(
-      rawUrl,
-      billingAccountId,
-      usageGate.snapshot.entitlements?.maxSourceDurationSeconds,
-      parsed.mode
-    );
+    const createAndReplace = async () => {
+      const created = await createStreamSession(
+        rawUrl,
+        billingAccountId,
+        usageGate.snapshot.entitlements?.maxSourceDurationSeconds,
+        parsed.mode
+      );
+      if (billingAccountId) {
+        await replacePriorSessionsForAccount(billingAccountId, created.id);
+      }
+      return created;
+    };
+    const session = billingAccountId
+      ? await withAccountSessionLock(billingAccountId, createAndReplace)
+      : await createAndReplace();
 
     if (billingAccountId) {
-      // One active session per account — clear prior workspaces in the background.
-      void replacePriorSessionsForAccount(billingAccountId, session.id).catch(
-        (err) => {
-          console.warn("[sessions] prior session cleanup failed:", err);
-        }
-      );
       getPostHogClient().capture({
         distinctId: billingAccountId,
         event: "session_created",

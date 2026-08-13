@@ -208,21 +208,41 @@ function sourceBonus(source: string, profile: ClipContentProfile): number {
 export async function autoSuggestClips(
   streamSessionId: string,
   limit = 10,
-  options?: { extraLimit?: number }
+  options?: {
+    extraLimit?: number;
+    fromSeconds?: number;
+    throughSeconds?: number;
+  }
 ) {
   const extra = Math.max(0, Math.min(15, options?.extraLimit ?? 0));
   const take = Math.max(0, Math.min(25, limit));
   const targetCount = Math.max(1, take + extra);
+  const fromSeconds = Math.max(0, options?.fromSeconds ?? 0);
+  const throughSeconds = Math.max(
+    fromSeconds,
+    options?.throughSeconds ?? Number.MAX_SAFE_INTEGER
+  );
+  const transcriptContextStart = Math.max(0, fromSeconds - 90);
 
   const [windows, audioEvents, existingClips, transcriptChunks, session] =
     await Promise.all([
       prisma.eventWindow.findMany({
-        where: { streamSessionId, score: { gte: MIN_SCORE } },
+        where: {
+          streamSessionId,
+          score: { gte: MIN_SCORE },
+          endTimeSeconds: { gte: fromSeconds },
+          startTimeSeconds: { lte: throughSeconds },
+        },
         orderBy: { score: "desc" },
         take: 50,
       }),
       prisma.audioEvent.findMany({
-        where: { streamSessionId, score: { gte: 4 } },
+        where: {
+          streamSessionId,
+          score: { gte: 4 },
+          endTimeSeconds: { gte: fromSeconds },
+          startTimeSeconds: { lte: throughSeconds },
+        },
         orderBy: { score: "desc" },
         take: 30,
       }),
@@ -230,7 +250,11 @@ export async function autoSuggestClips(
         where: { streamSessionId, status: { not: "rejected" } },
       }),
       prisma.transcriptChunk.findMany({
-        where: { streamSessionId },
+        where: {
+          streamSessionId,
+          endTimeSeconds: { gte: transcriptContextStart },
+          startTimeSeconds: { lte: throughSeconds },
+        },
         orderBy: { startTimeSeconds: "asc" },
         take: 2500,
         select: {
@@ -264,6 +288,11 @@ export async function autoSuggestClips(
       !text.includes("[Live transcript")
     );
   });
+  const newTranscriptChunks = usableTranscriptChunks.filter(
+    (chunk) =>
+      chunk.endTimeSeconds >= fromSeconds &&
+      chunk.startTimeSeconds <= throughSeconds
+  );
 
   const chatMessages =
     windows.length > 0
@@ -417,7 +446,7 @@ export async function autoSuggestClips(
 
   // Strong transcript hooks — prefer these over even sampling.
   {
-    const scored = usableTranscriptChunks
+    const scored = newTranscriptChunks
       .filter((chunk) => chunk.text.trim().length > 24)
       .map((c) => ({
         chunk: c,
@@ -469,17 +498,17 @@ export async function autoSuggestClips(
 
   // Guaranteed transcript fallback. Anchor ranges to real speech chunks rather
   // than arbitrary timestamps, so sparse transcripts still produce choices.
-  if (candidates.length < targetCount && usableTranscriptChunks.length > 0) {
+  if (candidates.length < targetCount && newTranscriptChunks.length > 0) {
     const slots = Math.min(
-      usableTranscriptChunks.length,
+      newTranscriptChunks.length,
       Math.max(targetCount * 2, 6)
     );
     for (let i = 0; i < slots; i++) {
       const chunkIndex = Math.min(
-        usableTranscriptChunks.length - 1,
-        Math.floor(((i + 0.5) / slots) * usableTranscriptChunks.length)
+        newTranscriptChunks.length - 1,
+        Math.floor(((i + 0.5) / slots) * newTranscriptChunks.length)
       );
-      const anchor = usableTranscriptChunks[chunkIndex];
+      const anchor = newTranscriptChunks[chunkIndex];
       const center =
         (anchor.startTimeSeconds + anchor.endTimeSeconds) / 2;
       const { start, end } = clampClipRange(
@@ -598,6 +627,10 @@ export async function autoSuggestClips(
 
   for (const c of candidates) {
     if (selected.length >= targetCount) break;
+    if (Number.isFinite(throughSeconds)) {
+      c.end = Math.min(c.end, throughSeconds);
+      if (c.end - c.start < MIN_CLIP_SECONDS) continue;
+    }
     const boundary = refineClipToCompleteSpeech({
       start: c.start,
       end: c.end,

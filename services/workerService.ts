@@ -41,6 +41,7 @@ const WORKER_ID = `worker-${process.pid}-${randomUUID().slice(0, 8)}`;
 let tickInFlight = false;
 let pendingNudge = false;
 let lastRetentionAt = 0;
+let lastStorageReclaimAt = 0;
 
 function staleMs(): number {
   return Math.max(
@@ -55,6 +56,30 @@ function retentionTickMs(): number {
     Number.parseInt(process.env.RETENTION_TICK_HOURS || "6", 10) || 6
   );
   return hours * 60 * 60 * 1000;
+}
+
+function storageReclaimTickMs(): number {
+  const minutes = Math.max(
+    1,
+    Number.parseInt(process.env.STORAGE_RECLAIM_MINUTES || "2", 10) || 2
+  );
+  return minutes * 60 * 1000;
+}
+
+async function runFrequentStorageReclaim(): Promise<void> {
+  if (Date.now() - lastStorageReclaimAt < storageReclaimTickMs()) return;
+  lastStorageReclaimAt = Date.now();
+  try {
+    const [{ reclaimEphemeralStorage }, { enforceSingleSessionPerAccount }] =
+      await Promise.all([
+        import("@/services/storageReclaimService"),
+        import("@/services/sessionCleanupService"),
+      ]);
+    await enforceSingleSessionPerAccount();
+    await reclaimEphemeralStorage({ pruneSessionSegments: false });
+  } catch (err) {
+    console.warn("[worker] frequent storage reclaim failed:", err);
+  }
 }
 
 export function isWorkerEnabled(): boolean {
@@ -305,6 +330,10 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
       ]);
     const reclaimed =
       staleRenders + stalePlatformExports + staleSocial + staleFaceAnalyses;
+
+    // Free volume space before any render/transcription attempts to write.
+    await runFrequentStorageReclaim();
+
     let renders = 0;
     // Process up to a few renders per tick so the loop stays responsive.
     for (let i = 0; i < 2; i++) {
@@ -341,14 +370,6 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
         retentionDeleted = retention.deleted;
       } catch (err) {
         console.error("[worker] retention failed:", err);
-      }
-      try {
-        const { reclaimEphemeralStorage } = await import(
-          "@/services/storageReclaimService"
-        );
-        await reclaimEphemeralStorage({ pruneSessionSegments: false });
-      } catch (err) {
-        console.warn("[worker] ephemeral reclaim failed:", err);
       }
     }
 

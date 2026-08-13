@@ -1,12 +1,15 @@
-import { randomBytes, randomUUID } from "crypto";
+import { randomBytes } from "crypto";
 import { prisma } from "@/lib/db";
 import {
   hashCreatorBetaCode,
   isCreatorBetaEnabled,
   normalizeCreatorBetaCode,
+  creatorBetaExpirationFrom,
 } from "@/lib/creatorBeta";
-import { normalizeLoginEmail } from "@/lib/accessConfig";
-import { serializeBillingAccount } from "@/services/billingService";
+import {
+  getBillingAccount,
+  serializeBillingAccount,
+} from "@/services/billingService";
 import { getUsageSnapshot } from "@/services/usageService";
 
 export type CreatorBetaUnlockErrorCode =
@@ -27,13 +30,8 @@ export class CreatorBetaUnlockError extends Error {
   }
 }
 
-function betaCustomerId(): string {
-  return `beta_${randomUUID()}`;
-}
-
 export async function unlockCreatorBeta(params: {
-  accountId?: string | null;
-  email?: string;
+  accountId: string;
   code: string;
   termsAccepted: boolean;
 }) {
@@ -59,17 +57,8 @@ export async function unlockCreatorBeta(params: {
     );
   }
 
-  const normalizedEmail = params.email
-    ? normalizeLoginEmail(params.email)
-    : null;
-  if (!params.accountId && (!normalizedEmail || !normalizedEmail.includes("@"))) {
-    throw new CreatorBetaUnlockError(
-      "email_required",
-      "Enter your email so this beta access can be attached to your account."
-    );
-  }
-
   const now = new Date();
+  const betaExpiresAt = creatorBetaExpirationFrom(now);
   return prisma.$transaction(async (tx) => {
     const code = await tx.creatorBetaCode.findUnique({
       where: { codeHash: hashCreatorBetaCode(normalizedCode) },
@@ -87,37 +76,29 @@ export async function unlockCreatorBeta(params: {
       );
     }
 
-    const existing = params.accountId
-      ? await tx.billingAccount.findUnique({ where: { id: params.accountId } })
-      : await tx.billingAccount.findFirst({
-          where: { email: { equals: normalizedEmail!, mode: "insensitive" } },
-          orderBy: { createdAt: "asc" },
-        });
+    const existing = await tx.billingAccount.findUnique({
+      where: { id: params.accountId },
+    });
+    if (!existing?.userId) {
+      throw new CreatorBetaUnlockError(
+        "email_required",
+        "Sign in before unlocking Creator Beta access.",
+        401
+      );
+    }
 
-    const account = existing
-      ? await tx.billingAccount.update({
-          where: { id: existing.id },
-          data: {
-            email: normalizedEmail ?? existing.email,
-            betaAccess: true,
-            betaGrantedAt: now,
-            lastSignedInAt: now,
-            ...(!existing.unlimitedAccess && existing.status !== "active" && existing.status !== "trialing"
-              ? { status: "beta", plan: "creator" }
-              : {}),
-          },
-        })
-      : await tx.billingAccount.create({
-          data: {
-            email: normalizedEmail,
-            stripeCustomerId: betaCustomerId(),
-            plan: "creator",
-            status: "beta",
-            betaAccess: true,
-            betaGrantedAt: now,
-            lastSignedInAt: now,
-          },
-        });
+    const account = await tx.billingAccount.update({
+      where: { id: existing.id },
+      data: {
+        betaAccess: true,
+        betaGrantedAt: now,
+        betaExpiresAt,
+        lastSignedInAt: now,
+        ...(!existing.unlimitedAccess && existing.status !== "active" && existing.status !== "trialing"
+          ? { status: "beta", plan: "creator" }
+          : {}),
+      },
+    });
 
     const claimed = await tx.creatorBetaCode.updateMany({
       where: {
@@ -142,12 +123,13 @@ export async function unlockCreatorBeta(params: {
 
 export async function getCreatorBetaStatus(accountId: string | null | undefined) {
   if (!accountId) return { active: false, account: null, usage: null };
-  const account = await prisma.billingAccount.findUnique({ where: { id: accountId } });
+  const account = await getBillingAccount(accountId);
   if (!account) return { active: false, account: null, usage: null };
-  const active = account.betaAccess && isCreatorBetaEnabled();
+  const serialized = serializeBillingAccount(account);
+  const active = serialized.betaAccess;
   return {
     active,
-    account: serializeBillingAccount(account),
+    account: serialized,
     usage: active ? await getUsageSnapshot(account.id) : null,
   };
 }

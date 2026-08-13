@@ -68,6 +68,7 @@ model BillingAccount {
   unlimitedAccess      Boolean   @default(false)
   betaAccess           Boolean   @default(false)
   betaGrantedAt        DateTime?
+  betaExpiresAt        DateTime?
   currentPeriodEnd     DateTime?
   cancelAtPeriodEnd    Boolean   @default(false)
   lastSignedInAt       DateTime?

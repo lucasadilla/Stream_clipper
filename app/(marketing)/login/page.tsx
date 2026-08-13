@@ -17,7 +17,6 @@ function LoginPageInner() {
   const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [creatorCode, setCreatorCode] = useState("");
   const [mode, setMode] = useState<Mode>("signin");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -95,20 +94,10 @@ function LoginPageInner() {
     [providers]
   );
 
-  async function stashCreatorCode() {
-    await fetch("/api/auth/pending-code", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ code: creatorCode.trim() || null }),
-    });
-  }
-
   async function handleOAuth(providerId: string) {
     setLoading(true);
     setError(null);
     try {
-      await stashCreatorCode();
       await signIn(providerId, { callbackUrl: "/welcome" });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sign-in failed");
@@ -148,8 +137,6 @@ function LoginPageInner() {
     setError(null);
     setEmailSent(false);
     try {
-      await stashCreatorCode();
-
       if (mode === "signup") {
         const { ok, data } = await fetchJson<{ error?: string }>(
           "/api/auth/register",
@@ -202,7 +189,6 @@ function LoginPageInner() {
     setError(null);
     setEmailSent(false);
     try {
-      await stashCreatorCode();
       const result = await signIn("resend", {
         email,
         redirect: false,
@@ -386,22 +372,6 @@ function LoginPageInner() {
                     }
                     className={cn(
                       "h-12 w-full border border-[var(--color-card-border)] bg-[#020302]/92 px-4 text-sm text-white",
-                      "placeholder:text-[var(--color-muted)] focus:border-[var(--color-accent)] focus:outline-none"
-                    )}
-                  />
-                </label>
-
-                <label className="block space-y-2">
-                  <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
-                    Creator program code (optional)
-                  </span>
-                  <input
-                    type="text"
-                    value={creatorCode}
-                    onChange={(e) => setCreatorCode(e.target.value)}
-                    placeholder="SCB-XXXX-XXXX-XXXX"
-                    className={cn(
-                      "h-12 w-full border border-[var(--color-card-border)] bg-[#020302]/92 px-4 font-mono text-sm uppercase text-white",
                       "placeholder:text-[var(--color-muted)] focus:border-[var(--color-accent)] focus:outline-none"
                     )}
                   />

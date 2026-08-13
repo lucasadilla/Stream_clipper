@@ -374,12 +374,12 @@ export default function HomePage() {
                 SaaS pricing
               </p>
               <h2 className="marketing-display-title mt-4 max-w-5xl text-white">
-                Pay for live hours.
+                Pay for finished videos.
               </h2>
             </div>
             <p data-scroll-reveal="right" className="max-w-2xl text-xl leading-8 text-[var(--color-muted)] sm:text-2xl sm:leading-9">
-              Processing hours cover live or VOD analysis. Exports are capped
-              separately—rendering and storage are the expensive parts.
+              Pick the monthly video volume that fits your workflow. A clip
+              counts once, even when you export or publish it everywhere.
             </p>
           </div>
 
@@ -447,8 +447,8 @@ export default function HomePage() {
               Upgrade your plan when you hit the limit.
             </h3>
             <p className="mt-4 max-w-2xl text-base leading-7 text-[var(--color-muted)]">
-              Processing hours and exports reset each billing period. Move up to
-              Pro or Studio for more room — no overage packs.
+              Your video allowance resets each billing period. Move up to Pro or
+              Studio for more finished clips; platform versions never multiply usage.
             </p>
           </div>
         </div>

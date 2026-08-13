@@ -5,11 +5,11 @@ import { normalizeLoginEmail, isUnlimitedAccessEmail } from "@/lib/accessConfig"
 import { BILLING_ACCOUNT_COOKIE } from "@/lib/stripe";
 import {
   hasAppAccess,
+  isActiveBillingStatus,
   serializeBillingAccount,
   type BillingAccountSummary,
 } from "@/services/billingService";
-import { unlockCreatorBeta } from "@/services/creatorBetaService";
-import { isCreatorBetaEnabled } from "@/lib/creatorBeta";
+import { isCreatorBetaAccessActive } from "@/lib/creatorBeta";
 
 export const PENDING_CREATOR_CODE_COOKIE = "clipper_pending_creator_code";
 
@@ -83,6 +83,7 @@ export async function ensureBillingAccountForAuthUser(params: {
       },
     });
   } else {
+    const betaActive = isCreatorBetaAccessActive(account);
     account = await prisma.billingAccount.update({
       where: { id: account.id },
       data: {
@@ -92,40 +93,20 @@ export async function ensureBillingAccountForAuthUser(params: {
           params.name?.trim().slice(0, 80) || account.displayName || null,
         authProvider: provider,
         unlimitedAccess: unlimited || account.unlimitedAccess,
-        status:
-          unlimited || account.unlimitedAccess || account.betaAccess
-            ? account.status === "incomplete"
-              ? unlimited
-                ? "active"
-                : account.betaAccess
-                  ? "beta"
-                  : account.status
-              : account.status
-            : account.status,
+        betaAccess: betaActive,
+        status: unlimited || account.unlimitedAccess
+          ? "active"
+          : isActiveBillingStatus(account.status)
+            ? account.status
+          : betaActive
+            ? "beta"
+            : account.status === "beta"
+              ? "incomplete"
+              : account.status,
         plan: unlimited ? "studio" : account.plan,
         lastSignedInAt: new Date(),
       },
     });
-  }
-
-  // Redeem pending creator program code once after OAuth / email sign-in
-  const pendingCode = await readPendingCreatorCode();
-  if (pendingCode && isCreatorBetaEnabled() && !account.betaAccess) {
-    try {
-      const unlocked = await unlockCreatorBeta({
-        accountId: account.id,
-        email: account.email ?? email ?? undefined,
-        code: pendingCode,
-        termsAccepted: true,
-      });
-      account = await prisma.billingAccount.findUniqueOrThrow({
-        where: { id: unlocked.id },
-      });
-    } catch {
-      // leave pending code; user can retry on welcome page
-    } finally {
-      await clearPendingCreatorCode();
-    }
   }
 
   await setBillingAccountCookie(account.id);
