@@ -22,7 +22,7 @@ import {
 } from "@/lib/captionTrack";
 import { CaptionAppearancePanel } from "@/components/CaptionAppearancePanel";
 import {
-  applyCaptionCapitalization,
+  captionAnimationClass,
   captionPreviewStyle,
   type CaptionAppearance,
 } from "@/lib/captionAppearance";
@@ -38,6 +38,11 @@ import {
   smoothBrowserFaceRect,
   type BrowserFaceRect,
 } from "@/lib/browserFaceTracking";
+import { CaptionCueText } from "@/components/CaptionCueText";
+import {
+  activeDynamicPunchEvent,
+  buildDynamicPunchEvents,
+} from "@/lib/captionEmphasis";
 
 interface TranscriptChunk {
   id: string;
@@ -54,6 +59,8 @@ interface AgentClipEditorProps {
   sourceDuration: number;
   includeCaptions: boolean;
   onIncludeCaptionsChange: (value: boolean) => void;
+  dynamicPunchInEnabled: boolean;
+  onDynamicPunchInChange: (value: boolean) => void;
   captionAppearance: CaptionAppearance;
   onCaptionAppearanceChange: (value: CaptionAppearance) => void;
   onClipChange: (clip: ClipSuggestionData) => void;
@@ -96,6 +103,8 @@ export function AgentClipEditor({
   sourceDuration,
   includeCaptions,
   onIncludeCaptionsChange,
+  dynamicPunchInEnabled,
+  onDynamicPunchInChange,
   captionAppearance,
   onCaptionAppearanceChange,
   onClipChange,
@@ -191,18 +200,23 @@ export function AgentClipEditor({
     () => lookupCueAtTime(cues, currentTime),
     [cues, currentTime]
   );
+  const dynamicPunchEvents = useMemo(
+    () => buildDynamicPunchEvents(cues),
+    [cues]
+  );
+  const activePunch = useMemo(
+    () =>
+      dynamicPunchInEnabled
+        ? activeDynamicPunchEvent(dynamicPunchEvents, currentTime)
+        : null,
+    [dynamicPunchEvents, dynamicPunchInEnabled, currentTime]
+  );
 
   const previewStyles = useMemo(
     () => captionPreviewStyle(captionAppearance, previewHeight),
     [captionAppearance, previewHeight]
   );
 
-  const displayText = activeCue
-    ? applyCaptionCapitalization(
-        activeCue.text,
-        captionAppearance.capitalization
-      )
-    : null;
   const trackedFaceCenterX = useMemo(
     () =>
       trackedCenterAt(
@@ -427,11 +441,6 @@ export function AgentClipEditor({
   const endPct = toPct(clip.endTimeSeconds);
   const playPct = toPct(Math.max(viewStart, Math.min(viewEnd, currentTime)));
 
-  const useKaraoke =
-    captionAppearance.karaokeEnabled &&
-    activeCue?.words &&
-    activeCue.words.length > 0;
-
   return (
     <div className="space-y-4">
       <div>
@@ -439,7 +448,7 @@ export function AgentClipEditor({
         <p className="text-xs text-[var(--color-muted)]">
           One preview — look + captions update live. Drag the handles to trim.
         </p>
-        <p className="mt-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8f9b89]">
+        <p className="mt-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--color-muted)]">
           {getContentLookPreset(lookPreset).label} look
         </p>
       </div>
@@ -455,6 +464,7 @@ export function AgentClipEditor({
             videoRef={videoRef}
             faceRect={effectiveFaceRect}
             faceCenterX={effectiveFaceCenterX}
+            dynamicPunchActive={Boolean(activePunch)}
             className="mx-auto max-h-[56vh] w-full rounded-none border-0"
             onTimeUpdate={(e) => {
               const t = e.currentTarget.currentTime;
@@ -489,37 +499,20 @@ export function AgentClipEditor({
             {includeCaptions ? (
               <div className="absolute inset-0 overflow-hidden">
                 <div style={previewStyles.container}>
-                  {activeCue && displayText ? (
+                  {activeCue && activeCue.text ? (
                     <p
                       key={activeCue.id}
                       style={previewStyles.text}
-                      className="whitespace-pre-line line-clamp-2"
+                      className={cn(
+                        "whitespace-pre-line line-clamp-2",
+                        captionAnimationClass(captionAppearance.animation)
+                      )}
                     >
-                      {useKaraoke
-                        ? activeCue.words!.map((word, index) => {
-                            const active =
-                              currentTime >= word.start &&
-                              currentTime < word.end;
-                            const label = applyCaptionCapitalization(
-                              word.word,
-                              captionAppearance.capitalization
-                            );
-                            return (
-                              <span key={`${activeCue.id}-${index}`}>
-                                <span
-                                  style={{
-                                    color: active
-                                      ? captionAppearance.highlightColor
-                                      : captionAppearance.color,
-                                  }}
-                                >
-                                  {label}
-                                </span>
-                                {index < activeCue.words!.length - 1 ? " " : ""}
-                              </span>
-                            );
-                          })
-                        : displayText}
+                      <CaptionCueText
+                        cue={activeCue}
+                        currentTime={currentTime}
+                        appearance={captionAppearance}
+                      />
                     </p>
                   ) : null}
                 </div>
@@ -539,7 +532,7 @@ export function AgentClipEditor({
         </div>
         <div
           ref={trackRef}
-          className="relative h-10 cursor-pointer rounded bg-[#141814]"
+          className="relative h-10 cursor-pointer rounded bg-[var(--color-secondary)]"
           onPointerDown={(e) => {
             if ((e.target as HTMLElement).dataset.handle) return;
             setDragging("playhead");
@@ -589,6 +582,18 @@ export function AgentClipEditor({
             />
             Show &amp; burn captions
           </label>
+          <label className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={dynamicPunchInEnabled}
+              onChange={(e) => onDynamicPunchInChange(e.target.checked)}
+              className="accent-[var(--color-accent)]"
+            />
+            Dynamic punch-ins
+          </label>
+          <p className="text-[10px] leading-4 text-[var(--color-muted)]">
+            Adds restrained zooms around emphasized moments.
+          </p>
           <CaptionAppearancePanel
             appearance={captionAppearance}
             onChange={onCaptionAppearanceChange}
@@ -597,7 +602,7 @@ export function AgentClipEditor({
         </div>
 
         <div className="space-y-2 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-3">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8f9b89]">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">
             Captions in range
             {!chunksLoading && includeCaptions ? ` · ${cues.length}` : ""}
           </p>
@@ -637,13 +642,13 @@ export function AgentClipEditor({
                       <textarea
                         value={editText}
                         onChange={(e) => setEditText(e.target.value)}
-                        className="w-full rounded border border-[var(--color-card-border)] bg-[#0a0c0a] p-2 text-xs"
+                        className="w-full rounded border border-[var(--color-card-border)] bg-[var(--color-background)] p-2 text-xs text-[var(--color-foreground)] focus:border-[var(--color-accent)] focus:outline-none"
                         rows={2}
                       />
                       <div className="flex gap-2">
                         <button
                           type="button"
-                          className="rounded bg-[var(--color-accent)] px-2 py-1 text-[10px] font-semibold text-black"
+                          className="rounded bg-[var(--color-accent)] px-2 py-1 text-[10px] font-semibold text-[var(--color-accent-foreground)]"
                           onClick={() => void saveCueEdit(cue)}
                         >
                           Save

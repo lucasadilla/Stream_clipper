@@ -467,6 +467,57 @@ body[data-render-modal-open] [data-timeline-playhead] {
   animation: caption-slide-up 0.28s ease-out;
 }
 
+@keyframes caption-smart-word-pop {
+  0% {
+    transform: scale(1);
+  }
+  45% {
+    transform: scale(1.2);
+  }
+  100% {
+    transform: scale(1.08);
+  }
+}
+
+.caption-smart-emphasis-word {
+  display: inline-block;
+  font-weight: 800;
+  transform: scale(1.08);
+  transform-origin: center bottom;
+}
+
+.caption-smart-emphasis-word-active {
+  animation: caption-smart-word-pop 0.28s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+@keyframes clip-dynamic-punch {
+  0% {
+    transform: scale(1);
+  }
+  20% {
+    transform: scale(1.06);
+  }
+  58% {
+    transform: scale(1.045);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.clip-dynamic-punch {
+  animation: clip-dynamic-punch 0.9s cubic-bezier(0.2, 0.85, 0.3, 1);
+  transform-origin: center center;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .caption-smart-emphasis-word-active,
+  .clip-dynamic-punch {
+    animation: none;
+  }
+}
+
 /* Frosted glass card with a static gradient border (marketing sections). */
 .marketing-glass-card {
   position: relative;

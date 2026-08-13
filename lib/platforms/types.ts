@@ -53,6 +53,8 @@ export interface PlatformExportSettings {
   includeCaptions: boolean;
   burnSubtitles: boolean;
   generateCopy: boolean;
+  /** Preserve user-approved copy supplied when the export pack was created. */
+  useCopyOverride?: boolean;
   xQuoteCard: boolean;
   xQuoteLayout: XQuoteLayout;
 }
@@ -65,6 +67,7 @@ export interface CreatePlatformExportPackInput {
   xQuoteCard: boolean;
   xQuoteLayout?: XQuoteLayout;
   outputOptions?: Partial<Record<PlatformKey, string>>;
+  copyOverrides?: Partial<Record<PlatformKey, PlatformCopy>>;
 }
 
 export interface PlatformValidationInput {

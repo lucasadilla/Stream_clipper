@@ -10,12 +10,13 @@ import {
 } from "@/lib/captionTrack";
 import { applyCaptionEdits, type CaptionEditsMap } from "@/lib/captionEdits";
 import {
-  applyCaptionCapitalization,
+  captionAnimationClass,
   captionPreviewStyle,
   type CaptionAppearance,
 } from "@/lib/captionAppearance";
 import { cn } from "@/lib/cn";
 import type { RefObject } from "react";
+import { CaptionCueText } from "@/components/CaptionCueText";
 
 interface CaptionTrackLayerProps {
   enabled: boolean;
@@ -24,19 +25,6 @@ interface CaptionTrackLayerProps {
   captionEdits?: CaptionEditsMap;
   appearance: CaptionAppearance;
   showVerticalSafeArea?: boolean;
-}
-
-function animationClass(animation: CaptionAppearance["animation"]): string {
-  switch (animation) {
-    case "fade":
-      return "caption-anim-fade";
-    case "pop":
-      return "caption-anim-pop";
-    case "slideUp":
-      return "caption-anim-slide-up";
-    default:
-      return "";
-  }
 }
 
 export function CaptionTrackLayer({
@@ -100,7 +88,10 @@ export function CaptionTrackLayer({
           activeIdRef.current = nextId;
           setActiveCue(cue);
         }
-        if (appearance.karaokeEnabled) {
+        if (
+          appearance.karaokeEnabled ||
+          appearance.smartEmphasisEnabled
+        ) {
           setPlayhead(t);
         }
       }
@@ -109,18 +100,15 @@ export function CaptionTrackLayer({
 
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [enabled, track, playerRef, appearance.karaokeEnabled]);
+  }, [
+    enabled,
+    track,
+    playerRef,
+    appearance.karaokeEnabled,
+    appearance.smartEmphasisEnabled,
+  ]);
 
   if (!enabled) return null;
-
-  const useKaraoke =
-    appearance.karaokeEnabled &&
-    activeCue?.words &&
-    activeCue.words.length > 0;
-
-  const displayText = activeCue
-    ? applyCaptionCapitalization(activeCue.text, appearance.capitalization)
-    : null;
 
   return (
     <div
@@ -135,40 +123,20 @@ export function CaptionTrackLayer({
       )}
 
       <div style={previewStyles.container}>
-        {activeCue && displayText && (
+        {activeCue && activeCue.text && (
           <p
             key={activeCue.id}
             style={previewStyles.text}
             className={cn(
               "whitespace-pre-line line-clamp-2",
-              animationClass(appearance.animation)
+              captionAnimationClass(appearance.animation)
             )}
           >
-            {useKaraoke
-              ? activeCue.words!.map((word, index) => {
-                  const active =
-                    playhead >= word.start && playhead < word.end;
-                  const label = applyCaptionCapitalization(
-                    word.word,
-                    appearance.capitalization
-                  );
-                  return (
-                    <span key={`${activeCue.id}-${index}`}>
-                      <span
-                        style={{
-                          color: active
-                            ? appearance.highlightColor
-                            : appearance.color,
-                          transition: "color 60ms linear",
-                        }}
-                      >
-                        {label}
-                      </span>
-                      {index < activeCue.words!.length - 1 ? " " : ""}
-                    </span>
-                  );
-                })
-              : displayText}
+            <CaptionCueText
+              cue={activeCue}
+              currentTime={playhead}
+              appearance={appearance}
+            />
           </p>
         )}
       </div>

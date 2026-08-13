@@ -52,6 +52,10 @@ import {
   type VerticalLayoutRequest,
 } from "@/lib/verticalLayout";
 import { resolveVerticalLayout } from "@/services/verticalLayoutService";
+import {
+  buildDynamicPunchEvents,
+  type DynamicPunchEvent,
+} from "@/lib/captionEmphasis";
 
 const PREVIEW_MAX_SECONDS = 5;
 const PREVIEW_HEIGHT = 640;
@@ -75,6 +79,8 @@ export interface RenderShortParams {
   editorState?: EditorState;
   /** Facecam-aware vertical layout selection (validated client request). */
   verticalLayout?: VerticalLayoutRequest;
+  /** Adds restrained transcript-timed zoom pulses below overlays/captions. */
+  dynamicPunchIn?: boolean;
   /** Render a short low-resolution preview instead of the final export. */
   preview?: boolean;
 }
@@ -113,11 +119,13 @@ export function parseRenderJobParams(value: unknown): RenderShortParams | null {
       : undefined,
     editorState: normalizeEditorState(raw.editorState),
     verticalLayout: parseVerticalLayoutRequest(raw.verticalLayout) ?? undefined,
+    dynamicPunchIn: raw.dynamicPunchIn === true,
     preview: raw.preview === true,
   };
 }
 
 type BurnCaptionCue = {
+  id?: string;
   startTimeSeconds: number;
   endTimeSeconds: number;
   text: string;
@@ -147,6 +155,7 @@ function mapCaptionsToSequence(
         }))
         .filter((word) => word.end > word.start && word.word.trim().length > 0);
       mapped.push({
+        id: `${cue.id ?? "cue"}-${segment.id}`,
         startTimeSeconds:
           outputOffset + Math.max(0, overlapStart - segment.sourceStart),
         endTimeSeconds:
@@ -188,6 +197,7 @@ export async function executeRenderJob(
     captionCues: clientCaptionCues,
     editorState: rawEditorState,
     verticalLayout: verticalLayoutRequest,
+    dynamicPunchIn = false,
     preview = false,
   } = params;
 
@@ -339,6 +349,7 @@ export async function executeRenderJob(
   const canStreamCopy =
     format === "native" &&
     !includeCaptions &&
+    !dynamicPunchIn &&
     textOverlays.length === 0 &&
     !hasMediaOverlays &&
     !editorState.settings.normalizeAudio &&
@@ -409,8 +420,10 @@ export async function executeRenderJob(
     return { outputPath: relativeOutput };
   }
 
-  if (includeCaptions || textOverlays.length > 0) {
+  let renderedCaptionCues: BurnCaptionCue[] = [];
+  if (includeCaptions || dynamicPunchIn || textOverlays.length > 0) {
     await updateJobProgress(jobId, 35, "captions");
+    const needsTranscriptCues = includeCaptions || dynamicPunchIn;
     const clientCues = (clientCaptionCues ?? []).filter(
       (cue) => {
         if (sequenceSegments.length === 0) {
@@ -426,16 +439,16 @@ export async function executeRenderJob(
         );
       }
     );
-    const chunks = !includeCaptions || clientCues.length
+    const chunks = !needsTranscriptCues || clientCues.length
       ? []
       : await getTranscriptChunksForRange(
           streamSessionId,
           effectiveStart,
           effectiveEnd
         );
-    if (!includeCaptions || clientCues.length > 0 || chunks.length > 0) {
+    if (!needsTranscriptCues || clientCues.length > 0 || chunks.length > 0) {
       const captionEdits = await readCaptionEdits(streamSessionId);
-      const captionLines: BurnCaptionCue[] = !includeCaptions
+      const captionLines: BurnCaptionCue[] = !needsTranscriptCues
         ? []
         : clientCues.length
         ? clientCues.map((cue, index) => ({
@@ -459,10 +472,11 @@ export async function executeRenderJob(
             captionEdits
           );
 
-      const shiftedCues = sequenceSegments.length
+      const shiftedCues: BurnCaptionCue[] = sequenceSegments.length
         ? mapCaptionsToSequence(captionLines, sequenceSegments, format)
         : captionLines
-            .map((cue) => ({
+            .map((cue, index) => ({
+              id: cue.id ?? `cue-${index}`,
               startTimeSeconds: Math.max(0, cue.startTimeSeconds - effectiveStart),
               endTimeSeconds: Math.min(
                 effectiveEnd - effectiveStart,
@@ -478,6 +492,7 @@ export async function executeRenderJob(
                 .filter((word) => word.end > word.start && word.word.trim().length > 0),
             }))
             .filter((cue) => cue.endTimeSeconds > cue.startTimeSeconds);
+      renderedCaptionCues = shiftedCues;
 
       if (includeCaptions && shiftedCues.length === 0 && !preview) {
         throw new Error("Captions are enabled, but no caption cues overlap this clip.");
@@ -506,25 +521,50 @@ export async function executeRenderJob(
       });
 
       const assContent = generateAss({
-        cues: shiftedCues,
+        cues: includeCaptions ? shiftedCues : [],
         overlays: overlayCues,
         appearance,
         width: outputWidth,
         height: outputHeight,
         format,
       });
-      if (!includeCaptions || shiftedCues.length > 0 || overlayCues.length > 0) {
+      if (
+        (includeCaptions && shiftedCues.length > 0) ||
+        overlayCues.length > 0
+      ) {
         subtitlePath = path.join(rendersDir, `clip-${clipId}${preview ? "-preview" : ""}.ass`);
         await fs.writeFile(subtitlePath, assContent, "utf8");
       }
-    } else if (preview) {
-      // Previews never fail on missing captions — render without them.
+    } else if (preview || !includeCaptions) {
+      // Previews never fail on missing captions. Dynamic punch-ins also
+      // degrade gracefully when transcript timing is not available yet.
     } else {
       throw new Error(
         "Captions are enabled, but transcription has not reached this clip yet. " +
           "Wait until captions appear in the selected timeline range, then render again."
       );
     }
+  }
+
+  const punchInEvents: DynamicPunchEvent[] = dynamicPunchIn
+    ? buildDynamicPunchEvents(
+        renderedCaptionCues.map((cue, index) => ({
+          id: cue.id ?? `render-cue-${index}`,
+          startTimeSeconds: cue.startTimeSeconds,
+          endTimeSeconds: cue.endTimeSeconds,
+          text: cue.text,
+          words: cue.words,
+        }))
+      )
+    : [];
+  if (dynamicPunchIn) {
+    await appendRenderJobLog(
+      jobId,
+      "dynamic_punch",
+      punchInEvents.length > 0
+        ? `${punchInEvents.length} punch-in${punchInEvents.length === 1 ? "" : "s"}`
+        : "No suitable transcript moments; punch-ins skipped"
+    );
   }
 
   const facecam =
@@ -590,6 +630,7 @@ export async function executeRenderJob(
       denoiseAudio: editorState.settings.denoiseAudio,
       verticalBackground: editorState.settings.verticalBackground,
       mediaOverlays,
+      punchInEvents,
     });
   } else {
     await ffmpegRender({
@@ -609,6 +650,7 @@ export async function executeRenderJob(
       captionAppearance: appearance,
       verticalLayout: resolvedVerticalLayout?.resolved,
       previewQuality: preview,
+      punchInEvents,
       facecamRegion: facecam
         ? {
             x: facecam.x,

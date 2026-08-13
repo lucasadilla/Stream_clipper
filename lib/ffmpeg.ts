@@ -8,6 +8,7 @@ import {
   buildVerticalLayoutFilter,
   type ResolvedVerticalLayout,
 } from "@/lib/verticalLayoutFilters";
+import type { DynamicPunchEvent } from "@/lib/captionEmphasis";
 
 function isWindowsAbsolutePath(value: string): boolean {
   return /^[a-zA-Z]:[\\/]/.test(value) || value.includes("\\");
@@ -713,6 +714,42 @@ export interface RenderShortOptions {
   verticalLayout?: ResolvedVerticalLayout;
   /** Faster encode preset for low-res preview renders. */
   previewQuality?: boolean;
+  punchInEvents?: DynamicPunchEvent[];
+}
+
+/** FFmpeg zoompan filter matching the restrained CSS punch used in previews. */
+export function buildDynamicPunchVideoFilter(
+  width: number,
+  height: number,
+  events: DynamicPunchEvent[],
+  fps = 30
+): string | null {
+  const usable = events
+    .filter(
+      (event) =>
+        Number.isFinite(event.startTimeSeconds) &&
+        Number.isFinite(event.endTimeSeconds) &&
+        event.endTimeSeconds > event.startTimeSeconds
+    )
+    .slice(0, 40);
+  if (usable.length === 0) return null;
+
+  const pulses = usable.map((event) => {
+    const startFrame = Math.max(0, Math.round(event.startTimeSeconds * fps));
+    const endFrame = Math.max(
+      startFrame + 1,
+      Math.round(event.endTimeSeconds * fps)
+    );
+    const amplitude = Math.min(0.08, Math.max(0.02, event.peakScale - 1));
+    return `if(between(on,${startFrame},${endFrame}),${amplitude.toFixed(4)}*sin(PI*(on-${startFrame})/${endFrame - startFrame}),0)`;
+  });
+  const pulseExpression = pulses.reduce(
+    (combined, pulse) => (combined ? `max(${combined},${pulse})` : pulse),
+    ""
+  );
+  const outputWidth = Math.max(2, Math.round(width / 2) * 2);
+  const outputHeight = Math.max(2, Math.round(height / 2) * 2);
+  return `zoompan=z='1+${pulseExpression}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${outputWidth}x${outputHeight}:fps=${fps}`;
 }
 
 function subtitleFilter(
@@ -997,6 +1034,7 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
     captionAppearance,
     verticalLayout,
     previewQuality,
+    punchInEvents = [],
   } = options;
 
   const verticalHeight = getRenderVerticalHeight();
@@ -1092,6 +1130,14 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
     if (srtPath && !captionsSupported) {
       throw captionRendererUnavailableError();
     }
+    const punchFilter = buildDynamicPunchVideoFilter(
+      width,
+      height,
+      punchInEvents
+    );
+    if (punchFilter) {
+      vf += `,${punchFilter}`;
+    }
     if (srtPath) {
       vf += `,${subtitleFilter(srtPath, subtitleFormat, height, captionAppearance)}`;
     }
@@ -1155,6 +1201,7 @@ export interface RenderSequenceOptions {
   denoiseAudio?: boolean;
   verticalBackground?: "crop" | "blur";
   mediaOverlays?: RenderSequenceMediaOverlay[];
+  punchInEvents?: DynamicPunchEvent[];
 }
 
 function overlayPosition(
@@ -1253,6 +1300,15 @@ export async function renderSequence(options: RenderSequenceOptions): Promise<vo
   );
 
   let videoLabel = "vcat";
+  const punchFilter = buildDynamicPunchVideoFilter(
+    width,
+    height,
+    options.punchInEvents ?? []
+  );
+  if (punchFilter) {
+    filters.push(`[${videoLabel}]${punchFilter}[vpunch]`);
+    videoLabel = "vpunch";
+  }
   if (options.srtPath) {
     filters.push(
       `[${videoLabel}]${subtitleFilter(options.srtPath, options.format, height, options.captionAppearance)}[vsub]`

@@ -809,6 +809,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           includeCaptions: wizard.includeCaptions,
+          dynamicPunchIn: wizard.dynamicPunchInEnabled,
           captionAppearance,
           format: "vertical",
           verticalLayout: selection,
@@ -1346,6 +1347,10 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                 onIncludeCaptionsChange={(value) => {
                   void persistWizard({ includeCaptions: value });
                 }}
+                dynamicPunchInEnabled={wizard.dynamicPunchInEnabled}
+                onDynamicPunchInChange={(value) => {
+                  void persistWizard({ dynamicPunchInEnabled: value });
+                }}
                 captionAppearance={captionAppearance}
                 onCaptionAppearanceChange={(next) => {
                   setCaptionAppearance(next);
@@ -1564,9 +1569,13 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
           playbackUrl={playbackUrl}
           sourceDuration={recordedSeconds}
           includeCaptions={wizard.includeCaptions}
+          dynamicPunchInEnabled={wizard.dynamicPunchInEnabled}
           captionAppearance={captionAppearance}
           onIncludeCaptionsChange={(value) => {
             void persistWizard({ includeCaptions: value });
+          }}
+          onDynamicPunchInChange={(value) => {
+            void persistWizard({ dynamicPunchInEnabled: value });
           }}
           onCaptionAppearanceChange={(next) => {
             setCaptionAppearance(next);

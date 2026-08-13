@@ -2,13 +2,33 @@
 
 import {
   useEffect,
+  useMemo,
   useRef,
+  useState,
   type CSSProperties,
   type ReactNode,
   type RefObject,
   type SyntheticEvent,
 } from "react";
 import {
+  ArrowLeft,
+  Bell,
+  Bookmark,
+  ChevronDown,
+  Heart,
+  Home,
+  Menu,
+  MessageCircle,
+  MoreHorizontal,
+  Music2,
+  Plus,
+  Repeat2,
+  Search,
+  Send,
+  Share2,
+  ThumbsDown,
+  ThumbsUp,
+  User,
   Gamepad2,
   MessagesSquare,
   MonitorPlay,
@@ -18,9 +38,19 @@ import {
 import { cn } from "@/lib/cn";
 import type { ContentLookPresetId } from "@/lib/contentLookPresets";
 import { getContentLookPreset } from "@/lib/contentLookPresets";
-import type { PlatformKey } from "@/lib/platforms/types";
+import {
+  captionAnimationClass,
+  captionPreviewStyle,
+  type CaptionAppearance,
+} from "@/lib/captionAppearance";
+import type { CaptionCue } from "@/lib/captionTrack";
+import type { PlatformCopy, PlatformKey } from "@/lib/platforms/types";
 import { PLATFORM_PRESETS } from "@/lib/platforms/presets";
-import { PLATFORM_SAFE_ZONES } from "@/lib/platforms/safeZones";
+import {
+  PLATFORM_SAFE_ZONES,
+  type PlatformSafeZone,
+} from "@/lib/platforms/safeZones";
+import { CaptionCueText } from "@/components/CaptionCueText";
 
 export function LookPresetGlyph({
   presetId,
@@ -161,8 +191,11 @@ export function LookVideoStage({
   className,
   children,
   onTimeUpdate,
+  onPlay,
+  onPause,
   faceRect,
   faceCenterX,
+  dynamicPunchActive = false,
 }: {
   presetId: ContentLookPresetId;
   playbackUrl: string | null;
@@ -170,10 +203,14 @@ export function LookVideoStage({
   className?: string;
   children?: ReactNode;
   onTimeUpdate?: (event: SyntheticEvent<HTMLVideoElement>) => void;
+  onPlay?: (event: SyntheticEvent<HTMLVideoElement>) => void;
+  onPause?: (event: SyntheticEvent<HTMLVideoElement>) => void;
   /** Normalized face box (0..1) — keeps the face centered in look crops. */
   faceRect?: { x: number; y: number; width: number; height: number } | null;
   /** Current tracked horizontal focus, normalized to 0..1. */
   faceCenterX?: number | null;
+  /** Runs a restrained zoom pulse on the composed video, below captions. */
+  dynamicPunchActive?: boolean;
 }) {
   const layout = getContentLookPreset(presetId).layout;
   const mirrorRef = useRef<HTMLVideoElement>(null);
@@ -286,7 +323,8 @@ export function LookVideoStage({
       <div
         className={cn(
           "pointer-events-none absolute overflow-hidden transition-all duration-150",
-          needsMirror ? mirrorSlot : "hidden"
+          needsMirror ? mirrorSlot : "hidden",
+          dynamicPunchActive && "clip-dynamic-punch"
         )}
         style={
           layout === "facecam_pip" ? { aspectRatio: "1 / 1" } : undefined
@@ -314,7 +352,8 @@ export function LookVideoStage({
           layout === "facecam_bottom_gameplay_top" ? "border-b" : "",
           layout === "subject_aware_crop"
             ? "z-[1] shadow-[0_0_0_999px_rgba(0,0,0,0.55)]"
-            : "z-[1]"
+            : "z-[1]",
+          dynamicPunchActive && "clip-dynamic-punch"
         )}
       >
         {playbackUrl ? (
@@ -336,6 +375,8 @@ export function LookVideoStage({
             playsInline
             controls
             onTimeUpdate={onTimeUpdate}
+            onPlay={onPlay}
+            onPause={onPause}
           />
         ) : null}
       </div>
@@ -379,96 +420,431 @@ const PLATFORM_SHORT: Partial<Record<PlatformKey, string>> = {
   youtube_landscape: "YouTube",
 };
 
+interface PlatformPreviewDetails {
+  title: string;
+  caption: string;
+  postText: string;
+  description: string;
+  hashtags: string[];
+  pinnedComment: string;
+  captionCue: CaptionCue | null;
+  captionTime: number;
+  captionAppearance: CaptionAppearance;
+}
+
+function PreviewAvatar({
+  size = "md",
+  ring = false,
+}: {
+  size?: "sm" | "md" | "lg";
+  ring?: boolean;
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-flex shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#95ff00] via-[#45c91c] to-[#1378ff] font-black text-black shadow-sm",
+        size === "sm" ? "h-6 w-6 text-[9px]" : size === "lg" ? "h-10 w-10 text-xs" : "h-8 w-8 text-[10px]",
+        ring && "ring-2 ring-white ring-offset-2 ring-offset-black"
+      )}
+    >
+      C
+    </span>
+  );
+}
+
+function PreviewMedia({
+  children,
+  lookPresetId,
+  frameUrl,
+  includeCaptions,
+  className,
+  captionCue,
+  captionTime,
+  captionAppearance,
+  captionSafeZone,
+  gradient = false,
+}: {
+  children?: ReactNode;
+  lookPresetId: ContentLookPresetId;
+  frameUrl: string | null;
+  includeCaptions: boolean;
+  className?: string;
+  captionCue: CaptionCue | null;
+  captionTime: number;
+  captionAppearance: CaptionAppearance;
+  captionSafeZone: PlatformSafeZone;
+  gradient?: boolean;
+}) {
+  const mediaRef = useRef<HTMLDivElement>(null);
+  const [mediaHeight, setMediaHeight] = useState(400);
+
+  useEffect(() => {
+    const node = mediaRef.current;
+    if (!node) return;
+    const updateHeight = () => {
+      const nextHeight = node.getBoundingClientRect().height;
+      if (nextHeight > 0) setMediaHeight(nextHeight);
+    };
+    updateHeight();
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  const captionStyles = useMemo(() => {
+    const platformAppearance =
+      captionAppearance.vertical === "bottom"
+        ? {
+            ...captionAppearance,
+            verticalOffsetPercent: Math.max(
+              captionAppearance.verticalOffsetPercent,
+              captionSafeZone.subtitleBottomPercent
+            ),
+          }
+        : captionAppearance;
+    const styles = captionPreviewStyle(platformAppearance, mediaHeight);
+    return {
+      ...styles,
+      container: {
+        ...styles.container,
+        paddingLeft: `${Math.max(5, captionSafeZone.leftPercent)}%`,
+        paddingRight: `${Math.max(5, captionSafeZone.rightPercent)}%`,
+      },
+    };
+  }, [captionAppearance, captionSafeZone, mediaHeight]);
+  return (
+    <div
+      ref={mediaRef}
+      className={cn("relative overflow-hidden bg-[#101010]", className)}
+    >
+      <div className="absolute inset-0">
+        {children ?? (
+          <LookLayoutMock
+            presetId={lookPresetId}
+            frameUrl={frameUrl}
+            className="h-full w-full rounded-none border-0"
+          />
+        )}
+      </div>
+      {gradient && (
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/40 via-transparent to-black/75" />
+      )}
+      {includeCaptions && captionCue && captionCue.text ? (
+        <div className="pointer-events-none absolute inset-0 z-10 overflow-hidden">
+          <div style={captionStyles.container}>
+            <p
+              key={captionCue.id}
+              style={captionStyles.text}
+              className={cn(
+                "whitespace-pre-line",
+                captionAnimationClass(captionAppearance.animation)
+              )}
+            >
+              <CaptionCueText
+                cue={captionCue}
+                currentTime={captionTime}
+                appearance={captionAppearance}
+              />
+            </p>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function RailAction({
+  icon,
+  label,
+}: {
+  icon: ReactNode;
+  label: string;
+}) {
+  return (
+    <div className="flex flex-col items-center gap-0.5 text-white drop-shadow-md">
+      <span className="flex h-9 w-9 items-center justify-center rounded-full bg-black/20 backdrop-blur-[2px]">
+        {icon}
+      </span>
+      <span className="text-[9px] font-semibold">{label}</span>
+    </div>
+  );
+}
+
+function VerticalPlatformPreview({
+  platform,
+  title,
+  caption,
+  hashtags,
+  children,
+  lookPresetId,
+  frameUrl,
+  includeCaptions,
+  captionCue,
+  captionTime,
+  captionAppearance,
+}: {
+  platform: "youtube_shorts" | "tiktok" | "instagram_reels" | "facebook_reels";
+} & PlatformPreviewDetails & {
+  children?: ReactNode;
+  lookPresetId: ContentLookPresetId;
+  frameUrl: string | null;
+  includeCaptions: boolean;
+}) {
+  const isTikTok = platform === "tiktok";
+  const isInstagram = platform === "instagram_reels";
+  const isYouTube = platform === "youtube_shorts";
+  const safe = PLATFORM_SAFE_ZONES[platform];
+  return (
+    <div className="relative aspect-[9/16] w-[min(100%,330px)] overflow-hidden rounded-[2rem] border-[7px] border-[#191919] bg-black shadow-[0_28px_80px_rgba(0,0,0,0.62)] ring-1 ring-white/10">
+      <PreviewMedia
+        lookPresetId={lookPresetId}
+        frameUrl={frameUrl}
+        includeCaptions={includeCaptions}
+        captionCue={captionCue}
+        captionTime={captionTime}
+        captionAppearance={captionAppearance}
+        captionSafeZone={safe}
+        gradient
+        className="absolute inset-0"
+      >
+        {children}
+      </PreviewMedia>
+
+      <div className="pointer-events-none absolute left-1/2 top-2 z-30 h-5 w-24 -translate-x-1/2 rounded-full bg-black/85" />
+
+      <div className="absolute inset-x-0 top-0 z-20 flex h-16 items-center justify-between px-4 pt-4 text-white">
+        {isTikTok ? (
+          <>
+            <span className="w-7" />
+            <div className="flex items-center gap-3 text-xs font-semibold drop-shadow">
+              <span className="text-white/70">Following</span>
+              <span className="relative text-white after:absolute after:-bottom-1.5 after:left-1/2 after:h-0.5 after:w-5 after:-translate-x-1/2 after:bg-white">For You</span>
+            </div>
+            <Search className="h-5 w-5" />
+          </>
+        ) : isInstagram ? (
+          <>
+            <span className="flex items-center gap-1 text-base font-bold">Reels <ChevronDown className="h-4 w-4" /></span>
+            <span className="flex h-7 w-7 items-center justify-center rounded-lg border-2 border-white"><Plus className="h-4 w-4" /></span>
+          </>
+        ) : isYouTube ? (
+          <>
+            <ArrowLeft className="h-5 w-5" />
+            <div className="flex items-center gap-4"><Search className="h-5 w-5" /><MoreHorizontal className="h-5 w-5" /></div>
+          </>
+        ) : (
+          <>
+            <span className="text-base font-bold">Reels</span>
+            <div className="flex items-center gap-4"><Search className="h-5 w-5" /><PreviewAvatar size="sm" /></div>
+          </>
+        )}
+      </div>
+
+      <div className="absolute bottom-[19%] right-2.5 z-20 flex flex-col items-center gap-2.5">
+        <div className="relative mb-1"><PreviewAvatar size="md" ring /><span className="absolute -bottom-1 left-1/2 flex h-3.5 w-3.5 -translate-x-1/2 items-center justify-center rounded-full bg-[#ff2d55] text-[10px] font-bold text-white">+</span></div>
+        <RailAction icon={isYouTube ? <ThumbsUp className="h-5 w-5" /> : <Heart className="h-5 w-5" />} label="12.4K" />
+        {isYouTube && <RailAction icon={<ThumbsDown className="h-5 w-5" />} label="Dislike" />}
+        <RailAction icon={<MessageCircle className="h-5 w-5" />} label="328" />
+        {!isYouTube && <RailAction icon={<Bookmark className="h-5 w-5" />} label="1,208" />}
+        <RailAction icon={isInstagram ? <Send className="h-5 w-5" /> : <Share2 className="h-5 w-5" />} label="Share" />
+        {isTikTok && <span className="mt-1 flex h-9 w-9 items-center justify-center rounded-full bg-[#171717] ring-4 ring-[#252525]"><Music2 className="h-4 w-4 text-white" /></span>}
+      </div>
+
+      <div className="absolute inset-x-0 bottom-[7%] z-20 px-3 pr-14 text-white drop-shadow-md">
+        <div className="mb-1 flex items-center gap-2 text-[11px] font-bold">
+          <span>@clipper</span>
+          {!isYouTube && <span className="rounded border border-white/80 px-1.5 py-0.5 text-[9px]">Follow</span>}
+          {isYouTube && <span className="rounded-full bg-white px-2 py-1 text-[9px] text-black">Subscribe</span>}
+        </div>
+        <p className="line-clamp-2 text-[10px] font-medium leading-relaxed">{isYouTube ? title : caption}</p>
+        <p className="mt-0.5 truncate text-[10px] font-semibold">{hashtags.join(" ")}</p>
+        {!isYouTube && (
+          <p className="mt-1 flex items-center gap-1 truncate text-[9px]"><Music2 className="h-3 w-3" /> Original audio · Clipper</p>
+        )}
+      </div>
+
+      <div className="absolute inset-x-0 bottom-0 z-20 h-[7%] bg-black/95 px-4 text-white">
+        <div className="flex h-full items-center justify-around">
+          <Home className="h-4 w-4" />
+          {isTikTok ? <Search className="h-4 w-4" /> : isYouTube ? <span className="text-[9px] font-bold">Shorts</span> : <MessageCircle className="h-4 w-4" />}
+          <span className={cn("flex h-5 w-8 items-center justify-center rounded-md", isTikTok ? "bg-white text-black shadow-[-3px_0_0_#25f4ee,3px_0_0_#fe2c55]" : "border border-white")}><Plus className="h-3.5 w-3.5" /></span>
+          <User className="h-4 w-4" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InstagramFeedPreview({
+  title,
+  caption,
+  hashtags,
+  children,
+  lookPresetId,
+  frameUrl,
+  includeCaptions,
+  captionCue,
+  captionTime,
+  captionAppearance,
+}: Omit<Parameters<typeof VerticalPlatformPreview>[0], "platform">) {
+  return (
+    <div className="w-[min(100%,410px)] overflow-hidden rounded-[1.7rem] border-[6px] border-[#191919] bg-black text-white shadow-[0_28px_80px_rgba(0,0,0,0.58)] ring-1 ring-white/10">
+      <div className="flex h-12 items-center justify-between border-b border-white/10 px-3">
+        <div className="flex items-center gap-2"><PreviewAvatar /><div><p className="text-[11px] font-bold">clipper</p><p className="text-[8px] text-white/60">Original audio</p></div></div>
+        <MoreHorizontal className="h-5 w-5" />
+      </div>
+      <PreviewMedia lookPresetId={lookPresetId} frameUrl={frameUrl} includeCaptions={includeCaptions} captionCue={captionCue} captionTime={captionTime} captionAppearance={captionAppearance} captionSafeZone={PLATFORM_SAFE_ZONES.instagram_feed} className="aspect-[4/5] w-full">
+        {children}
+      </PreviewMedia>
+      <div className="space-y-2.5 px-3 pb-4 pt-3">
+        <div className="flex items-center justify-between"><div className="flex gap-4"><Heart className="h-5 w-5" /><MessageCircle className="h-5 w-5" /><Send className="h-5 w-5" /></div><Bookmark className="h-5 w-5" /></div>
+        <p className="text-[11px] font-bold">12,428 likes</p>
+        <p className="text-[11px] leading-relaxed"><span className="mr-1 font-bold">clipper</span>{caption} <span className="font-semibold text-[#a8b7ca]">{hashtags.join(" ")}</span></p>
+        <p className="text-[10px] text-white/50">View all 328 comments</p>
+        <p className="text-[9px] uppercase tracking-wide text-white/40">2 minutes ago</p>
+        <p className="sr-only">{title}</p>
+      </div>
+    </div>
+  );
+}
+
+function XPostPreview({
+  title,
+  postText,
+  hashtags,
+  children,
+  lookPresetId,
+  frameUrl,
+  includeCaptions,
+  captionCue,
+  captionTime,
+  captionAppearance,
+}: Omit<Parameters<typeof VerticalPlatformPreview>[0], "platform">) {
+  return (
+    <div className="w-full max-w-[620px] rounded-2xl border border-[#2f3336] bg-black p-4 text-white shadow-[0_22px_65px_rgba(0,0,0,0.45)]">
+      <div className="flex gap-3">
+        <PreviewAvatar size="lg" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1 text-[13px]"><span className="font-bold">Clipper</span><span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-[#1d9bf0] text-[8px] font-black">✓</span><span className="text-[#71767b]">@clipper · 2m</span><MoreHorizontal className="ml-auto h-5 w-5 text-[#71767b]" /></div>
+          <p className="mt-1 text-[14px] leading-relaxed">{postText || title} <span className="text-[#1d9bf0]">{hashtags.join(" ")}</span></p>
+          <PreviewMedia lookPresetId={lookPresetId} frameUrl={frameUrl} includeCaptions={includeCaptions} captionCue={captionCue} captionTime={captionTime} captionAppearance={captionAppearance} captionSafeZone={PLATFORM_SAFE_ZONES.x} className="mt-3 aspect-video w-full rounded-2xl border border-[#2f3336]">
+            {children}
+          </PreviewMedia>
+          <div className="mt-3 flex items-center justify-between pr-5 text-[#71767b]">
+            <span className="flex items-center gap-1.5 text-[11px]"><MessageCircle className="h-4 w-4" />328</span>
+            <span className="flex items-center gap-1.5 text-[11px]"><Repeat2 className="h-4 w-4" />1.8K</span>
+            <span className="flex items-center gap-1.5 text-[11px]"><Heart className="h-4 w-4" />12K</span>
+            <span className="flex items-center gap-1.5 text-[11px]"><Share2 className="h-4 w-4" /></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function YouTubeWatchPreview({
+  title,
+  description,
+  hashtags,
+  pinnedComment,
+  children,
+  lookPresetId,
+  frameUrl,
+  includeCaptions,
+  captionCue,
+  captionTime,
+  captionAppearance,
+}: Omit<Parameters<typeof VerticalPlatformPreview>[0], "platform">) {
+  return (
+    <div className="w-full max-w-[760px] overflow-hidden rounded-2xl border border-[#303030] bg-[#0f0f0f] text-white shadow-[0_24px_70px_rgba(0,0,0,0.5)]">
+      <div className="flex h-12 items-center justify-between px-4"><div className="flex items-center gap-3"><Menu className="h-5 w-5" /><span className="text-base font-black tracking-[-0.04em]"><span className="mr-1 rounded bg-[#ff0033] px-1.5 py-0.5 text-[10px]">▶</span>YouTube</span></div><div className="flex items-center gap-4"><Search className="h-5 w-5" /><Bell className="h-5 w-5" /><PreviewAvatar size="sm" /></div></div>
+      <PreviewMedia lookPresetId={lookPresetId} frameUrl={frameUrl} includeCaptions={includeCaptions} captionCue={captionCue} captionTime={captionTime} captionAppearance={captionAppearance} captionSafeZone={PLATFORM_SAFE_ZONES.youtube_landscape} className="aspect-video w-full">
+        {children}
+      </PreviewMedia>
+      <div className="space-y-3 p-4">
+        <h4 className="text-base font-bold leading-snug">{title}</h4>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2"><PreviewAvatar size="lg" /><div><p className="text-xs font-bold">Clipper</p><p className="text-[9px] text-white/55">48.2K subscribers</p></div><span className="ml-2 rounded-full bg-white px-3 py-1.5 text-[10px] font-bold text-black">Subscribe</span></div>
+          <div className="flex gap-2"><span className="flex items-center gap-1 rounded-full bg-[#272727] px-3 py-1.5 text-[10px] font-semibold"><ThumbsUp className="h-4 w-4" />12K</span><span className="flex items-center gap-1 rounded-full bg-[#272727] px-3 py-1.5 text-[10px] font-semibold"><Share2 className="h-4 w-4" />Share</span></div>
+        </div>
+        <div className="rounded-xl bg-[#272727] p-3 text-[11px] leading-relaxed"><p className="font-bold">18K views · 2 minutes ago</p><p className="mt-1 line-clamp-2">{description} <span className="text-[#3ea6ff]">{hashtags.join(" ")}</span></p></div>
+        <div className="flex items-start gap-2"><PreviewAvatar size="sm" /><div><p className="text-[9px] font-semibold text-white/55">Pinned by Clipper</p><p className="text-[11px]">{pinnedComment || "What was your favorite part?"}</p></div></div>
+      </div>
+    </div>
+  );
+}
+
 export function PlatformPhoneFrame({
   platform,
   children,
   lookPresetId,
   frameUrl,
   includeCaptions,
+  captionCue,
+  captionTime,
+  captionAppearance,
+  copy,
 }: {
   platform: PlatformKey;
   children?: ReactNode;
   lookPresetId: ContentLookPresetId;
   frameUrl: string | null;
   includeCaptions: boolean;
+  captionCue: CaptionCue | null;
+  captionTime: number;
+  captionAppearance: CaptionAppearance;
+  copy: PlatformCopy;
 }) {
   const meta = PLATFORM_PRESETS[platform];
   const output = meta.outputs[0]!;
-  const safe = PLATFORM_SAFE_ZONES[platform];
-  const [w, h] = output.aspectRatio.split(":").map(Number);
-  const aspect = w && h ? `${w} / ${h}` : "9 / 16";
-  const isVertical = (h ?? 16) >= (w ?? 9);
   const lookLabel = getContentLookPreset(lookPresetId).label;
+  const details: PlatformPreviewDetails = {
+    title: copy.title ?? "The moment everyone missed live",
+    caption:
+      copy.caption ??
+      "A standout moment from the stream, clipped while it was happening.",
+    postText: copy.postText ?? "",
+    description: copy.description ?? copy.caption ?? "",
+    hashtags: copy.hashtags,
+    pinnedComment: copy.pinnedComment ?? "",
+    captionCue,
+    captionTime,
+    captionAppearance,
+  };
+
+  const shared = {
+    ...details,
+    children,
+    lookPresetId,
+    frameUrl,
+    includeCaptions,
+  };
+
+  let preview: ReactNode;
+  if (
+    platform === "youtube_shorts" ||
+    platform === "tiktok" ||
+    platform === "instagram_reels" ||
+    platform === "facebook_reels"
+  ) {
+    preview = <VerticalPlatformPreview platform={platform} {...shared} />;
+  } else if (platform === "instagram_feed") {
+    preview = <InstagramFeedPreview {...shared} />;
+  } else if (platform === "x") {
+    preview = <XPostPreview {...shared} />;
+  } else {
+    preview = <YouTubeWatchPreview {...shared} />;
+  }
 
   return (
-    <div className="flex flex-col items-center gap-3">
-      <div
-        className={cn(
-          "relative overflow-hidden bg-black shadow-[0_24px_70px_rgba(0,0,0,0.6)]",
-          isVertical
-            ? "w-[min(100%,280px)] rounded-[2.1rem] border-[8px] border-[#121412]"
-            : "w-[min(100%,520px)] rounded-2xl border-[6px] border-[#121412]"
-        )}
-        style={{ aspectRatio: aspect }}
-      >
-        {isVertical && (
-          <div className="pointer-events-none absolute left-1/2 top-2 z-20 h-5 w-24 -translate-x-1/2 rounded-full bg-[#0a0c0a]" />
-        )}
-
-        <div className="absolute inset-0">
-          {children ?? (
-            <LookLayoutMock
-              presetId={lookPresetId}
-              frameUrl={frameUrl}
-              className="h-full w-full rounded-none border-0"
-            />
-          )}
-        </div>
-
-        <div className="pointer-events-none absolute inset-0 z-10 bg-gradient-to-b from-black/45 via-transparent to-black/50" />
-        <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center justify-between px-4 pt-3.5 text-[11px] font-medium text-white/90">
-          <span className="font-semibold tracking-wide">
-            {PLATFORM_SHORT[platform] ?? meta.name}
-          </span>
-          <span className="rounded-full bg-white/15 px-2 py-0.5 text-[10px] backdrop-blur-sm">
-            {lookLabel}
-          </span>
-        </div>
-
-        {isVertical &&
-          (platform === "tiktok" ||
-            platform === "instagram_reels" ||
-            platform === "youtube_shorts") && (
-            <div className="pointer-events-none absolute bottom-[22%] right-3 z-10 flex flex-col items-center gap-3">
-              {[1, 2, 3].map((i) => (
-                <div
-                  key={i}
-                  className="h-8 w-8 rounded-full bg-white/20 backdrop-blur-sm"
-                />
-              ))}
-            </div>
-          )}
-
-        {includeCaptions && (
-          <div
-            className="pointer-events-none absolute inset-x-5 z-10 text-center"
-            style={{
-              bottom: `${Math.max(12, safe.subtitleBottomPercent - 2)}%`,
-            }}
-          >
-            <span className="inline-block rounded-md bg-black/60 px-2.5 py-1 text-[11px] font-semibold leading-snug text-white shadow-lg backdrop-blur-sm">
-              Caption lands here
-            </span>
-          </div>
-        )}
-
-        {isVertical && (
-          <div className="pointer-events-none absolute bottom-2.5 left-1/2 z-10 h-1 w-28 -translate-x-1/2 rounded-full bg-white/40" />
-        )}
+    <div className="flex w-full flex-col items-center gap-3">
+      {preview}
+      <div className="flex flex-wrap items-center justify-center gap-2 text-[10px] text-[var(--color-muted)]">
+        <span className="rounded-full border border-[var(--color-card-border)] bg-[var(--color-card)] px-2.5 py-1 font-semibold text-[var(--color-foreground)]">{meta.name}</span>
+        <span>{output.aspectRatio} · {output.width}×{output.height}</span>
+        <span>·</span>
+        <span>{lookLabel} look</span>
       </div>
-      <p className="text-[11px] text-[var(--color-muted)]">
-        {meta.name} · {output.aspectRatio}
-      </p>
     </div>
   );
 }
@@ -483,7 +859,7 @@ export function PlatformChipRow({
   onChange: (key: PlatformKey) => void;
 }) {
   return (
-    <div className="flex justify-center gap-1.5 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+    <div className="flex w-full justify-start gap-1.5 overflow-x-auto px-0.5 pb-1 sm:justify-center [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       {platforms.map((key) => {
         const active = value === key;
         return (
@@ -494,8 +870,8 @@ export function PlatformChipRow({
             className={cn(
               "shrink-0 rounded-full px-3.5 py-1.5 text-xs font-semibold transition",
               active
-                ? "bg-[var(--color-accent)] text-black shadow-[0_0_0_1px_var(--color-accent)]"
-                : "bg-[#141814] text-[var(--color-muted)] hover:bg-[#1a1f1a] hover:text-white"
+                ? "bg-[var(--color-accent)] text-[var(--color-accent-foreground)] shadow-[0_0_0_1px_var(--color-accent)]"
+                : "bg-[var(--color-secondary)] text-[var(--color-muted)] hover:bg-[var(--color-card)] hover:text-[var(--color-foreground)]"
             )}
           >
             {PLATFORM_SHORT[key] ?? PLATFORM_PRESETS[key].name}

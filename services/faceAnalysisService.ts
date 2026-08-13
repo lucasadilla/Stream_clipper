@@ -1,5 +1,6 @@
 import path from "path";
 import { spawn } from "child_process";
+import { existsSync } from "fs";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { toJsonValue } from "@/lib/utils";
@@ -52,6 +53,13 @@ function analysisTimeoutMs(): number {
 function pythonExecutable(): string {
   const configured = process.env.FACECAM_PYTHON?.trim();
   if (configured) return configured;
+
+  const projectPython =
+    process.platform === "win32"
+      ? path.resolve(process.cwd(), ".venv", "Scripts", "python.exe")
+      : path.resolve(process.cwd(), ".venv", "bin", "python3");
+  if (existsSync(projectPython)) return projectPython;
+
   return process.platform === "win32" ? "python" : "python3";
 }
 

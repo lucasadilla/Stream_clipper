@@ -32,6 +32,8 @@ export interface CaptionAppearance {
   italic: boolean;
   capitalization: CaptionCapitalization;
   karaokeEnabled: boolean;
+  /** Automatically bold/color the most meaningful word in each cue. */
+  smartEmphasisEnabled: boolean;
   /** Active karaoke word color. */
   highlightColor: string;
   animation: CaptionAnimation;
@@ -73,6 +75,7 @@ export const DEFAULT_CAPTION_APPEARANCE: CaptionAppearance = {
   italic: false,
   capitalization: "none",
   karaokeEnabled: true,
+  smartEmphasisEnabled: true,
   highlightColor: "#FFFF00",
   animation: "pop",
 };
@@ -177,6 +180,10 @@ export function normalizeCaptionAppearance(
       typeof input?.karaokeEnabled === "boolean"
         ? input.karaokeEnabled
         : DEFAULT_CAPTION_APPEARANCE.karaokeEnabled,
+    smartEmphasisEnabled:
+      typeof input?.smartEmphasisEnabled === "boolean"
+        ? input.smartEmphasisEnabled
+        : DEFAULT_CAPTION_APPEARANCE.smartEmphasisEnabled,
     highlightColor:
       normalizeHexColor(input?.highlightColor) ??
       DEFAULT_CAPTION_APPEARANCE.highlightColor,
@@ -206,6 +213,20 @@ export function applyCaptionCapitalization(
       );
     default:
       return text;
+  }
+}
+
+/** Shared cue entrance animation class for every live caption preview. */
+export function captionAnimationClass(animation: CaptionAnimation): string {
+  switch (animation) {
+    case "fade":
+      return "caption-anim-fade";
+    case "pop":
+      return "caption-anim-pop";
+    case "slideUp":
+      return "caption-anim-slide-up";
+    default:
+      return "";
   }
 }
 

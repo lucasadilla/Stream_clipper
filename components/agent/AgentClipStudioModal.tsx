@@ -1,19 +1,41 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type SyntheticEvent,
+} from "react";
 import { createPortal } from "react-dom";
-import { X } from "lucide-react";
+import { Pause, Play, RotateCcw, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/button";
 import { AgentClipEditor } from "@/components/agent/AgentClipEditor";
 import {
   LookLayoutMock,
   LookPresetGlyph,
+  LookVideoStage,
   PlatformChipRow,
   PlatformPhoneFrame,
 } from "@/components/agent/AgentStudioPreviews";
+import { PlatformCopyEditor } from "@/components/agent/PlatformCopyEditor";
 import type { ClipSuggestionData } from "@/components/ClipSuggestionCard";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
+import {
+  applyCaptionEdits,
+  type CaptionEditsMap,
+} from "@/lib/captionEdits";
+import {
+  buildCaptionTrack,
+  lookupCueAtTime,
+  type TranscriptChunkInput,
+} from "@/lib/captionTrack";
+import {
+  activeDynamicPunchEvent,
+  buildDynamicPunchEvents,
+} from "@/lib/captionEmphasis";
 import {
   CONTENT_LOOK_PRESETS,
   getContentLookPreset,
@@ -25,8 +47,12 @@ import {
   type VerticalLayoutSelection,
 } from "@/components/VerticalLayoutPicker";
 import { PLATFORM_PRESETS } from "@/lib/platforms/presets";
-import type { PlatformKey } from "@/lib/platforms/types";
-import type { SocialPlatform } from "@/lib/social/types";
+import type { PlatformCopy, PlatformKey } from "@/lib/platforms/types";
+import {
+  emptySocialContent,
+  type SocialGeneratedContent,
+  type SocialPlatform,
+} from "@/lib/social/types";
 import { renderClip } from "@/lib/clipActions";
 import { triggerFileDownload } from "@/lib/clientDownload";
 import { clipThumbnailApiUrl } from "@/lib/downloadUrls";
@@ -56,6 +82,72 @@ const EXPORT_TO_SOCIAL: Partial<Record<PlatformKey, SocialPlatform>> = {
   x: "x",
 };
 
+const DEFAULT_PLATFORM_HASHTAGS: Record<PlatformKey, string[]> = {
+  youtube_shorts: ["#Shorts", "#LiveStream", "#Clipper"],
+  youtube_landscape: ["#LiveStream", "#Highlights"],
+  tiktok: ["#streamtok", "#gaming", "#fyp"],
+  instagram_reels: ["#reels", "#livestream", "#creator"],
+  instagram_feed: ["#livestream", "#highlights", "#creator"],
+  facebook_reels: ["#Reels", "#LiveStream"],
+  facebook_feed: ["#LiveStream", "#Highlights"],
+  x: ["#LiveStream"],
+};
+
+function platformCopyForClip(
+  platform: PlatformKey,
+  clip: Pick<ClipSuggestionData, "title" | "reason">
+): PlatformCopy {
+  const isYouTube =
+    platform === "youtube_shorts" || platform === "youtube_landscape";
+  const title = clip.title.slice(0, PLATFORM_PRESETS[platform].titleLimit ?? 100);
+  return {
+    title,
+    caption: platform === "x" ? null : clip.reason,
+    postText:
+      platform === "x"
+        ? `${clip.title} — ${clip.reason}`.slice(0, 280)
+        : null,
+    description: isYouTube
+      ? `${clip.reason}\n\nClipped from the livestream while it happened.`
+      : null,
+    hashtags: [...DEFAULT_PLATFORM_HASHTAGS[platform]],
+    tags: isYouTube ? ["livestream", "highlights", "clipper"] : [],
+    quoteText: clip.reason.slice(0, 120),
+    thumbnailText: isYouTube
+      ? title.split(/\s+/).slice(0, 6).join(" ").toUpperCase()
+      : null,
+    pinnedComment: isYouTube ? "What would you have done here?" : null,
+  };
+}
+
+function platformCopiesForClip(
+  clip: Pick<ClipSuggestionData, "title" | "reason">
+): Record<PlatformKey, PlatformCopy> {
+  return Object.fromEntries(
+    (Object.keys(PLATFORM_PRESETS) as PlatformKey[]).map((platform) => [
+      platform,
+      platformCopyForClip(platform, clip),
+    ])
+  ) as Record<PlatformKey, PlatformCopy>;
+}
+
+function socialContentFromCopy(
+  platform: SocialPlatform,
+  copy: PlatformCopy
+): SocialGeneratedContent {
+  return {
+    ...emptySocialContent(platform),
+    title: copy.title ?? "",
+    caption: copy.caption ?? "",
+    description: copy.description ?? "",
+    postText: copy.postText ?? copy.caption ?? "",
+    hashtags: copy.hashtags,
+    tags: copy.tags,
+    thumbnailText: copy.thumbnailText ?? "",
+    pinnedComment: copy.pinnedComment ?? "",
+  };
+}
+
 interface SocialAccount {
   id: string;
   platform: SocialPlatform;
@@ -72,8 +164,10 @@ interface AgentClipStudioModalProps {
   playbackUrl: string | null;
   sourceDuration: number;
   includeCaptions: boolean;
+  dynamicPunchInEnabled: boolean;
   captionAppearance: CaptionAppearance;
   onIncludeCaptionsChange: (value: boolean) => void;
+  onDynamicPunchInChange: (value: boolean) => void;
   onCaptionAppearanceChange: (value: CaptionAppearance) => void;
   onClipChange: (clip: ClipSuggestionData) => void;
   onClose: () => void;
@@ -114,8 +208,10 @@ export function AgentClipStudioModal({
   playbackUrl,
   sourceDuration,
   includeCaptions,
+  dynamicPunchInEnabled,
   captionAppearance,
   onIncludeCaptionsChange,
+  onDynamicPunchInChange,
   onCaptionAppearanceChange,
   onClipChange,
   onClose,
@@ -144,6 +240,17 @@ export function AgentClipStudioModal({
   const onCloseRef = useRef(onClose);
   const [previewPlatform, setPreviewPlatform] =
     useState<PlatformKey>("youtube_shorts");
+  const [platformCopies, setPlatformCopies] = useState<
+    Record<PlatformKey, PlatformCopy>
+  >(() => platformCopiesForClip(clip));
+  const platformVideoRef = useRef<HTMLVideoElement>(null);
+  const [previewTime, setPreviewTime] = useState(clip.startTimeSeconds);
+  const [previewPlaying, setPreviewPlaying] = useState(false);
+  const [platformCaptionChunks, setPlatformCaptionChunks] = useState<
+    TranscriptChunkInput[]
+  >([]);
+  const [platformCaptionEdits, setPlatformCaptionEdits] =
+    useState<CaptionEditsMap>({});
   const [selectedPlatforms, setSelectedPlatforms] = useState<PlatformKey[]>([
     "youtube_shorts",
     "tiktok",
@@ -191,6 +298,9 @@ export function AgentClipStudioModal({
     setDownloadUrl(null);
     setActionError(null);
     setActionOk(null);
+    setPlatformCopies(platformCopiesForClip(clip));
+    setPreviewTime(clip.startTimeSeconds);
+    setPreviewPlaying(false);
     setLookPreset("auto");
     setFaceJobId(null);
     setFaceRect(null);
@@ -394,10 +504,70 @@ export function AgentClipStudioModal({
     });
   }, [open]);
 
+  useEffect(() => {
+    if (!open || tab !== "preview") return;
+    let cancelled = false;
+    setPlatformCaptionChunks([]);
+    setPlatformCaptionEdits({});
+    void (async () => {
+      const [events, captions] = await Promise.all([
+        fetchJson<{ transcriptChunks?: TranscriptChunkInput[] }>(
+          `/api/sessions/${sessionId}/events`
+        ),
+        fetchJson<{ edits?: CaptionEditsMap }>(
+          `/api/sessions/${sessionId}/captions`
+        ),
+      ]);
+      if (cancelled) return;
+      if (events.ok) {
+        setPlatformCaptionChunks(events.data.transcriptChunks ?? []);
+      }
+      if (captions.ok) {
+        setPlatformCaptionEdits(captions.data.edits ?? {});
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, sessionId, tab]);
+
   const previewMeta = PLATFORM_PRESETS[previewPlatform];
   const thumbUrl = clipThumbnailApiUrl(clip.id);
 
   const duration = clip.endTimeSeconds - clip.startTimeSeconds;
+  const activePlatformCopy = platformCopies[previewPlatform];
+  const previewElapsed = Math.max(
+    0,
+    Math.min(duration, previewTime - clip.startTimeSeconds)
+  );
+  const platformCaptionCues = useMemo(() => {
+    const track = buildCaptionTrack(platformCaptionChunks, "vertical");
+    return applyCaptionEdits(track, platformCaptionEdits).filter(
+      (cue) =>
+        cue.endTimeSeconds > clip.startTimeSeconds &&
+        cue.startTimeSeconds < clip.endTimeSeconds
+    );
+  }, [
+    platformCaptionChunks,
+    platformCaptionEdits,
+    clip.startTimeSeconds,
+    clip.endTimeSeconds,
+  ]);
+  const activePlatformCaptionCue = useMemo(
+    () => lookupCueAtTime(platformCaptionCues, previewTime),
+    [platformCaptionCues, previewTime]
+  );
+  const platformPunchEvents = useMemo(
+    () => buildDynamicPunchEvents(platformCaptionCues),
+    [platformCaptionCues]
+  );
+  const activePlatformPunch = useMemo(
+    () =>
+      dynamicPunchInEnabled
+        ? activeDynamicPunchEvent(platformPunchEvents, previewTime)
+        : null,
+    [dynamicPunchInEnabled, platformPunchEvents, previewTime]
+  );
   const durationHint = useMemo(() => {
     const rec = previewMeta.recommendedDuration;
     if (!rec) return null;
@@ -407,6 +577,78 @@ export function AgentClipStudioModal({
       return `A bit long for ${previewMeta.name} — aim ≤${rec.max}s`;
     return `Nice length for ${previewMeta.name}`;
   }, [duration, previewMeta]);
+
+  const updatePlatformCopy = (next: PlatformCopy) => {
+    setPlatformCopies((current) => ({
+      ...current,
+      [previewPlatform]: next,
+    }));
+  };
+
+  const resetPlatformCopy = () => {
+    setPlatformCopies((current) => ({
+      ...current,
+      [previewPlatform]: platformCopyForClip(previewPlatform, clip),
+    }));
+  };
+
+  const resetPreviewPlayback = () => {
+    const video = platformVideoRef.current;
+    if (video) {
+      video.pause();
+      try {
+        video.currentTime = clip.startTimeSeconds;
+      } catch {
+        // Metadata may still be loading; the next play will seek correctly.
+      }
+    }
+    setPreviewPlaying(false);
+    setPreviewTime(clip.startTimeSeconds);
+  };
+
+  const togglePreviewPlayback = () => {
+    const video = platformVideoRef.current;
+    if (!video) return;
+    if (!video.paused) {
+      video.pause();
+      return;
+    }
+    const play = () => {
+      if (
+        video.currentTime < clip.startTimeSeconds - 0.1 ||
+        video.currentTime >= clip.endTimeSeconds - 0.05
+      ) {
+        video.currentTime = clip.startTimeSeconds;
+      }
+      void video.play().catch(() => setPreviewPlaying(false));
+    };
+    if (video.readyState < 1) {
+      video.addEventListener("loadedmetadata", play, { once: true });
+      video.load();
+    } else {
+      play();
+    }
+  };
+
+  const onPlatformPreviewTimeUpdate = (
+    event: SyntheticEvent<HTMLVideoElement>
+  ) => {
+    const video = event.currentTarget;
+    const time = video.currentTime;
+    if (time < clip.startTimeSeconds - 0.15) {
+      video.currentTime = clip.startTimeSeconds;
+      setPreviewTime(clip.startTimeSeconds);
+      return;
+    }
+    if (time >= clip.endTimeSeconds) {
+      video.pause();
+      video.currentTime = clip.startTimeSeconds;
+      setPreviewTime(clip.startTimeSeconds);
+      setPreviewPlaying(false);
+      return;
+    }
+    setPreviewTime(time);
+  };
 
   const saveLayout = useCallback(
     async (presetId: ContentLookPresetId, jobId: string | null) => {
@@ -477,7 +719,8 @@ export function AgentClipStudioModal({
         (u) => setRenderProgress(u.progress),
         undefined,
         undefined,
-        selection
+        selection,
+        dynamicPunchInEnabled
       );
       setDownloadUrl(result.downloadUrl);
       await triggerFileDownload(
@@ -512,7 +755,8 @@ export function AgentClipStudioModal({
         (u) => setRenderProgress(u.progress),
         undefined,
         undefined,
-        selection
+        selection,
+        dynamicPunchInEnabled
       );
       setDownloadUrl(result.downloadUrl);
       onClipChange({ ...clip, status: "rendered" });
@@ -545,6 +789,7 @@ export function AgentClipStudioModal({
           includeCaptions,
           burnSubtitles: includeCaptions,
           generateCopy: true,
+          copyOverrides: platformCopies,
         }),
       });
       const body = await res.json();
@@ -591,6 +836,7 @@ export function AgentClipStudioModal({
             includeCaptions,
             burnSubtitles: includeCaptions,
             generateCopy: true,
+            copyOverrides: platformCopies,
           }),
         }).catch(() => null);
       }
@@ -599,9 +845,38 @@ export function AgentClipStudioModal({
         .map((accountId) => {
           const account = accounts.find((a) => a.id === accountId);
           if (!account) return null;
+          const platformKey =
+            selectedPlatforms.find(
+              (candidate) => EXPORT_TO_SOCIAL[candidate] === account.platform
+            ) ??
+            PREVIEW_PLATFORMS.find(
+              (candidate) => EXPORT_TO_SOCIAL[candidate] === account.platform
+            );
+          const copy = platformKey ? platformCopies[platformKey] : null;
           return {
             connectedSocialAccountId: accountId,
             platform: account.platform,
+            settings: {
+              ...(account.platform === "youtube"
+                ? {
+                    youtubeFormat:
+                      platformKey === "youtube_landscape"
+                        ? ("standard" as const)
+                        : ("shorts" as const),
+                  }
+                : {}),
+              ...(account.platform === "facebook"
+                ? {
+                    facebookFormat:
+                      platformKey === "facebook_feed"
+                        ? ("page_video" as const)
+                        : ("reel" as const),
+                  }
+                : {}),
+            },
+            content: copy
+              ? socialContentFromCopy(account.platform, copy)
+              : undefined,
           };
         })
         .filter(Boolean);
@@ -638,7 +913,7 @@ export function AgentClipStudioModal({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[2147483000] bg-black/80"
+      className="editor-shell fixed inset-0 z-[2147483000] bg-black/80 text-[var(--color-foreground)]"
       role="dialog"
       aria-modal="true"
       aria-label="Edit clip"
@@ -657,7 +932,7 @@ export function AgentClipStudioModal({
           >
             <header className="sticky top-0 z-20 flex shrink-0 items-start justify-between gap-3 border-b border-[var(--color-card-border)] bg-[var(--color-background)] px-4 py-3 sm:px-5">
               <div className="min-w-0">
-                <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8f9b89]">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">
                   Clip studio
                 </p>
                 <h2 className="truncate text-lg font-semibold">{clip.title}</h2>
@@ -670,7 +945,7 @@ export function AgentClipStudioModal({
               <button
                 type="button"
                 onClick={onClose}
-                className="rounded-lg p-2 text-[var(--color-muted)] hover:bg-[#141814] hover:text-white"
+                className="rounded-lg p-2 text-[var(--color-muted)] transition-colors hover:bg-[var(--color-secondary)] hover:text-[var(--color-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
                 aria-label="Close"
               >
                 <X className="h-5 w-5" />
@@ -692,8 +967,8 @@ export function AgentClipStudioModal({
                   className={cn(
                     "rounded-lg px-3 py-1.5 text-xs font-semibold",
                     tab === id
-                      ? "bg-[var(--color-accent)] text-black"
-                      : "text-[var(--color-muted)] hover:bg-[#141814] hover:text-white"
+                      ? "bg-[var(--color-accent)] text-[var(--color-accent-foreground)]"
+                      : "text-[var(--color-muted)] hover:bg-[var(--color-secondary)] hover:text-[var(--color-foreground)]"
                   )}
                 >
                   {label}
@@ -705,13 +980,13 @@ export function AgentClipStudioModal({
           {tab === "edit" && (
             <div className="space-y-5">
               <div>
-                <p className="mb-1 text-xs font-semibold uppercase tracking-[0.12em] text-[#8f9b89]">
+                <p className="mb-1 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--color-muted)]">
                   Look
                 </p>
                 <p className="mb-3 text-xs text-[var(--color-muted)]">
                   Tap to change — the preview updates instantly.
                 </p>
-                <div className="flex gap-2 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
                   {CONTENT_LOOK_PRESETS.map((preset) => {
                     const selected = lookPreset === preset.id;
                     return (
@@ -720,10 +995,10 @@ export function AgentClipStudioModal({
                         type="button"
                         onClick={() => selectLook(preset.id)}
                         className={cn(
-                          "flex w-[14.5rem] shrink-0 items-center gap-2.5 rounded-xl border px-2.5 py-2 text-left transition",
+                          "flex min-w-0 items-center gap-2.5 rounded-xl border bg-[var(--color-card)] px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]",
                           selected
                             ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 ring-1 ring-[var(--color-accent)]"
-                            : "border-[var(--color-card-border)] hover:border-[#4a5a48]"
+                            : "border-[var(--color-card-border)] hover:border-[var(--color-accent)]/60 hover:bg-[var(--color-secondary)]"
                         )}
                       >
                         <LookLayoutMock
@@ -773,6 +1048,8 @@ export function AgentClipStudioModal({
                 sourceDuration={sourceDuration}
                 includeCaptions={includeCaptions}
                 onIncludeCaptionsChange={onIncludeCaptionsChange}
+                dynamicPunchInEnabled={dynamicPunchInEnabled}
+                onDynamicPunchInChange={onDynamicPunchInChange}
                 captionAppearance={captionAppearance}
                 onCaptionAppearanceChange={onCaptionAppearanceChange}
                 onClipChange={onClipChange}
@@ -784,7 +1061,7 @@ export function AgentClipStudioModal({
           )}
 
           {tab === "preview" && (
-            <div className="mx-auto flex max-w-2xl flex-col items-center gap-5">
+            <div className="mx-auto flex max-w-6xl flex-col items-center gap-5">
               <div className="w-full space-y-1.5 text-center">
                 <h3 className="text-base font-semibold">Platform preview</h3>
                 <p className="text-xs text-[var(--color-muted)]">
@@ -796,21 +1073,95 @@ export function AgentClipStudioModal({
               <PlatformChipRow
                 platforms={PREVIEW_PLATFORMS}
                 value={previewPlatform}
-                onChange={setPreviewPlatform}
+                onChange={(platform) => {
+                  resetPreviewPlayback();
+                  setPreviewPlatform(platform);
+                }}
               />
 
-              <PlatformPhoneFrame
-                platform={previewPlatform}
-                lookPresetId={lookPreset}
-                frameUrl={thumbUrl}
-                includeCaptions={includeCaptions}
-              />
+              <div className="grid w-full items-start gap-5 lg:grid-cols-[minmax(0,1.55fr)_minmax(19rem,0.75fr)]">
+                <div className="min-w-0 space-y-3">
+                  <PlatformPhoneFrame
+                    platform={previewPlatform}
+                    lookPresetId={lookPreset}
+                    frameUrl={thumbUrl}
+                    includeCaptions={includeCaptions}
+                    captionCue={activePlatformCaptionCue}
+                    captionTime={previewTime}
+                    captionAppearance={captionAppearance}
+                    copy={activePlatformCopy}
+                  >
+                    {playbackUrl ? (
+                      <LookVideoStage
+                        presetId={lookPreset}
+                        playbackUrl={playbackUrl}
+                        videoRef={platformVideoRef}
+                        faceRect={faceRect}
+                        dynamicPunchActive={Boolean(activePlatformPunch)}
+                        className="h-full w-full rounded-none border-0"
+                        onTimeUpdate={onPlatformPreviewTimeUpdate}
+                        onPlay={() => setPreviewPlaying(true)}
+                        onPause={() => setPreviewPlaying(false)}
+                      />
+                    ) : undefined}
+                  </PlatformPhoneFrame>
 
-              {durationHint && (
-                <p className="text-center text-xs text-[var(--color-muted)]">
-                  {durationHint}
-                </p>
-              )}
+                  <div className="mx-auto w-full max-w-2xl rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-3">
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={togglePreviewPlayback}
+                        disabled={!playbackUrl}
+                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--color-accent)] text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-40"
+                        aria-label={previewPlaying ? "Pause platform preview" : "Play platform preview"}
+                      >
+                        {previewPlaying ? <Pause className="h-4 w-4" /> : <Play className="ml-0.5 h-4 w-4" />}
+                      </button>
+                      <input
+                        type="range"
+                        min={0}
+                        max={Math.max(0.1, duration)}
+                        step={0.05}
+                        value={previewElapsed}
+                        disabled={!playbackUrl}
+                        onChange={(event) => {
+                          const next = clip.startTimeSeconds + Number(event.target.value);
+                          setPreviewTime(next);
+                          if (platformVideoRef.current) {
+                            platformVideoRef.current.currentTime = next;
+                          }
+                        }}
+                        className="h-1.5 min-w-0 flex-1 cursor-pointer accent-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-40"
+                        aria-label="Platform preview playback position"
+                      />
+                      <span className="shrink-0 font-mono text-[10px] text-[var(--color-muted)]">
+                        {formatSeconds(previewElapsed)} / {formatSeconds(duration)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={resetPreviewPlayback}
+                        disabled={!playbackUrl}
+                        className="rounded-lg p-2 text-[var(--color-muted)] hover:bg-[var(--color-secondary)] hover:text-[var(--color-foreground)] disabled:opacity-40"
+                        aria-label="Restart platform preview"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-[var(--color-muted)]">
+                      <span>{playbackUrl ? "Watch the selected clip inside the final post frame." : "Preview video is not available yet."}</span>
+                      {durationHint && <span className="font-medium text-[var(--color-accent)]">{durationHint}</span>}
+                    </div>
+                  </div>
+                </div>
+
+                <PlatformCopyEditor
+                  key={previewPlatform}
+                  platform={previewPlatform}
+                  copy={activePlatformCopy}
+                  onChange={updatePlatformCopy}
+                  onReset={resetPlatformCopy}
+                />
+              </div>
 
               <Button
                 type="button"

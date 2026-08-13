@@ -154,6 +154,7 @@ export async function createPublishGroup(options: {
     platform: SocialPlatform;
     destinationId?: string | null;
     settings?: SocialPublishSettings;
+    content?: SocialGeneratedContent;
   }>;
 }) {
   if (!options.destinations.length) {
@@ -216,24 +217,26 @@ export async function createPublishGroup(options: {
       youtubeFormat: settings.youtubeFormat,
     });
 
-    let content = await generateSocialContent({
-      platform: dest.platform,
-      clipTitle: clip.title,
-      clipReason: clip.reason,
-      transcriptText: transcript,
-      streamTitle: clip.streamSession.title,
-      streamerName: clip.streamSession.channelTitle,
-      durationSeconds: clip.endTimeSeconds - clip.startTimeSeconds,
-      sourceUrl: clip.streamSession.youtubeUrl,
-      youtubeFormat: settings.youtubeFormat,
-      tone: prefs.tone,
-      emojiLevel: prefs.emojiLevel,
-      hashtagLevel: prefs.hashtagLevel,
-      includeSourceUrl: prefs.includeSourceUrl,
-      useTranscriptQuotes: prefs.useTranscriptQuotes,
-    });
+    let content = dest.content
+      ? asContent(dest.content, dest.platform)
+      : await generateSocialContent({
+          platform: dest.platform,
+          clipTitle: clip.title,
+          clipReason: clip.reason,
+          transcriptText: transcript,
+          streamTitle: clip.streamSession.title,
+          streamerName: clip.streamSession.channelTitle,
+          durationSeconds: clip.endTimeSeconds - clip.startTimeSeconds,
+          sourceUrl: clip.streamSession.youtubeUrl,
+          youtubeFormat: settings.youtubeFormat,
+          tone: prefs.tone,
+          emojiLevel: prefs.emojiLevel,
+          hashtagLevel: prefs.hashtagLevel,
+          includeSourceUrl: prefs.includeSourceUrl,
+          useTranscriptQuotes: prefs.useTranscriptQuotes,
+        });
 
-    if (prefs.defaultHashtags.length) {
+    if (!dest.content && prefs.defaultHashtags.length) {
       const merged = Array.from(
         new Set([...prefs.defaultHashtags, ...content.hashtags])
       );
