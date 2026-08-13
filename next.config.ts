@@ -6,7 +6,11 @@ const nextConfig: NextConfig = {
       bodySizeLimit: "500mb",
     },
   },
+  // Next.js 16 defaults to Turbopack; keep an explicit empty config so builds
+  // that use Turbopack don't fail solely because a webpack() hook exists.
+  turbopack: {},
   // Stop thumbnail/recording writes in ./storage from triggering hot reloads.
+  // Production builds use `next build --webpack` so this hook still applies.
   webpack: (config, { dev }) => {
     if (dev) {
       config.watchOptions = {
