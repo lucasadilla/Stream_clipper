@@ -7,6 +7,10 @@ import { getProviders, signIn, signOut } from "next-auth/react";
 import posthog from "posthog-js";
 import { fetchJson } from "@/lib/apiClient";
 import { cn } from "@/lib/cn";
+import {
+  authProviderBrand,
+  PlatformBrandIcon,
+} from "@/components/brand/PlatformBrandIcon";
 import type { BillingAccountSummary } from "@/services/billingService";
 
 type ProviderInfo = { id: string; name: string };
@@ -20,10 +24,8 @@ function LoginPageInner() {
   const [mode, setMode] = useState<Mode>("signin");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [emailSent, setEmailSent] = useState(false);
   const [account, setAccount] = useState<BillingAccountSummary | null>(null);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
-  const [emailEnabled, setEmailEnabled] = useState(false);
 
   const authError = searchParams.get("error");
 
@@ -32,11 +34,9 @@ function LoginPageInner() {
       try {
         const { data } = await fetchJson<{
           providers: ProviderInfo[];
-          emailEnabled: boolean;
         }>("/api/auth/configured-providers");
         if (data.providers?.length) {
           setProviders(data.providers);
-          setEmailEnabled(Boolean(data.emailEnabled));
           return;
         }
       } catch {
@@ -47,7 +47,6 @@ function LoginPageInner() {
         const configured = await getProviders();
         if (!configured) {
           setProviders([]);
-          setEmailEnabled(false);
           return;
         }
         const list = Object.values(configured)
@@ -60,10 +59,8 @@ function LoginPageInner() {
             name: provider.name,
           }));
         setProviders(list);
-        setEmailEnabled(list.some((provider) => provider.id === "resend"));
       } catch {
         setProviders([]);
-        setEmailEnabled(false);
       }
     })();
 
@@ -135,7 +132,6 @@ function LoginPageInner() {
     event.preventDefault();
     setLoading(true);
     setError(null);
-    setEmailSent(false);
     try {
       if (mode === "signup") {
         const { ok, data } = await fetchJson<{ error?: string }>(
@@ -171,33 +167,6 @@ function LoginPageInner() {
       await finishAuthSession();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function handleMagicLink() {
-    if (!emailEnabled) {
-      setError("Magic-link email is not configured.");
-      return;
-    }
-    if (!email.trim()) {
-      setError("Enter your email first");
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    setEmailSent(false);
-    try {
-      const result = await signIn("resend", {
-        email,
-        redirect: false,
-        callbackUrl: "/welcome",
-      });
-      if (result?.error) throw new Error(result.error);
-      setEmailSent(true);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not send email");
     } finally {
       setLoading(false);
     }
@@ -280,17 +249,19 @@ function LoginPageInner() {
                     AUTH_TWITCH_*, and/or AUTH_KICK_*.
                   </p>
                 )}
-                {oauthProviders.map((provider) => (
-                  <button
+                {oauthProviders.map((provider) => {
+                  const brand = authProviderBrand(provider.id);
+                  return <button
                     key={provider.id}
                     type="button"
                     disabled={loading}
                     onClick={() => void handleOAuth(provider.id)}
-                    className="inline-flex h-12 items-center justify-center border border-[var(--color-card-border)] px-4 text-sm font-semibold text-white transition-colors hover:border-[var(--color-accent)] disabled:opacity-50"
+                    className="relative inline-flex h-12 items-center justify-center gap-3 border border-[var(--color-card-border)] px-4 text-sm font-semibold text-white transition-colors hover:border-[var(--color-accent)] disabled:opacity-50"
                   >
+                    {brand ? <PlatformBrandIcon brand={brand} size="xs" /> : null}
                     Continue with {provider.name}
                   </button>
-                ))}
+                })}
               </div>
 
               <div className="relative py-1 text-center text-[10px] font-semibold uppercase tracking-[0.16em] text-[#5f6b5c]">
@@ -303,7 +274,6 @@ function LoginPageInner() {
                   onClick={() => {
                     setMode("signin");
                     setError(null);
-                    setEmailSent(false);
                   }}
                   className={cn(
                     "h-9 flex-1 text-xs font-semibold uppercase tracking-wide",
@@ -319,7 +289,6 @@ function LoginPageInner() {
                   onClick={() => {
                     setMode("signup");
                     setError(null);
-                    setEmailSent(false);
                   }}
                   className={cn(
                     "h-9 flex-1 text-xs font-semibold uppercase tracking-wide",
@@ -377,11 +346,6 @@ function LoginPageInner() {
                   />
                 </label>
 
-                {emailSent && (
-                  <p className="text-sm text-[var(--color-accent)]">
-                    Check your inbox for a magic sign-in link.
-                  </p>
-                )}
                 {error && (
                   <p className="text-sm text-[var(--color-danger)]">{error}</p>
                 )}
@@ -398,17 +362,6 @@ function LoginPageInner() {
                       : "Sign in"}
                 </button>
               </form>
-
-              {emailEnabled && (
-                <button
-                  type="button"
-                  disabled={loading}
-                  onClick={() => void handleMagicLink()}
-                  className="w-full text-center text-xs text-[var(--color-muted)] underline-offset-2 hover:text-[var(--color-accent)] hover:underline disabled:opacity-50"
-                >
-                  Email me a magic link instead
-                </button>
-              )}
 
               <p className="text-xs leading-5 text-[var(--color-muted)]">
                 Prefer plans first?{" "}

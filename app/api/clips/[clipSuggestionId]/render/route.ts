@@ -110,9 +110,6 @@ export async function POST(
     );
     const preview =
       (body as { preview?: unknown }).preview === true && format === "vertical";
-    const dynamicPunchIn =
-      format === "vertical" &&
-      (body as { dynamicPunchIn?: unknown }).dynamicPunchIn === true;
 
     const clip = await prisma.clipSuggestion.findUnique({
       where: { id: clipSuggestionId },
@@ -179,7 +176,6 @@ export async function POST(
       captionCues,
       editorState,
       verticalLayout: verticalLayout ?? undefined,
-      dynamicPunchIn,
       preview,
     };
 
@@ -213,7 +209,6 @@ export async function POST(
           duration_seconds: outputDuration,
           segment_count: editorState.segments.length || 1,
           include_captions: includeCaptions,
-          dynamic_punch_in: dynamicPunchIn,
         },
       });
     }

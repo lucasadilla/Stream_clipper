@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { ExportResultPayload } from "@/components/platform-export/types";
+import { PlatformBrandIcon } from "@/components/brand/PlatformBrandIcon";
 
 function formatBytes(value: string | null): string {
   const bytes = Number(value ?? 0);
@@ -99,11 +100,14 @@ export function PlatformExportResult({
         </div>
         <div className="min-w-0 p-5">
           <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[#20271e] pb-4">
+          <div className="flex items-center gap-3">
+            <PlatformBrandIcon brand={item.platform} size="sm" />
             <div>
-              <p className="font-mono text-[9px] font-bold uppercase text-[#95ff00]">Ready to publish</p>
-              <h3 className="mt-1 text-xl font-bold text-white">{item.presetName}</h3>
-              <p className="mt-1 font-mono text-[10px] text-[#75806f]">{metadata}</p>
+            <p className="font-mono text-[9px] font-bold uppercase text-[#95ff00]">Ready to publish</p>
+            <h3 className="mt-1 text-xl font-bold text-white">{item.presetName}</h3>
+            <p className="mt-1 font-mono text-[10px] text-[#75806f]">{metadata}</p>
             </div>
+          </div>
             <div className="flex gap-2">
               <button
                 type="button"

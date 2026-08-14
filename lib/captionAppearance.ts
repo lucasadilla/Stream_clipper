@@ -9,7 +9,7 @@ export type CaptionCapitalization =
   | "uppercase"
   | "lowercase"
   | "title";
-export type CaptionAnimation = "none" | "fade" | "pop" | "slideUp";
+export type CaptionAnimation = "none" | "fade" | "wordReveal";
 
 export interface CaptionAppearance {
   fontFamily: string;
@@ -32,10 +32,9 @@ export interface CaptionAppearance {
   italic: boolean;
   capitalization: CaptionCapitalization;
   karaokeEnabled: boolean;
-  /** Automatically bold/color the most meaningful word in each cue. */
-  smartEmphasisEnabled: boolean;
   /** Active karaoke word color. */
   highlightColor: string;
+  /** Layout-stable motion only; never scales caption text. */
   animation: CaptionAnimation;
 }
 
@@ -75,9 +74,8 @@ export const DEFAULT_CAPTION_APPEARANCE: CaptionAppearance = {
   italic: false,
   capitalization: "none",
   karaokeEnabled: true,
-  smartEmphasisEnabled: true,
   highlightColor: "#FFFF00",
-  animation: "pop",
+  animation: "wordReveal",
 };
 
 export function readCaptionAppearancePreference(): CaptionAppearance {
@@ -180,21 +178,18 @@ export function normalizeCaptionAppearance(
       typeof input?.karaokeEnabled === "boolean"
         ? input.karaokeEnabled
         : DEFAULT_CAPTION_APPEARANCE.karaokeEnabled,
-    smartEmphasisEnabled:
-      typeof input?.smartEmphasisEnabled === "boolean"
-        ? input.smartEmphasisEnabled
-        : DEFAULT_CAPTION_APPEARANCE.smartEmphasisEnabled,
     highlightColor:
       normalizeHexColor(input?.highlightColor) ??
       DEFAULT_CAPTION_APPEARANCE.highlightColor,
     animation:
-      animation === "none" ||
-      animation === "fade" ||
-      animation === "pop" ||
-      animation === "slideUp"
+      animation === "fade" || animation === "wordReveal"
         ? animation
-        : DEFAULT_CAPTION_APPEARANCE.animation,
+        : "none",
   };
+}
+
+export function captionAnimationClass(animation: CaptionAnimation): string {
+  return animation === "fade" ? "caption-anim-fade" : "";
 }
 
 export function applyCaptionCapitalization(
@@ -213,20 +208,6 @@ export function applyCaptionCapitalization(
       );
     default:
       return text;
-  }
-}
-
-/** Shared cue entrance animation class for every live caption preview. */
-export function captionAnimationClass(animation: CaptionAnimation): string {
-  switch (animation) {
-    case "fade":
-      return "caption-anim-fade";
-    case "pop":
-      return "caption-anim-pop";
-    case "slideUp":
-      return "caption-anim-slide-up";
-    default:
-      return "";
   }
 }
 

@@ -38,7 +38,7 @@ export const BUILT_IN_CAPTION_PRESETS: CaptionPreset[] = [
       fontWeight: "normal",
       karaokeEnabled: true,
       highlightColor: "#FFFF00",
-      animation: "pop",
+      animation: "wordReveal",
     }),
   },
   {
@@ -59,7 +59,7 @@ export const BUILT_IN_CAPTION_PRESETS: CaptionPreset[] = [
       fontWeight: "bold",
       capitalization: "uppercase",
       karaokeEnabled: false,
-      animation: "pop",
+      animation: "wordReveal",
     }),
   },
   {
@@ -84,7 +84,7 @@ export const BUILT_IN_CAPTION_PRESETS: CaptionPreset[] = [
   },
   {
     id: "neon-pop",
-    name: "Neon pop",
+    name: "Neon signal",
     builtIn: true,
     appearance: normalizeCaptionAppearance({
       fontFamily: "Montserrat",
@@ -100,7 +100,7 @@ export const BUILT_IN_CAPTION_PRESETS: CaptionPreset[] = [
       fontWeight: "bold",
       karaokeEnabled: false,
       highlightColor: "#FFFFFF",
-      animation: "pop",
+      animation: "wordReveal",
     }),
   },
   {
@@ -140,7 +140,7 @@ export const BUILT_IN_CAPTION_PRESETS: CaptionPreset[] = [
       shadow: 2,
       fontWeight: "bold",
       karaokeEnabled: false,
-      animation: "slideUp",
+      animation: "fade",
     }),
   },
   {
@@ -162,7 +162,7 @@ export const BUILT_IN_CAPTION_PRESETS: CaptionPreset[] = [
       capitalization: "uppercase",
       karaokeEnabled: true,
       highlightColor: "#FF4D9A",
-      animation: "none",
+      animation: "wordReveal",
     }),
   },
 ];

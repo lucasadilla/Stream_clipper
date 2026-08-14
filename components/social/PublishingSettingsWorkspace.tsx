@@ -238,7 +238,10 @@ export function PublishingSettingsWorkspace() {
                 </select>
               </label>
               <label className={labelClass}>
-                YouTube format
+                <span className="flex items-center gap-2">
+                  <SocialPlatformIcon platform="youtube" size="sm" className="!h-6 !w-6" />
+                  YouTube format
+                </span>
                 <select
                   value={prefs.youtubeFormat}
                   onChange={(e) =>
@@ -253,7 +256,10 @@ export function PublishingSettingsWorkspace() {
                 </select>
               </label>
               <label className={labelClass}>
-                TikTok mode
+                <span className="flex items-center gap-2">
+                  <SocialPlatformIcon platform="tiktok" size="sm" className="!h-6 !w-6" />
+                  TikTok mode
+                </span>
                 <select
                   value={prefs.tiktokMode}
                   onChange={(e) =>

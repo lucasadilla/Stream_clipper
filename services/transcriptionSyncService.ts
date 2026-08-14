@@ -1,6 +1,7 @@
 import path from "path";
 import fs from "fs/promises";
 import { existsSync } from "fs";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { toJsonValue } from "@/lib/utils";
 import {
@@ -84,35 +85,27 @@ export function isCursorOnlyChunk(rawJson: unknown): boolean {
 
 /** Remove all Whisper transcript rows so timing can be rebuilt with word-level cues. */
 export async function clearWhisperTranscriptChunks(streamSessionId: string) {
-  const rows = await prisma.transcriptChunk.findMany({
-    where: { streamSessionId },
-    select: { id: true, rawJson: true },
-  });
-  const whisperIds = rows
-    .filter((r) => {
-      const meta = r.rawJson as { whisper?: boolean } | null;
-      return meta?.whisper === true;
-    })
-    .map((r) => r.id);
-  if (whisperIds.length === 0) return 0;
-  await prisma.transcriptChunk.deleteMany({ where: { id: { in: whisperIds } } });
+  const deleted = await prisma.$executeRaw(Prisma.sql`
+    DELETE FROM "TranscriptChunk"
+    WHERE "streamSessionId" = ${streamSessionId}
+      AND "rawJson"->>'whisper' = 'true'
+  `);
   clearSessionTranscriptionState(streamSessionId);
-  return whisperIds.length;
+  return deleted;
 }
 
 export async function removePlaceholderChunks(streamSessionId: string) {
-  const chunks = await prisma.transcriptChunk.findMany({
-    where: { streamSessionId },
-    select: { id: true, text: true },
+  const result = await prisma.transcriptChunk.deleteMany({
+    where: {
+      streamSessionId,
+      OR: [
+        { text: { startsWith: "[Live ", mode: "insensitive" } },
+        { text: { contains: "placeholder", mode: "insensitive" } },
+        { text: { contains: "connect Whisper", mode: "insensitive" } },
+      ],
+    },
   });
-  const placeholderIds = chunks
-    .filter((c) => isPlaceholderTranscript(c.text))
-    .map((c) => c.id);
-  if (placeholderIds.length === 0) return 0;
-  await prisma.transcriptChunk.deleteMany({
-    where: { id: { in: placeholderIds } },
-  });
-  return placeholderIds.length;
+  return result.count;
 }
 
 /** Small silences between Whisper segments inside one processed range. */
@@ -128,35 +121,43 @@ interface CoverageInfo {
 async function getTranscriptionCoverage(
   streamSessionId: string
 ): Promise<CoverageInfo> {
-  const rows = await prisma.transcriptChunk.findMany({
-    where: { streamSessionId },
-    orderBy: { startTimeSeconds: "asc" },
-    select: {
-      startTimeSeconds: true,
-      endTimeSeconds: true,
-      text: true,
-      rawJson: true,
-    },
-  });
+  // Extract only the four tiny values needed for coverage in Postgres. Pulling
+  // rawJson here used to transfer every word-level Whisper payload on every
+  // transcription poll, making long recordings increasingly expensive.
+  const rows = await prisma.$queryRaw<
+    Array<{
+      coverageStart: number;
+      coverageEnd: number;
+      reason: string | null;
+      attempts: number;
+    }>
+  >(Prisma.sql`
+    SELECT DISTINCT
+      COALESCE(
+        NULLIF("rawJson"->>'segmentStart', '')::double precision,
+        "startTimeSeconds"
+      ) AS "coverageStart",
+      COALESCE(
+        NULLIF("rawJson"->>'segmentEnd', '')::double precision,
+        "endTimeSeconds"
+      ) AS "coverageEnd",
+      "rawJson"->>'reason' AS "reason",
+      COALESCE(NULLIF("rawJson"->>'attempts', '')::integer, 1) AS "attempts"
+    FROM "TranscriptChunk"
+    WHERE "streamSessionId" = ${streamSessionId}
+      AND "rawJson"->>'whisper' = 'true'
+    ORDER BY "coverageStart" ASC
+  `);
 
   const raw: Array<{ start: number; end: number }> = [];
   for (const row of rows) {
-    if (isPlaceholderTranscript(row.text)) continue;
-    const meta = row.rawJson as {
-      whisper?: boolean;
-      reason?: string;
-      attempts?: number;
-      segmentStart?: number;
-      segmentEnd?: number;
-    } | null;
-    if (!meta?.whisper) continue;
     // Error markers stay retryable (uncovered) until attempts run out.
-    if (meta.reason === "error" && (meta.attempts ?? 1) < MAX_RANGE_ATTEMPTS) {
+    if (row.reason === "error" && row.attempts < MAX_RANGE_ATTEMPTS) {
       continue;
     }
     raw.push({
-      start: meta.segmentStart ?? row.startTimeSeconds,
-      end: meta.segmentEnd ?? row.endTimeSeconds,
+      start: Number(row.coverageStart),
+      end: Number(row.coverageEnd),
     });
   }
 

@@ -40,6 +40,8 @@ export type ResolvedPipSettings = {
 
 export type ResolvedSubjectCropSettings = {
   keyframes: SubjectCropKeyframe[];
+  planVersion?: string;
+  style?: string;
 };
 
 export type ResolvedCenterCropSettings = {
@@ -447,50 +449,74 @@ export function buildCenterCropFilter(
 // Subject-aware crop
 // ---------------------------------------------------------------------------
 
-/**
- * Piecewise-linear FFmpeg expression interpolating crop x positions between
- * keyframes. t is relative to the (already cut) segment start.
- */
-export function subjectCropXExpression(
+function subjectCropAxisExpression(
   keyframes: SubjectCropKeyframe[],
-  scaledWidth: number,
-  cropWidth: number
+  axis: "x" | "y",
+  scaledSize: number,
+  cropSize: number
 ): string {
   const usable = keyframes
     .filter(
       (kf) =>
-        Number.isFinite(kf.timestampSeconds) && Number.isFinite(kf.centerX)
+        Number.isFinite(kf.timestampSeconds) &&
+        Number.isFinite(axis === "x" ? kf.centerX : (kf.centerY ?? 0.5))
     )
     .sort((a, b) => a.timestampSeconds - b.timestampSeconds);
 
-  const toX = (centerX: number): string => {
+  const toPosition = (keyframe: SubjectCropKeyframe): string => {
+    const center = axis === "x" ? keyframe.centerX : (keyframe.centerY ?? 0.5);
     const px = clamp(
-      centerX * scaledWidth - cropWidth / 2,
+      center * scaledSize - cropSize / 2,
       0,
-      Math.max(0, scaledWidth - cropWidth)
+      Math.max(0, scaledSize - cropSize)
     );
     return px.toFixed(1);
   };
 
-  if (usable.length === 0) return `(iw-ow)/2`;
-  if (usable.length === 1) return toX(usable[0]!.centerX);
+  if (usable.length === 0) return axis === "x" ? `(iw-ow)/2` : `(ih-oh)/2`;
+  if (usable.length === 1) return toPosition(usable[0]!);
 
-  let expr = toX(usable[usable.length - 1]!.centerX);
+  let expr = toPosition(usable[usable.length - 1]!);
   for (let i = usable.length - 2; i >= 0; i--) {
     const a = usable[i]!;
     const b = usable[i + 1]!;
     const t0 = Math.max(0, a.timestampSeconds).toFixed(3);
     const t1 = Math.max(0, b.timestampSeconds).toFixed(3);
-    const x0 = toX(a.centerX);
-    const x1 = toX(b.centerX);
+    const x0 = toPosition(a);
+    const x1 = toPosition(b);
     const span = Math.max(0.001, b.timestampSeconds - a.timestampSeconds);
-    const segment = `${x0}+(${x1}-${x0})*(t-${t0})/${span.toFixed(3)}`;
+    const progress = `(t-${t0})/${span.toFixed(3)}`;
+    const interpolation = b.interpolation ?? "linear";
+    const segment =
+      interpolation === "cut" || interpolation === "hold"
+        ? x0
+        : interpolation === "ease_in_out"
+          ? `${x0}+(${x1}-${x0})*(${progress})*(${progress})*(3-2*(${progress}))`
+          : `${x0}+(${x1}-${x0})*${progress}`;
     expr = `if(lt(t,${t1}),${segment},${expr})`;
   }
   // Before the first keyframe hold the first position.
   const first = usable[0]!;
-  expr = `if(lt(t,${Math.max(0, first.timestampSeconds).toFixed(3)}),${toX(first.centerX)},${expr})`;
-  return `min(max(${expr},0),iw-ow)`;
+  expr = `if(lt(t,${Math.max(0, first.timestampSeconds).toFixed(3)}),${toPosition(first)},${expr})`;
+  const maximum = axis === "x" ? "iw-ow" : "ih-oh";
+  return `min(max(${expr},0),${maximum})`;
+}
+
+/** Cut-aware, eased FFmpeg expression for the horizontal virtual camera. */
+export function subjectCropXExpression(
+  keyframes: SubjectCropKeyframe[],
+  scaledWidth: number,
+  cropWidth: number
+): string {
+  return subjectCropAxisExpression(keyframes, "x", scaledWidth, cropWidth);
+}
+
+export function subjectCropYExpression(
+  keyframes: SubjectCropKeyframe[],
+  scaledHeight: number,
+  cropHeight: number
+): string {
+  return subjectCropAxisExpression(keyframes, "y", scaledHeight, cropHeight);
 }
 
 export function buildSubjectAwareCropFilter(
@@ -501,9 +527,24 @@ export function buildSubjectAwareCropFilter(
   const outW = toEven(ctx.outputWidth);
   const outH = toEven(ctx.outputHeight);
 
-  // Scale so the height matches the output exactly; the crop then pans
-  // horizontally across the scaled width.
-  const scaledWidth = toEven((ctx.sourceWidth * outH) / ctx.sourceHeight);
+  const baseScaledWidth = toEven((ctx.sourceWidth * outH) / ctx.sourceHeight);
+  const baseCropWidth = outW / Math.max(1, baseScaledWidth);
+  const requestedCropWidths = settings.keyframes
+    .map((keyframe) => keyframe.cropWidth)
+    .filter(
+      (value): value is number =>
+        typeof value === "number" && Number.isFinite(value) && value > 0
+    );
+  const sortedWidths = [...requestedCropWidths].sort((a, b) => a - b);
+  const medianCropWidth =
+    sortedWidths.length > 0
+      ? sortedWidths[Math.floor(sortedWidths.length / 2)]!
+      : baseCropWidth;
+  // Zoom is stable for the whole shot. This avoids detector-size noise causing
+  // distracting zoom pumping while still supporting Close/Dynamic profiles.
+  const zoom = clamp(baseCropWidth / Math.max(0.001, medianCropWidth), 1, 1.35);
+  const scaledWidth = toEven(baseScaledWidth * zoom);
+  const scaledHeight = toEven(outH * zoom);
   if (scaledWidth <= outW) {
     // Source is already 9:16 or taller — nothing to pan across.
     return buildCenterCropFilter(ctx);
@@ -514,9 +555,14 @@ export function buildSubjectAwareCropFilter(
     scaledWidth,
     outW
   );
+  const yExpr = subjectCropYExpression(
+    settings.keyframes,
+    scaledHeight,
+    outH
+  );
   return (
-    `scale=${scaledWidth}:${outH}:${SCALE_FLAGS},` +
-    `crop=${outW}:${outH}:x='${xExpr}':y=0,setsar=1,format=yuv420p`
+    `scale=${scaledWidth}:${scaledHeight}:${SCALE_FLAGS},` +
+    `crop=${outW}:${outH}:x='${xExpr}':y='${yExpr}',setsar=1,format=yuv420p`
   );
 }
 

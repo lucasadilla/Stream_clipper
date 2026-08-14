@@ -7,6 +7,7 @@ import {
   buildVerticalLayoutFilter,
   ffmpegColor,
   subjectCropXExpression,
+  subjectCropYExpression,
   type FilterBuildContext,
 } from "@/lib/verticalLayoutFilters";
 
@@ -159,6 +160,52 @@ describe("subject-aware crop", () => {
       1080
     );
     expect(expr).not.toContain("if(");
+  });
+
+  it("uses cubic easing for planned camera moves", () => {
+    const expr = subjectCropXExpression(
+      [
+        { timestampSeconds: 0, centerX: 0.3 },
+        {
+          timestampSeconds: 2,
+          centerX: 0.7,
+          interpolation: "ease_in_out",
+        },
+      ],
+      3413,
+      1080
+    );
+    expect(expr).toContain("*(3-2*");
+  });
+
+  it("holds until a cut instead of interpolating across it", () => {
+    const expr = subjectCropXExpression(
+      [
+        { timestampSeconds: 0, centerX: 0.2 },
+        { timestampSeconds: 2, centerX: 0.8, interpolation: "cut" },
+      ],
+      3413,
+      1080
+    );
+    expect(expr).toContain("if(lt(t,2.000),142.6,2190.4)");
+  });
+
+  it("builds vertical headroom movement from the same keyframes", () => {
+    const expr = subjectCropYExpression(
+      [
+        { timestampSeconds: 0, centerX: 0.5, centerY: 0.45 },
+        {
+          timestampSeconds: 2,
+          centerX: 0.5,
+          centerY: 0.55,
+          interpolation: "ease_in_out",
+        },
+      ],
+      2200,
+      1920
+    );
+    expect(expr).toContain("ih-oh");
+    expect(expr).toContain("*(3-2*");
   });
 
   it("falls back to center crop when the source is already narrow", () => {

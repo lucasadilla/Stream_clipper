@@ -421,101 +421,21 @@ body[data-render-modal-open] [data-timeline-playhead] {
 }
 
 @keyframes caption-fade {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-@keyframes caption-pop {
-  0% {
-    opacity: 0;
-    transform: scale(0.86);
-  }
-  60% {
-    opacity: 1;
-    transform: scale(1.06);
-  }
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
-@keyframes caption-slide-up {
-  from {
-    opacity: 0;
-    transform: translateY(0.7em);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .caption-anim-fade {
-  animation: caption-fade 0.22s ease-out;
+  animation: caption-fade 0.2s ease-out;
 }
 
-.caption-anim-pop {
-  animation: caption-pop 0.32s ease-out;
-}
-
-.caption-anim-slide-up {
-  animation: caption-slide-up 0.28s ease-out;
-}
-
-@keyframes caption-smart-word-pop {
-  0% {
-    transform: scale(1);
-  }
-  45% {
-    transform: scale(1.2);
-  }
-  100% {
-    transform: scale(1.08);
-  }
-}
-
-.caption-smart-emphasis-word {
-  display: inline-block;
-  font-weight: 800;
-  transform: scale(1.08);
-  transform-origin: center bottom;
-}
-
-.caption-smart-emphasis-word-active {
-  animation: caption-smart-word-pop 0.28s cubic-bezier(0.2, 0.9, 0.3, 1);
-}
-
-@keyframes clip-dynamic-punch {
-  0% {
-    transform: scale(1);
-  }
-  20% {
-    transform: scale(1.06);
-  }
-  58% {
-    transform: scale(1.045);
-  }
-  100% {
-    transform: scale(1);
-  }
-}
-
-.clip-dynamic-punch {
-  animation: clip-dynamic-punch 0.9s cubic-bezier(0.2, 0.85, 0.3, 1);
-  transform-origin: center center;
-  will-change: transform;
+.caption-word-reveal {
+  transition: opacity 90ms linear;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .caption-smart-emphasis-word-active,
-  .clip-dynamic-punch {
-    animation: none;
-  }
+  .caption-anim-fade { animation: none; }
+  .caption-word-reveal { transition: none; }
 }
 
 /* Frosted glass card with a static gradient border (marketing sections). */

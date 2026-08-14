@@ -33,6 +33,7 @@ import type {
   LayoutRecommendation,
   VerticalLayout,
 } from "@/lib/verticalLayout";
+import type { ReframeStyle } from "@/lib/professionalReframe";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -66,6 +67,19 @@ export interface VerticalLayoutSelection {
     deadZoneRatio: number;
     maxPanSpeed: number;
     fallback: "hold" | "center";
+  };
+  reframe: {
+    style: ReframeStyle;
+    lockSubject: boolean;
+    lockedTrackId?: string;
+    manualKeyframes?: Array<{
+      timestampSeconds: number;
+      centerX: number;
+      centerY: number;
+      cropWidth: number;
+      cropHeight: number;
+      interpolation?: "hold" | "ease_in_out" | "linear" | "cut";
+    }>;
   };
   centerCrop: {
     focalPointX: number;
@@ -102,6 +116,10 @@ export function defaultVerticalLayoutSelection(): VerticalLayoutSelection {
       deadZoneRatio: 0.5,
       maxPanSpeed: 0.35,
       fallback: "hold",
+    },
+    reframe: {
+      style: "professional",
+      lockSubject: false,
     },
     centerCrop: { focalPointX: 0.5, zoom: 1, useBlurredBackground: false },
     captions: { enabled: true, position: "lower" },
@@ -1148,8 +1166,52 @@ function LayoutSettings({
 
   if (card === "subject_aware_crop") {
     const subject = value.subjectCrop;
+    const reframe = value.reframe;
     return (
       <div className="space-y-3">
+        <SettingRow label="Camera style">
+          <SegmentedControl
+            options={[
+              { id: "professional", label: "Pro" },
+              { id: "dynamic", label: "Dynamic" },
+              { id: "stable", label: "Stable" },
+              { id: "close", label: "Close" },
+              { id: "context", label: "Context" },
+            ]}
+            value={reframe.style}
+            disabled={disabled}
+            onChange={(style) =>
+              update({
+                reframe: { ...reframe, style: style as ReframeStyle },
+              })
+            }
+          />
+        </SettingRow>
+        <SettingRow label="Subject">
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() =>
+              update({
+                reframe: {
+                  ...reframe,
+                  lockSubject: !reframe.lockSubject,
+                  lockedTrackId:
+                    value.faceSelection.trackId ?? reframe.lockedTrackId,
+                },
+              })
+            }
+            className={cn(
+              "rounded-md border px-2.5 py-1.5 text-xs font-semibold transition-colors",
+              reframe.lockSubject
+                ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
+                : "border-[var(--color-card-border)] text-[var(--color-muted)] hover:text-[var(--color-foreground)]",
+              disabled && "cursor-not-allowed opacity-50"
+            )}
+          >
+            {reframe.lockSubject ? "Person locked" : "Lock this person"}
+          </button>
+        </SettingRow>
         <SliderRow
           label="Follow speed"
           value={subject.smoothing}

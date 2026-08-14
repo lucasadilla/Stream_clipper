@@ -13,14 +13,13 @@ import {
 } from "@/lib/captionStyles";
 
 describe("generateAss karaoke", () => {
-  it("highlights only the active word like the editor (timed \\c, not progressive \\k)", () => {
+  it("highlights only the active word without scaling caption text", () => {
     const ass = generateAss({
       width: 1080,
       height: 1920,
       appearance: {
         ...DEFAULT_CAPTION_APPEARANCE,
         karaokeEnabled: true,
-        animation: "pop",
         color: "#FFFFFF",
         highlightColor: "#FFE600",
       },
@@ -46,11 +45,12 @@ describe("generateAss karaoke", () => {
     expect(dialogues[0]).toContain("\\c&H");
     expect(dialogues[0]).toContain("hello");
     expect(dialogues[0]).toContain("world");
-    expect(dialogues[0]).toContain("\\fscx86");
-    expect(dialogues[0]).toContain("\\t(0,192,");
+    expect(dialogues[0]).not.toContain("\\fscx");
+    expect(dialogues[0]).not.toContain("\\fscy");
+    expect(dialogues[0]).toContain("\\alpha&HFF&");
   });
 
-  it("matches editor fade timing (220ms in, no out)", () => {
+  it("exports a fade without scaling or moving the text", () => {
     const ass = generateAss({
       width: 1080,
       height: 1920,
@@ -61,8 +61,9 @@ describe("generateAss karaoke", () => {
       },
       cues: [{ startTimeSeconds: 0, endTimeSeconds: 1, text: "hi" }],
     });
-    expect(ass).toContain("\\fad(220,0)");
-    expect(ass).not.toContain("\\fad(180,120)");
+    expect(ass).toContain("\\fad(200,0)");
+    expect(ass).not.toContain("\\move(");
+    expect(ass).not.toContain("\\fscx");
   });
 
   it("de-overlaps cues so only one Dialogue is active at a time", () => {
@@ -83,7 +84,6 @@ describe("generateAss karaoke", () => {
       appearance: {
         ...DEFAULT_CAPTION_APPEARANCE,
         karaokeEnabled: false,
-        animation: "none",
       },
       cues: [
         { startTimeSeconds: 0, endTimeSeconds: 2, text: "first line" },
@@ -110,7 +110,6 @@ describe("generateAss karaoke", () => {
         outlineWidth: 0,
         backgroundOpacity: 0,
         karaokeEnabled: false,
-        animation: "none",
       },
       cues: [{ startTimeSeconds: 0, endTimeSeconds: 1, text: "hello" }],
     });
@@ -131,7 +130,6 @@ describe("generateAss karaoke", () => {
       height: 1920,
       appearance: {
         ...DEFAULT_CAPTION_APPEARANCE,
-        smartEmphasisEnabled: false,
       },
       cues: [
         { startTimeSeconds: 0, endTimeSeconds: 1, text: "..." },

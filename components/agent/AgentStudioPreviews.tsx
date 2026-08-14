@@ -51,6 +51,8 @@ import {
   type PlatformSafeZone,
 } from "@/lib/platforms/safeZones";
 import { CaptionCueText } from "@/components/CaptionCueText";
+import { PlatformBrandIcon } from "@/components/brand/PlatformBrandIcon";
+import type { VerticalLayout } from "@/lib/verticalLayout";
 
 export function LookPresetGlyph({
   presetId,
@@ -195,7 +197,9 @@ export function LookVideoStage({
   onPause,
   faceRect,
   faceCenterX,
-  dynamicPunchActive = false,
+  faceCenterY,
+  zoom = 1,
+  layoutOverride,
 }: {
   presetId: ContentLookPresetId;
   playbackUrl: string | null;
@@ -209,18 +213,22 @@ export function LookVideoStage({
   faceRect?: { x: number; y: number; width: number; height: number } | null;
   /** Current tracked horizontal focus, normalized to 0..1. */
   faceCenterX?: number | null;
-  /** Runs a restrained zoom pulse on the composed video, below captions. */
-  dynamicPunchActive?: boolean;
+  /** Current planned vertical focus, normalized to 0..1. */
+  faceCenterY?: number | null;
+  /** Stable virtual-camera zoom from the shared reframe plan. */
+  zoom?: number;
+  /** Resolved server recommendation while the visible preset remains Auto. */
+  layoutOverride?: VerticalLayout | null;
 }) {
-  const layout = getContentLookPreset(presetId).layout;
+  const layout = layoutOverride ?? getContentLookPreset(presetId).layout;
   const mirrorRef = useRef<HTMLVideoElement>(null);
   const needsMirror =
     layout === "facecam_top_gameplay_bottom" ||
     layout === "facecam_bottom_gameplay_top" ||
-    layout === "facecam_pip" ||
-    layout === "subject_aware_crop";
+    layout === "facecam_pip";
 
-  const facePos = faceObjectPosition(faceRect, faceCenterX);
+  const facePos = faceObjectPosition(faceRect, faceCenterX, faceCenterY);
+  const safeZoom = Math.min(1.35, Math.max(1, zoom));
 
   useEffect(() => {
     const main = videoRef.current;
@@ -280,9 +288,7 @@ export function LookVideoStage({
       ? "inset-x-0 bottom-0 top-[38%]"
       : layout === "facecam_bottom_gameplay_top"
         ? "inset-x-0 bottom-[38%] top-0"
-        : layout === "subject_aware_crop"
-          ? "inset-y-0 left-[21%] right-[21%]"
-          : "inset-0";
+        : "inset-0";
 
   const primaryVideoClass =
     layout === "gameplay_full"
@@ -301,9 +307,7 @@ export function LookVideoStage({
             : "hidden";
 
   const mirrorVideoClass =
-    layout === "subject_aware_crop"
-      ? "h-full w-full scale-110 object-cover opacity-35 blur-[2px] transition-[object-position] duration-500 ease-out motion-reduce:transition-none"
-      : "h-full w-full scale-[1.85] object-cover transition-[object-position] duration-500 ease-out motion-reduce:transition-none";
+    "h-full w-full scale-[1.85] object-cover transition-[object-position] duration-500 ease-out motion-reduce:transition-none";
 
   return (
     <div
@@ -316,15 +320,10 @@ export function LookVideoStage({
         </div>
       )}
 
-      {playbackUrl && layout === "subject_aware_crop" && (
-        <div className="pointer-events-none absolute inset-0 bg-black/55" />
-      )}
-
       <div
         className={cn(
           "pointer-events-none absolute overflow-hidden transition-all duration-150",
-          needsMirror ? mirrorSlot : "hidden",
-          dynamicPunchActive && "clip-dynamic-punch"
+          needsMirror ? mirrorSlot : "hidden"
         )}
         style={
           layout === "facecam_pip" ? { aspectRatio: "1 / 1" } : undefined
@@ -350,10 +349,7 @@ export function LookVideoStage({
             : "",
           layout === "facecam_top_gameplay_bottom" ? "border-t" : "",
           layout === "facecam_bottom_gameplay_top" ? "border-b" : "",
-          layout === "subject_aware_crop"
-            ? "z-[1] shadow-[0_0_0_999px_rgba(0,0,0,0.55)]"
-            : "z-[1]",
-          dynamicPunchActive && "clip-dynamic-punch"
+          "z-[1]"
         )}
       >
         {playbackUrl ? (
@@ -361,7 +357,7 @@ export function LookVideoStage({
             ref={videoRef}
             className={cn(
               primaryVideoClass,
-              "transition-[object-position] duration-500 ease-out motion-reduce:transition-none"
+              "transition-[object-position,transform] duration-500 ease-out motion-reduce:transition-none"
             )}
             style={{
               objectPosition:
@@ -371,6 +367,12 @@ export function LookVideoStage({
                 layout === "gameplay_full"
                   ? facePos
                   : "center",
+              transform:
+                layout === "subject_aware_crop"
+                  ? `scale(${safeZoom.toFixed(4)})`
+                  : undefined,
+              transformOrigin:
+                layout === "subject_aware_crop" ? facePos : undefined,
             }}
             playsInline
             controls
@@ -388,11 +390,16 @@ export function LookVideoStage({
 
 function faceObjectPosition(
   faceRect?: { x: number; y: number; width: number; height: number } | null,
-  trackedCenterX?: number | null
+  trackedCenterX?: number | null,
+  trackedCenterY?: number | null
 ): string {
   const trackedX =
     typeof trackedCenterX === "number" && Number.isFinite(trackedCenterX)
       ? Math.min(1, Math.max(0, trackedCenterX))
+      : null;
+  const trackedY =
+    typeof trackedCenterY === "number" && Number.isFinite(trackedCenterY)
+      ? Math.min(1, Math.max(0, trackedCenterY))
       : null;
   if (
     !faceRect ||
@@ -401,24 +408,16 @@ function faceObjectPosition(
     faceRect.width <= 0 ||
     faceRect.height <= 0
   ) {
-    return `${((trackedX ?? 0.5) * 100).toFixed(1)}% 42%`;
+    return `${((trackedX ?? 0.5) * 100).toFixed(1)}% ${((trackedY ?? 0.42) * 100).toFixed(1)}%`;
   }
   const cx =
     trackedX ??
     Math.min(1, Math.max(0, faceRect.x + faceRect.width / 2));
-  const cy = Math.min(1, Math.max(0, faceRect.y + faceRect.height / 2));
+  const cy =
+    trackedY ??
+    Math.min(1, Math.max(0, faceRect.y + faceRect.height / 2));
   return `${(cx * 100).toFixed(1)}% ${(cy * 100).toFixed(1)}%`;
 }
-
-const PLATFORM_SHORT: Partial<Record<PlatformKey, string>> = {
-  youtube_shorts: "Shorts",
-  tiktok: "TikTok",
-  instagram_reels: "Reels",
-  instagram_feed: "IG Feed",
-  facebook_reels: "FB Reels",
-  x: "X",
-  youtube_landscape: "YouTube",
-};
 
 interface PlatformPreviewDetails {
   title: string;
@@ -535,10 +534,9 @@ function PreviewMedia({
             <p
               key={captionCue.id}
               style={captionStyles.text}
-              className={cn(
-                "whitespace-pre-line",
-                captionAnimationClass(captionAppearance.animation)
-              )}
+              className={`whitespace-pre-line break-words ${captionAnimationClass(
+                captionAppearance.animation
+              )}`}
             >
               <CaptionCueText
                 cue={captionCue}
@@ -859,22 +857,33 @@ export function PlatformChipRow({
   onChange: (key: PlatformKey) => void;
 }) {
   return (
-    <div className="flex w-full justify-start gap-1.5 overflow-x-auto px-0.5 pb-1 sm:justify-center [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+    <div
+      className="flex w-full justify-start gap-2 overflow-x-auto px-0.5 pb-1 sm:justify-center [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      aria-label="Preview platform"
+    >
       {platforms.map((key) => {
         const active = value === key;
+        const label = PLATFORM_PRESETS[key].name;
         return (
           <button
             key={key}
             type="button"
             onClick={() => onChange(key)}
+            aria-label={label}
+            aria-pressed={active}
+            title={label}
             className={cn(
-              "shrink-0 rounded-full px-3.5 py-1.5 text-xs font-semibold transition",
+              "relative grid h-12 w-12 shrink-0 place-items-center border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]",
               active
-                ? "bg-[var(--color-accent)] text-[var(--color-accent-foreground)] shadow-[0_0_0_1px_var(--color-accent)]"
-                : "bg-[var(--color-secondary)] text-[var(--color-muted)] hover:bg-[var(--color-card)] hover:text-[var(--color-foreground)]"
+                ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10"
+                : "border-[var(--color-card-border)] bg-[var(--color-secondary)] hover:border-white/30 hover:bg-[var(--color-card)]"
             )}
           >
-            {PLATFORM_SHORT[key] ?? PLATFORM_PRESETS[key].name}
+            <PlatformBrandIcon brand={key} size="sm" variant="mark" />
+            {active && (
+              <span className="absolute inset-x-2 -bottom-px h-0.5 bg-[var(--color-accent)]" />
+            )}
+            <span className="sr-only">{label}</span>
           </button>
         );
       })}

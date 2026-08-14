@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { SiteLogo } from "@/components/layout/SiteLogo";
+import { SocialPlatformIcon } from "@/components/social/SocialPlatformIcon";
 import { cn } from "@/lib/cn";
 import type {
   SocialGeneratedContent,
@@ -502,7 +503,8 @@ export function SocialPublishWorkspace({ clipId }: { clipId: string }) {
                   )?.capabilityBanner;
                   return (
                     <div key={platform}>
-                      <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[#6f7a6c]">
+                      <p className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wide text-[#6f7a6c]">
+                        <SocialPlatformIcon platform={platform} size="sm" className="!h-6 !w-6" />
                         {PLATFORM_LABEL[platform]}
                       </p>
                       {banner && (
@@ -657,7 +659,8 @@ export function SocialPublishWorkspace({ clipId }: { clipId: string }) {
                         : "border-[#21301f] bg-[#020302]"
                     )}
                   >
-                    <span className="block text-sm font-semibold capitalize">
+                    <span className="flex items-center gap-2 text-sm font-semibold capitalize">
+                      <SocialPlatformIcon platform={job.platform as SocialPlatform} size="sm" className="!h-6 !w-6" />
                       {PLATFORM_LABEL[job.platform as SocialPlatform] ||
                         job.platform}
                     </span>
@@ -691,7 +694,8 @@ export function SocialPublishWorkspace({ clipId }: { clipId: string }) {
             <>
               <div className="border border-[var(--color-card-border)] bg-[#050705] p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h2 className="text-sm font-bold">
+                  <h2 className="flex items-center gap-2 text-sm font-bold">
+                    <SocialPlatformIcon platform={activePlatform} size="sm" className="!h-7 !w-7" />
                     {PLATFORM_LABEL[activePlatform] || activePlatform} preview
                   </h2>
                   <button

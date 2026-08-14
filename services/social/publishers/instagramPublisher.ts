@@ -33,11 +33,13 @@ function igUserId(ctx: PublisherContext): string {
   return String(ctx.destinationId || ctx.accountMetadata?.igUserId || "");
 }
 
-async function createReelContainer(
+async function createVideoContainer(
   igId: string,
   accessToken: string,
   request: PublishRequest
 ): Promise<{ containerId: string; usedResumable: boolean }> {
+  const isFeedPost = request.settings.instagramFormat === "feed";
+  const mediaType = isFeedPost ? "VIDEO" : "REELS";
   const caption =
     request.content.caption ||
     request.content.postText ||
@@ -46,12 +48,12 @@ async function createReelContainer(
 
   // Prefer resumable upload (no public URL required).
   const resumableParams = new URLSearchParams({
-    media_type: "REELS",
+    media_type: mediaType,
     upload_type: "resumable",
     caption,
     access_token: accessToken,
   });
-  if (request.settings.shareToFeed === false) {
+  if (!isFeedPost && request.settings.shareToFeed === false) {
     resumableParams.set("share_to_feed", "false");
   }
 
@@ -73,7 +75,7 @@ async function createReelContainer(
   // Fallback: public video_url grant
   const videoUrl = buildPublicVideoUrl(request.media.filePath);
   const urlParams = new URLSearchParams({
-    media_type: "REELS",
+    media_type: mediaType,
     video_url: videoUrl,
     caption,
     access_token: accessToken,
@@ -90,7 +92,7 @@ async function createReelContainer(
   if (!response.ok || !json.id) {
     throw new Error(
       json.error?.message ||
-        "Instagram could not create a Reel media container"
+        `Instagram could not create a ${isFeedPost ? "feed video" : "Reel"} media container`
     );
   }
   return { containerId: json.id, usedResumable: false };
@@ -266,6 +268,7 @@ export const instagramPublisher: SocialPublisher = {
       });
     }
     if (
+      request.settings.instagramFormat !== "feed" &&
       request.media.width &&
       request.media.height &&
       request.media.width > request.media.height
@@ -300,7 +303,7 @@ export const instagramPublisher: SocialPublisher = {
       let containerId = request.existingUploadId || null;
       let usedResumable = true;
       if (!containerId) {
-        const created = await createReelContainer(igId, token, request);
+        const created = await createVideoContainer(igId, token, request);
         containerId = created.containerId;
         usedResumable = created.usedResumable;
         if (usedResumable) {
@@ -317,7 +320,11 @@ export const instagramPublisher: SocialPublisher = {
         platformUploadId: containerId,
         platformMediaId: mediaId,
         platformPostId: mediaId,
-        platformPostUrl: permalink || `https://www.instagram.com/reel/${mediaId}/`,
+        platformPostUrl:
+          permalink ||
+          `https://www.instagram.com/${
+            request.settings.instagramFormat === "feed" ? "p" : "reel"
+          }/${mediaId}/`,
         rawSafeResponse: { containerId, mediaId, usedResumable },
       };
     } catch (error) {

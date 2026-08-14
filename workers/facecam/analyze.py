@@ -263,7 +263,11 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
 
     detector = create_detector(min_confidence)
     detections: list[dict[str, Any]] = []
+    scene_changes: list[dict[str, float]] = []
     sampled_frames = 0
+    previous_scene_gray = None
+    previous_scene_hist = None
+    last_scene_change = start - 10.0
     t = start
     try:
         while t < end:
@@ -277,6 +281,37 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
             if analysis_width > 0 and w > analysis_width:
                 scale = analysis_width / float(w)
                 frame = cv2.resize(frame, (analysis_width, max(1, int(h * scale))))
+
+            # Scene detection runs on tiny images and adds negligible work next
+            # to face inference. Combining pixel and color-histogram distance
+            # avoids treating ordinary camera motion as a hard edit.
+            scene_frame = cv2.resize(frame, (64, 36))
+            scene_gray = cv2.cvtColor(scene_frame, cv2.COLOR_BGR2GRAY)
+            scene_gray = cv2.GaussianBlur(scene_gray, (5, 5), 0)
+            scene_hsv = cv2.cvtColor(scene_frame, cv2.COLOR_BGR2HSV)
+            scene_hist = cv2.calcHist([scene_hsv], [0, 1], None, [24, 16], [0, 180, 0, 256])
+            cv2.normalize(scene_hist, scene_hist)
+            if previous_scene_gray is not None and previous_scene_hist is not None:
+                pixel_delta = float(cv2.absdiff(scene_gray, previous_scene_gray).mean() / 255.0)
+                histogram_delta = float(
+                    cv2.compareHist(previous_scene_hist, scene_hist, cv2.HISTCMP_BHATTACHARYYA)
+                )
+                scene_score = 0.58 * pixel_delta + 0.42 * histogram_delta
+                if (
+                    scene_score >= 0.24
+                    and pixel_delta >= 0.15
+                    and histogram_delta >= 0.22
+                    and t - last_scene_change >= 0.55
+                ):
+                    scene_changes.append(
+                        {
+                            "timestampSeconds": round(t, 3),
+                            "score": round(clamp01(scene_score), 4),
+                        }
+                    )
+                    last_scene_change = t
+            previous_scene_gray = scene_gray
+            previous_scene_hist = scene_hist
 
             try:
                 faces = detector.detect(frame)
@@ -322,6 +357,7 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
         "sampleFps": sample_fps,
         "sampledFrames": sampled_frames,
         "detections": detections,
+        "sceneChanges": scene_changes,
         "modelName": detector.name,
         "modelVersion": detector.version,
     }

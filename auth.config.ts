@@ -1,7 +1,6 @@
 import type { NextAuthConfig } from "next-auth";
 import Google from "next-auth/providers/google";
 import Twitch from "next-auth/providers/twitch";
-import Resend from "next-auth/providers/resend";
 import { KickProvider } from "@/lib/auth/kickProvider";
 
 /**
@@ -12,7 +11,6 @@ export const authConfig = {
   pages: {
     signIn: "/login",
     error: "/login",
-    verifyRequest: "/login/verify",
   },
   providers: [
     ...(process.env.AUTH_GOOGLE_ID && process.env.AUTH_GOOGLE_SECRET
@@ -42,16 +40,6 @@ export const authConfig = {
           }),
         ]
       : []),
-    ...(process.env.AUTH_RESEND_KEY
-      ? [
-          Resend({
-            apiKey: process.env.AUTH_RESEND_KEY,
-            from:
-              process.env.AUTH_EMAIL_FROM?.trim() ||
-              "Clipper <login@streamclipper.stream>",
-          }),
-        ]
-      : []),
   ],
   callbacks: {
     authorized() {
@@ -74,9 +62,6 @@ export function listConfiguredAuthProviders(): Array<{
   }
   if (process.env.AUTH_KICK_ID && process.env.AUTH_KICK_SECRET) {
     providers.push({ id: "kick", name: "Kick" });
-  }
-  if (process.env.AUTH_RESEND_KEY) {
-    providers.push({ id: "resend", name: "Email" });
   }
   return providers;
 }

@@ -8,7 +8,7 @@ const schema = z.object({
   code: z.string().max(80).optional().nullable(),
 });
 
-/** Stash a creator program code to redeem after OAuth / magic-link sign-in. */
+/** Stash a creator program code to redeem after OAuth sign-in. */
 export async function POST(request: NextRequest) {
   try {
     const body = schema.parse(await request.json());

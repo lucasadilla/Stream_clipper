@@ -42,6 +42,7 @@ let tickInFlight = false;
 let pendingNudge = false;
 let lastRetentionAt = 0;
 let lastStorageReclaimAt = 0;
+let lastStaleReclaimAt = 0;
 
 function staleMs(): number {
   return Math.max(
@@ -62,6 +63,14 @@ function storageReclaimTickMs(): number {
   const minutes = Math.max(
     1,
     Number.parseInt(process.env.STORAGE_RECLAIM_MINUTES || "2", 10) || 2
+  );
+  return minutes * 60 * 1000;
+}
+
+function staleReclaimTickMs(): number {
+  const minutes = Math.max(
+    1,
+    Number.parseInt(process.env.WORKER_STALE_RECLAIM_MINUTES || "5", 10) || 5
   );
   return minutes * 60 * 1000;
 }
@@ -318,18 +327,22 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
   }
   tickInFlight = true;
   try {
-    const [staleRenders, stalePlatformExports, staleSocial, staleFaceAnalyses] =
-      await Promise.all([
-        reclaimStaleRenderJobs(),
-        reclaimStalePlatformExports(),
-        reclaimStaleSocialPublishJobs(),
-        reclaimStaleFaceAnalysisJobs().catch((err) => {
-          console.warn("[worker] face analysis reclaim skipped:", err);
-          return 0;
-        }),
-      ]);
-    const reclaimed =
-      staleRenders + stalePlatformExports + staleSocial + staleFaceAnalyses;
+    let reclaimed = 0;
+    if (Date.now() - lastStaleReclaimAt >= staleReclaimTickMs()) {
+      lastStaleReclaimAt = Date.now();
+      const [staleRenders, stalePlatformExports, staleSocial, staleFaceAnalyses] =
+        await Promise.all([
+          reclaimStaleRenderJobs(),
+          reclaimStalePlatformExports(),
+          reclaimStaleSocialPublishJobs(),
+          reclaimStaleFaceAnalysisJobs().catch((err) => {
+            console.warn("[worker] face analysis reclaim skipped:", err);
+            return 0;
+          }),
+        ]);
+      reclaimed =
+        staleRenders + stalePlatformExports + staleSocial + staleFaceAnalyses;
+    }
 
     // Free volume space before any render/transcription attempts to write.
     await runFrequentStorageReclaim();
@@ -394,34 +407,78 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
 }
 
 let pollerStarted = false;
-let pollerHandle: ReturnType<typeof setInterval> | null = null;
+let pollerHandle: ReturnType<typeof setTimeout> | null = null;
+let idlePollCount = 0;
+
+export function workerTickDidWork(result: WorkerTickResult): boolean {
+  return (
+    result.reclaimed +
+      result.renders +
+      result.platformExports +
+      result.socialPublishes +
+      result.transcriptions +
+      result.faceAnalyses +
+      result.retentionDeleted >
+    0
+  );
+}
+
+export function nextWorkerPollDelayMs(
+  didWork: boolean,
+  idleCount: number,
+  activeMs: number,
+  maxIdleMs: number
+): number {
+  if (didWork) return activeMs;
+  return Math.min(maxIdleMs, activeMs * 2 ** Math.min(4, Math.max(1, idleCount)));
+}
 
 export function startWorkerPoller(): void {
   if (pollerStarted || !isWorkerEnabled()) return;
   pollerStarted = true;
-  const pollMs = Math.max(
+  const activePollMs = Math.max(
     2000,
-    Number.parseInt(process.env.WORKER_POLL_MS || "2000", 10) || 2000
+    Number.parseInt(process.env.WORKER_POLL_MS || "3000", 10) || 3000
   );
-  console.info(`[worker] starting poller every ${pollMs}ms (${WORKER_ID})`);
-  void runWorkerTick().catch((err) =>
-    console.error("[worker] initial tick failed:", err)
+  const maxIdlePollMs = Math.max(
+    activePollMs,
+    Number.parseInt(process.env.WORKER_IDLE_POLL_MS || "30000", 10) || 30000
   );
-  pollerHandle = setInterval(() => {
-    void runWorkerTick().catch((err) =>
-      console.error("[worker] tick failed:", err)
+  console.info(
+    `[worker] starting adaptive poller ${activePollMs}-${maxIdlePollMs}ms (${WORKER_ID})`
+  );
+
+  const schedule = (delayMs: number) => {
+    if (!pollerStarted) return;
+    pollerHandle = setTimeout(() => void poll(), delayMs);
+    if (typeof pollerHandle.unref === "function") pollerHandle.unref();
+  };
+  const poll = async () => {
+    if (!pollerStarted) return;
+    let didWork = false;
+    try {
+      didWork = workerTickDidWork(await runWorkerTick());
+    } catch (err) {
+      console.error("[worker] tick failed:", err);
+    }
+    idlePollCount = didWork ? 0 : idlePollCount + 1;
+    schedule(
+      nextWorkerPollDelayMs(
+        didWork,
+        idlePollCount,
+        activePollMs,
+        maxIdlePollMs
+      )
     );
-  }, pollMs);
-  // Do not keep the process alive solely for the poller in some runtimes.
-  if (typeof pollerHandle.unref === "function") {
-    pollerHandle.unref();
-  }
+  };
+  void poll();
 }
 
 export function stopWorkerPoller(): void {
   if (pollerHandle) {
-    clearInterval(pollerHandle);
+    clearTimeout(pollerHandle);
     pollerHandle = null;
   }
+  idlePollCount = 0;
   pollerStarted = false;
 }

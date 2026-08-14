@@ -13,6 +13,7 @@ import type { StreamEmbedInfo, StreamPlatform } from "@/lib/streamPlatform";
 import { platformLabel } from "@/lib/streamPlatform";
 import { cn } from "@/lib/cn";
 import { useMemo, type RefObject } from "react";
+import { PlatformBrandIcon } from "@/components/brand/PlatformBrandIcon";
 
 interface VideoPreviewProps {
   platform: StreamPlatform;
@@ -59,8 +60,9 @@ export function VideoPreview({
   return (
     <div className="flex h-full min-h-0 w-full flex-col bg-[#050705]">
       <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[var(--color-card-border)] px-3 py-1.5">
-        <p className="truncate text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8f9b89]">
+        <p className="flex min-w-0 items-center gap-2 truncate text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8f9b89]">
           Program
+          <PlatformBrandIcon brand={platform} size="xs" variant="mark" />
           <span className="ml-2 font-normal normal-case tracking-normal text-[#5f6b5c]">
             {platformLabel(platform)}
             {preferLocalVideo && playbackVideoUrl ? " · local" : ""}

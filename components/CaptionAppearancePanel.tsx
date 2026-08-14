@@ -437,39 +437,30 @@ export function CaptionAppearancePanel({
               )}
             </div>
 
-            <div className="space-y-1">
-              <SectionLabel>Smart emphasis</SectionLabel>
-              <div className="flex items-center gap-2">
-                <PosBtn
-                  label={appearance.smartEmphasisEnabled ? "On" : "Off"}
-                  active={appearance.smartEmphasisEnabled}
-                  onClick={() =>
-                    patch({
-                      smartEmphasisEnabled: !appearance.smartEmphasisEnabled,
-                    })
-                  }
-                />
-                <span className="text-[10px] leading-4 text-[var(--color-muted)]">
-                  Highlights one meaningful word per caption.
-                </span>
-              </div>
-            </div>
-
-            <label className="block space-y-1">
+            <div className="space-y-1.5">
               <SectionLabel>Animation</SectionLabel>
-              <select
-                value={appearance.animation}
-                onChange={(e) =>
-                  patch({ animation: e.target.value as CaptionAnimation })
-                }
-                className="h-8 w-full rounded-lg border border-[#21301f] bg-[#020302] px-2 text-xs text-white focus:border-[var(--color-accent)] focus:outline-none"
-              >
-                <option value="none">None</option>
-                <option value="fade">Fade</option>
-                <option value="pop">Pop</option>
-                <option value="slideUp">Slide up</option>
-              </select>
-            </label>
+              <div className="flex flex-wrap gap-1">
+                {(
+                  [
+                    ["none", "None"],
+                    ["fade", "Fade"],
+                    ["wordReveal", "Word reveal"],
+                  ] as Array<[CaptionAnimation, string]>
+                ).map(([value, label]) => (
+                  <PosBtn
+                    key={value}
+                    label={label}
+                    active={appearance.animation === value}
+                    onClick={() => patch({ animation: value })}
+                  />
+                ))}
+              </div>
+              {appearance.animation === "wordReveal" && !hasWordTimings && (
+                <p className="text-[10px] text-[var(--color-muted)]">
+                  Word reveal uses transcript word timings when available.
+                </p>
+              )}
+            </div>
 
             <div className="space-y-1">
               <SectionLabel>Position</SectionLabel>

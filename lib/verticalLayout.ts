@@ -6,6 +6,12 @@ import {
   rectCenter,
   type NormalizedRect,
 } from "@/lib/normalizedRect";
+import {
+  REFRAME_STYLES,
+  type CropInterpolation,
+  type CropKeyframeReason,
+  type VirtualCameraPlan,
+} from "@/lib/professionalReframe";
 
 export const VERTICAL_LAYOUTS = [
   "auto",
@@ -107,6 +113,8 @@ export type FacecamAnalysisResult = {
   warnings: string[];
   modelName: string;
   modelVersion: string;
+  /** Versioned, reproducible camera decisions shared by preview and render. */
+  professionalPlan?: VirtualCameraPlan;
   createdAt?: string;
 };
 
@@ -180,6 +188,28 @@ export const verticalLayoutRequestSchema = z.object({
       deadZoneRatio: z.number().min(0).max(0.8).default(0.5),
       maxPanSpeed: z.number().min(0.05).max(2).default(0.35),
       fallback: z.enum(["hold", "center"]).default("hold"),
+    })
+    .optional(),
+  reframe: z
+    .object({
+      style: z.enum(REFRAME_STYLES).default("professional"),
+      lockSubject: z.boolean().default(false),
+      lockedTrackId: z.string().optional(),
+      manualKeyframes: z
+        .array(
+          z.object({
+            timestampSeconds: z.number().min(0),
+            centerX: z.number().min(0).max(1),
+            centerY: z.number().min(0).max(1),
+            cropWidth: z.number().min(0.05).max(1),
+            cropHeight: z.number().min(0.05).max(1),
+            interpolation: z
+              .enum(["hold", "ease_in_out", "linear", "cut"])
+              .optional(),
+          })
+        )
+        .max(120)
+        .optional(),
     })
     .optional(),
   centerCrop: z
@@ -494,6 +524,14 @@ export type SubjectCropKeyframe = {
   timestampSeconds: number;
   /** Normalized horizontal center of the crop window (0..1). */
   centerX: number;
+  /** Normalized vertical center. Older plans safely default to 0.5. */
+  centerY?: number;
+  cropWidth?: number;
+  cropHeight?: number;
+  interpolation?: CropInterpolation;
+  reason?: CropKeyframeReason;
+  subjectTrackId?: string;
+  confidence?: number;
 };
 
 export type ActiveSpeakerCropConfig = {

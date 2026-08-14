@@ -52,10 +52,6 @@ import {
   type VerticalLayoutRequest,
 } from "@/lib/verticalLayout";
 import { resolveVerticalLayout } from "@/services/verticalLayoutService";
-import {
-  buildDynamicPunchEvents,
-  type DynamicPunchEvent,
-} from "@/lib/captionEmphasis";
 
 const PREVIEW_MAX_SECONDS = 5;
 const PREVIEW_HEIGHT = 640;
@@ -79,8 +75,6 @@ export interface RenderShortParams {
   editorState?: EditorState;
   /** Facecam-aware vertical layout selection (validated client request). */
   verticalLayout?: VerticalLayoutRequest;
-  /** Adds restrained transcript-timed zoom pulses below overlays/captions. */
-  dynamicPunchIn?: boolean;
   /** Render a short low-resolution preview instead of the final export. */
   preview?: boolean;
 }
@@ -119,7 +113,6 @@ export function parseRenderJobParams(value: unknown): RenderShortParams | null {
       : undefined,
     editorState: normalizeEditorState(raw.editorState),
     verticalLayout: parseVerticalLayoutRequest(raw.verticalLayout) ?? undefined,
-    dynamicPunchIn: raw.dynamicPunchIn === true,
     preview: raw.preview === true,
   };
 }
@@ -197,7 +190,6 @@ export async function executeRenderJob(
     captionCues: clientCaptionCues,
     editorState: rawEditorState,
     verticalLayout: verticalLayoutRequest,
-    dynamicPunchIn = false,
     preview = false,
   } = params;
 
@@ -349,7 +341,6 @@ export async function executeRenderJob(
   const canStreamCopy =
     format === "native" &&
     !includeCaptions &&
-    !dynamicPunchIn &&
     textOverlays.length === 0 &&
     !hasMediaOverlays &&
     !editorState.settings.normalizeAudio &&
@@ -420,10 +411,9 @@ export async function executeRenderJob(
     return { outputPath: relativeOutput };
   }
 
-  let renderedCaptionCues: BurnCaptionCue[] = [];
-  if (includeCaptions || dynamicPunchIn || textOverlays.length > 0) {
+  if (includeCaptions || textOverlays.length > 0) {
     await updateJobProgress(jobId, 35, "captions");
-    const needsTranscriptCues = includeCaptions || dynamicPunchIn;
+    const needsTranscriptCues = includeCaptions;
     const clientCues = (clientCaptionCues ?? []).filter(
       (cue) => {
         if (sequenceSegments.length === 0) {
@@ -492,8 +482,6 @@ export async function executeRenderJob(
                 .filter((word) => word.end > word.start && word.word.trim().length > 0),
             }))
             .filter((cue) => cue.endTimeSeconds > cue.startTimeSeconds);
-      renderedCaptionCues = shiftedCues;
-
       if (includeCaptions && shiftedCues.length === 0 && !preview) {
         throw new Error("Captions are enabled, but no caption cues overlap this clip.");
       }
@@ -536,35 +524,13 @@ export async function executeRenderJob(
         await fs.writeFile(subtitlePath, assContent, "utf8");
       }
     } else if (preview || !includeCaptions) {
-      // Previews never fail on missing captions. Dynamic punch-ins also
-      // degrade gracefully when transcript timing is not available yet.
+      // Previews never fail on missing captions.
     } else {
       throw new Error(
         "Captions are enabled, but transcription has not reached this clip yet. " +
           "Wait until captions appear in the selected timeline range, then render again."
       );
     }
-  }
-
-  const punchInEvents: DynamicPunchEvent[] = dynamicPunchIn
-    ? buildDynamicPunchEvents(
-        renderedCaptionCues.map((cue, index) => ({
-          id: cue.id ?? `render-cue-${index}`,
-          startTimeSeconds: cue.startTimeSeconds,
-          endTimeSeconds: cue.endTimeSeconds,
-          text: cue.text,
-          words: cue.words,
-        }))
-      )
-    : [];
-  if (dynamicPunchIn) {
-    await appendRenderJobLog(
-      jobId,
-      "dynamic_punch",
-      punchInEvents.length > 0
-        ? `${punchInEvents.length} punch-in${punchInEvents.length === 1 ? "" : "s"}`
-        : "No suitable transcript moments; punch-ins skipped"
-    );
   }
 
   const facecam =
@@ -630,7 +596,6 @@ export async function executeRenderJob(
       denoiseAudio: editorState.settings.denoiseAudio,
       verticalBackground: editorState.settings.verticalBackground,
       mediaOverlays,
-      punchInEvents,
     });
   } else {
     await ffmpegRender({
@@ -650,7 +615,6 @@ export async function executeRenderJob(
       captionAppearance: appearance,
       verticalLayout: resolvedVerticalLayout?.resolved,
       previewQuality: preview,
-      punchInEvents,
       facecamRegion: facecam
         ? {
             x: facecam.x,

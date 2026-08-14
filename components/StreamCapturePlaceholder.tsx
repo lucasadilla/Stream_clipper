@@ -2,6 +2,7 @@
 
 import { platformLabel, type StreamPlatform } from "@/lib/streamPlatform";
 import { formatSeconds } from "@/lib/time";
+import { PlatformBrandIcon } from "@/components/brand/PlatformBrandIcon";
 
 interface StreamCapturePlaceholderProps {
   platform: StreamPlatform;
@@ -20,7 +21,10 @@ export function StreamCapturePlaceholder({
 
   return (
     <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-[#0a0a0a] px-6 text-center">
-      <div className="w-8 h-8 border-2 border-[var(--color-accent)] border-t-transparent rounded-full animate-spin" />
+      <div className="relative">
+        <PlatformBrandIcon brand={platform} size="lg" />
+        <span className="absolute -inset-1 animate-pulse border border-[var(--color-accent)]/45" />
+      </div>
       <div className="space-y-1 max-w-md">
         <p className="text-sm text-[#ddd] font-medium">
           {recordedSeconds > 0

@@ -11,7 +11,6 @@ import {
   AGENT_TRANSCRIPTION_PARALLEL,
 } from "@/lib/transcriptionConstants";
 import { errorResponse, jsonResponse } from "@/lib/utils";
-import { canProcessMoreSeconds } from "@/services/usageService";
 import { getBillingAccountIdFromRequest } from "@/services/billingService";
 import {
   ensureSessionBillingAccess,
@@ -51,14 +50,6 @@ export async function POST(
       },
     });
     if (!session) return errorResponse("Session not found", 404);
-
-    const usageGate = await canProcessMoreSeconds(billingAccountId);
-    if (!usageGate.allowed) {
-      return errorResponse(
-        usageGate.message ?? "Plan limit reached",
-        usageGate.status ?? 402
-      );
-    }
 
     const rebuild = request.nextUrl.searchParams.get("rebuild") === "1";
     let cleared = 0;

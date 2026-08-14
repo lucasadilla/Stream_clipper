@@ -27,7 +27,6 @@ const bodySchema = z.object({
   lookPreset: z.string().nullable().optional(),
   faceAnalysisJobId: z.string().nullable().optional(),
   includeCaptions: z.boolean().optional(),
-  dynamicPunchInEnabled: z.boolean().optional(),
   suggestRequested: z.boolean().optional(),
   cadence: z
     .enum(["vod_batch", "live_now", "after_stream"])
@@ -106,9 +105,6 @@ export async function PATCH(
         : {}),
       ...(body.includeCaptions != null
         ? { includeCaptions: body.includeCaptions }
-        : {}),
-      ...(body.dynamicPunchInEnabled != null
-        ? { dynamicPunchInEnabled: body.dynamicPunchInEnabled }
         : {}),
       ...(body.suggestRequested != null
         ? { suggestRequested: body.suggestRequested }

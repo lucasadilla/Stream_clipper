@@ -1,7 +1,7 @@
 import path from "path";
 import { spawn } from "child_process";
 import { existsSync } from "fs";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { toJsonValue } from "@/lib/utils";
 import { extractSoloTimelineFrame } from "@/lib/ffmpeg";
@@ -27,9 +27,13 @@ import {
   type FacecamAnalysisResult,
   type FacecamCandidate,
 } from "@/lib/verticalLayout";
+import {
+  generateProfessionalReframePlan,
+  type SceneChange,
+} from "@/lib/professionalReframe";
 
 const FACE_ANALYSIS_WORKER_ID = `face-worker-${process.pid}`;
-const FACE_ANALYSIS_VERSION = 2;
+const FACE_ANALYSIS_VERSION = 3;
 
 /** Result JSON stored on the job row (adds source info to the shared shape). */
 export interface StoredFaceAnalysisResult extends FacecamAnalysisResult {
@@ -85,6 +89,7 @@ interface WorkerResult {
   sampleFps: number;
   sampledFrames: number;
   detections: FaceDetection[];
+  sceneChanges?: SceneChange[];
   modelName: string;
   modelVersion: string;
 }
@@ -229,18 +234,20 @@ export async function requestFaceAnalysis(options: {
         },
       },
       orderBy: { createdAt: "desc" },
-      select: { id: true, status: true, progress: true, resultJson: true },
+      select: { id: true, status: true, progress: true },
     });
     if (existing) {
-      const existingResult =
-        existing.resultJson &&
-        typeof existing.resultJson === "object" &&
-        !Array.isArray(existing.resultJson)
-          ? (existing.resultJson as { analysisVersion?: unknown })
-          : null;
-      const reusable =
-        existing.status !== "completed" ||
-        existingResult?.analysisVersion === FACE_ANALYSIS_VERSION;
+      let reusable = true;
+      if (existing.status === "completed") {
+        const [version] = await prisma.$queryRaw<
+          Array<{ analysisVersion: string | null }>
+        >(Prisma.sql`
+          SELECT "resultJson"->>'analysisVersion' AS "analysisVersion"
+          FROM "FaceAnalysisJob"
+          WHERE "id" = ${existing.id}
+        `);
+        reusable = Number(version?.analysisVersion) === FACE_ANALYSIS_VERSION;
+      }
       if (!reusable) {
         // Re-analyze once when detection/validation behavior changes.
       } else {
@@ -399,6 +406,20 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
     }
     return [detection];
   });
+  const sceneChanges = (worker.sceneChanges ?? []).flatMap((change) => {
+    if (
+      !Number.isFinite(change.timestampSeconds) ||
+      !Number.isFinite(change.score)
+    ) {
+      return [];
+    }
+    return [
+      {
+        timestampSeconds: change.timestampSeconds + timeOffset,
+        score: change.score,
+      },
+    ];
+  });
 
   const tracks = buildFaceTracks(detections);
   const sampledFrames = Math.max(1, worker.sampledFrames);
@@ -490,6 +511,19 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
     };
   });
 
+  const professionalPlan = generateProfessionalReframePlan({
+    clipId: job.clipSuggestionId ?? jobId,
+    clipStartSeconds: job.startSeconds,
+    clipEndSeconds: job.endSeconds,
+    sourceWidth,
+    sourceHeight,
+    classification,
+    tracks,
+    sampledFrames,
+    primaryTrackId: primaryCandidate?.trackId,
+    sceneChanges,
+  });
+
   const result: StoredFaceAnalysisResult = {
     analysisVersion: FACE_ANALYSIS_VERSION,
     id: jobId,
@@ -505,6 +539,7 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
     warnings,
     modelName: worker.modelName,
     modelVersion: worker.modelVersion,
+    professionalPlan,
     createdAt: new Date().toISOString(),
     sourceWidth,
     sourceHeight,

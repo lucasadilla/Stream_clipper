@@ -48,7 +48,6 @@ export interface AgentWizardState {
   lookPreset: ContentLookPresetId | null;
   faceAnalysisJobId: string | null;
   includeCaptions: boolean;
-  dynamicPunchInEnabled: boolean;
   /** True once auto-suggest has been attempted for this session. */
   suggestRequested: boolean;
   /** VOD batch, rolling live, or wait-until-ended. Null until chosen/auto-set. */
@@ -64,7 +63,6 @@ export const DEFAULT_AGENT_WIZARD_STATE: AgentWizardState = {
   lookPreset: null,
   faceAnalysisJobId: null,
   includeCaptions: true,
-  dynamicPunchInEnabled: true,
   suggestRequested: false,
   cadence: null,
   lastSuggestThroughSeconds: 0,
@@ -112,7 +110,6 @@ export function readAgentWizardState(metadataJson: unknown): AgentWizardState {
     faceAnalysisJobId:
       typeof raw.faceAnalysisJobId === "string" ? raw.faceAnalysisJobId : null,
     includeCaptions: raw.includeCaptions !== false,
-    dynamicPunchInEnabled: raw.dynamicPunchInEnabled !== false,
     suggestRequested: Boolean(raw.suggestRequested),
     cadence: isAgentCadence(raw.cadence) ? raw.cadence : null,
     lastSuggestThroughSeconds,

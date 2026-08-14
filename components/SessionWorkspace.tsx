@@ -131,6 +131,17 @@ function transcriptRevision(
   return `${chunks.length}:${hash >>> 0}`;
 }
 
+function mergeById<T extends { id: string }>(
+  current: T[],
+  incoming: T[],
+  timeOf: (item: T) => number
+): T[] {
+  if (incoming.length === 0) return current;
+  const merged = new Map(current.map((item) => [item.id, item]));
+  for (const item of incoming) merged.set(item.id, item);
+  return [...merged.values()].sort((a, b) => timeOf(a) - timeOf(b));
+}
+
 export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const router = useRouter();
   const [session, setSession] = useState<SessionData | null>(null);
@@ -228,6 +239,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const audioSyncInFlight = useRef(false);
   const thumbnailsInFlight = useRef<Promise<void> | null>(null);
   const eventsPromiseRef = useRef<Promise<void> | null>(null);
+  const eventsCursorRef = useRef<string | null>(null);
   const transcriptSignature = useRef("");
   const captionRebuildAttempted = useRef(false);
   const sessionLoadedOnce = useRef(false);
@@ -393,8 +405,14 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
     [sessionId]
   );
 
-  async function loadEvents() {
-    if (eventsPromiseRef.current) return eventsPromiseRef.current;
+  async function loadEvents(options?: { reset?: boolean }) {
+    const reset = options?.reset === true;
+    if (eventsPromiseRef.current) {
+      await eventsPromiseRef.current;
+      if (reset) return loadEvents({ reset: true });
+      return;
+    }
+    if (reset) eventsCursorRef.current = null;
     const request = (async () => {
       try {
         if (!audioSyncInFlight.current) {
@@ -406,7 +424,12 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
             });
         }
 
+        const after = eventsCursorRef.current;
+        const eventsUrl = after
+          ? `/api/sessions/${sessionId}/events?after=${encodeURIComponent(after)}`
+          : `/api/sessions/${sessionId}/events`;
         const { ok, data } = await fetchJson<{
+          cursor?: string;
           transcriptChunks?: typeof transcripts;
           eventWindows?: Array<{
             id: string;
@@ -425,47 +448,65 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
             summary?: string | null;
             rawData?: unknown;
           }>;
-        }>(`/api/sessions/${sessionId}/events`);
+        }>(eventsUrl);
         if (!ok) return;
 
         const chunks = data.transcriptChunks ?? [];
-        setAiMarkers(
-          (data.eventWindows ?? []).map((event) => ({
-            id: `event-${event.id}`,
-            timeSeconds: event.startTimeSeconds,
-            endTimeSeconds: event.endTimeSeconds,
-            label: event.summary?.trim() || event.type.replace(/_/g, " "),
-            kind: markerKindFromEvent(event.type),
-            score: event.score,
-            source: "ai",
-          }))
+        const nextMarkers = (data.eventWindows ?? []).map(
+          (event) =>
+            ({
+              id: `event-${event.id}`,
+              timeSeconds: event.startTimeSeconds,
+              endTimeSeconds: event.endTimeSeconds,
+              label: event.summary?.trim() || event.type.replace(/_/g, " "),
+              kind: markerKindFromEvent(event.type),
+              score: event.score,
+              source: "ai",
+            }) satisfies TimelineMarker
         );
-        setAudioSpikes(
-          selectAudioSpikesForTimeline(
-            buildAudioSpikeMarkers(data.audioEvents ?? [])
-          )
+        setAiMarkers((current) =>
+          reset
+            ? nextMarkers
+            : mergeById(current, nextMarkers, (marker) => marker.timeSeconds)
+        );
+        const nextAudioSpikes = selectAudioSpikesForTimeline(
+          buildAudioSpikeMarkers(data.audioEvents ?? [])
+        );
+        setAudioSpikes((current) =>
+          reset
+            ? nextAudioSpikes
+            : mergeById(
+                current,
+                nextAudioSpikes,
+                (spike) => spike.startTimeSeconds
+              )
         );
 
-        // Never blank a loaded transcript with a transient empty poll
-        // (e.g. mid-rebuild wipe). Keep previous until nonempty data returns.
-        if (chunks.length === 0 && prevTranscriptIds.current.size > 0) {
-          return;
-        }
-
-        const nextTranscriptSignature = transcriptRevision(chunks);
-        if (nextTranscriptSignature !== transcriptSignature.current) {
+        setTranscripts((current) => {
+          const next = reset
+            ? chunks
+            : mergeById(
+                current,
+                chunks,
+                (chunk) => chunk.startTimeSeconds
+              );
+          const nextTranscriptSignature = transcriptRevision(next);
+          if (nextTranscriptSignature === transcriptSignature.current) {
+            return current;
+          }
           transcriptSignature.current = nextTranscriptSignature;
           const arrived = new Set<string>();
-          for (const chunk of chunks) {
+          for (const chunk of next) {
             if (!prevTranscriptIds.current.has(chunk.id)) arrived.add(chunk.id);
           }
-          prevTranscriptIds.current = new Set(chunks.map((chunk) => chunk.id));
+          prevTranscriptIds.current = new Set(next.map((chunk) => chunk.id));
           if (arrived.size > 0) {
             setNewSegmentIds(arrived);
             window.setTimeout(() => setNewSegmentIds(new Set()), 2500);
           }
-          setTranscripts(chunks);
-        }
+          return next;
+        });
+        if (data.cursor) eventsCursorRef.current = data.cursor;
       } catch {
         // non-fatal
       }
@@ -498,6 +539,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       prevTranscriptIds.current = new Set();
       thumbnailsInFlight.current = null;
       eventsPromiseRef.current = null;
+      eventsCursorRef.current = null;
       setPrepareClock(Date.now());
       setError(null);
       setTranscripts([]);
@@ -538,7 +580,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       void loadEvents();
       void loadSession();
       setPrepareClock(Date.now());
-    }, 1500);
+    }, 3000);
     return () => clearInterval(id);
   }, [sessionId, session?.id, editorReady]);
 
@@ -654,7 +696,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
           captionRebuildAttempted.current = false;
           return;
         }
-        await loadEvents();
+        await loadEvents({ reset: true });
       })
       .catch(() => {
         captionRebuildAttempted.current = false;
@@ -710,6 +752,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
           reason?: string;
           skipped?: boolean;
           transcribedThrough?: number;
+          recordedSeconds?: number;
         }>(`/api/sessions/${sessionId}/transcribe`, {
           method: "POST",
           signal: abort.signal,
@@ -748,8 +791,25 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
           setTranscriptionError(null);
         }
 
+        if (typeof data.recordedSeconds === "number") {
+          setSession((current) =>
+            current
+              ? {
+                  ...current,
+                  liveRecording: current.liveRecording
+                    ? {
+                        ...current.liveRecording,
+                        recordedSeconds: Math.max(
+                          current.liveRecording.recordedSeconds,
+                          data.recordedSeconds ?? 0
+                        ),
+                      }
+                    : current.liveRecording,
+                }
+              : current
+          );
+        }
         await loadEvents();
-        await loadSession();
       } catch (err) {
         if (cancelled) return;
         if (err instanceof DOMException && err.name === "AbortError") {

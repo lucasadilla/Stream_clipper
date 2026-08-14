@@ -5,6 +5,7 @@ import { Check, Copy, RotateCcw } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { PLATFORM_PRESETS } from "@/lib/platforms/presets";
 import type { PlatformCopy, PlatformKey } from "@/lib/platforms/types";
+import { PlatformBrandIcon } from "@/components/brand/PlatformBrandIcon";
 
 interface PlatformCopyEditorProps {
   platform: PlatformKey;
@@ -91,7 +92,9 @@ export function PlatformCopyEditor({
   return (
     <aside className="w-full rounded-2xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-4 shadow-[0_18px_50px_rgba(0,0,0,0.22)] lg:sticky lg:top-[8.5rem]">
       <div className="flex items-start justify-between gap-3 border-b border-[var(--color-card-border)] pb-3">
-        <div>
+        <div className="flex items-start gap-3">
+          <PlatformBrandIcon brand={platform} size="xs" />
+          <div>
           <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--color-accent)]">
             Post package
           </p>
@@ -99,6 +102,7 @@ export function PlatformCopyEditor({
           <p className="mt-1 text-[11px] leading-relaxed text-[var(--color-muted)]">
             Changes update the preview and follow this clip into export or publishing.
           </p>
+          </div>
         </div>
         <button
           type="button"

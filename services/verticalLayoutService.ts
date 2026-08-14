@@ -11,6 +11,7 @@ import {
   type VerticalLayout,
   type VerticalLayoutRequest,
 } from "@/lib/verticalLayout";
+import { generateProfessionalReframePlan } from "@/lib/professionalReframe";
 import type { ResolvedVerticalLayout } from "@/lib/verticalLayoutFilters";
 import {
   getFaceAnalysisJob,
@@ -207,27 +208,70 @@ export async function resolveVerticalLayout(
         !request.faceSelection.trackId &&
         analysis?.classification === "multiple_faces" &&
         analysis.tracks.filter((item) => item.points.length >= 3).length >= 2;
-      resolved.subjectCrop = {
-        keyframes: followActiveSpeaker
-          ? buildActiveSpeakerCropPlan(
-              analysis!.tracks,
-              options.clipStartSeconds,
-              options.clipEndSeconds,
-              normalizedCropWidth
-            )
-          : buildSubjectCropPlan(
-              track.points,
-              options.clipStartSeconds,
-              options.clipEndSeconds,
-              normalizedCropWidth,
-              {
-                smoothing: request.subjectCrop?.smoothing,
-                deadZoneRatio: request.subjectCrop?.deadZoneRatio,
-                maxPanSpeed: request.subjectCrop?.maxPanSpeed,
-                fallback: request.subjectCrop?.fallback,
-              }
+      const lockedTrackId = request.reframe?.lockSubject
+        ? request.reframe.lockedTrackId ??
+          request.faceSelection.trackId ??
+          selectedTrackId ??
+          analysis?.primaryCandidate?.trackId
+        : undefined;
+      const professionalPlan = analysis
+        ? generateProfessionalReframePlan({
+            clipId: analysis.clipId ?? faceAnalysisJobId ?? options.streamSessionId,
+            clipStartSeconds: options.clipStartSeconds,
+            clipEndSeconds: options.clipEndSeconds,
+            sourceWidth: analysis.sourceWidth,
+            sourceHeight: analysis.sourceHeight,
+            classification: analysis.classification,
+            tracks: analysis.tracks,
+            sampledFrames: Math.max(
+              1,
+              Math.round(
+                analysis.sampleFps *
+                  (analysis.endSeconds - analysis.startSeconds)
+              )
             ),
+            primaryTrackId:
+              request.faceSelection.trackId ??
+              selectedTrackId ??
+              analysis.primaryCandidate?.trackId,
+            lockedTrackId,
+            sceneChanges: analysis.professionalPlan?.scenes
+              .filter((scene) => scene.transitionIn === "hard_cut")
+              .map((scene) => ({
+                timestampSeconds: scene.startSeconds,
+                score: scene.confidence,
+              })),
+            style: request.reframe?.style ?? "professional",
+            manualKeyframes: request.reframe?.manualKeyframes,
+          })
+        : null;
+      resolved.subjectCrop = {
+        keyframes:
+          professionalPlan?.cropKeyframes.length
+            ? professionalPlan.cropKeyframes
+            : followActiveSpeaker
+              ? buildActiveSpeakerCropPlan(
+                  analysis!.tracks,
+                  options.clipStartSeconds,
+                  options.clipEndSeconds,
+                  normalizedCropWidth
+                )
+              : buildSubjectCropPlan(
+                  track.points,
+                  options.clipStartSeconds,
+                  options.clipEndSeconds,
+                  normalizedCropWidth,
+                  {
+                    smoothing: request.subjectCrop?.smoothing,
+                    deadZoneRatio: request.subjectCrop?.deadZoneRatio,
+                    maxPanSpeed: request.subjectCrop?.maxPanSpeed,
+                    fallback: request.subjectCrop?.fallback,
+                  }
+                ),
+        planVersion: professionalPlan?.version,
+        style: professionalPlan?.style,
       };
+      if (professionalPlan) warnings.push(...professionalPlan.warnings);
     } else {
       warnings.push(
         "No face track was available for Follow speaker, so Center Crop was used instead."
@@ -256,6 +300,7 @@ export async function saveVerticalLayoutConfiguration(options: {
     stacked: request.stacked,
     pip: request.pip,
     subjectCrop: request.subjectCrop,
+    reframe: request.reframe,
     centerCrop: request.centerCrop,
     captions: request.captions,
   }) as Prisma.InputJsonValue;

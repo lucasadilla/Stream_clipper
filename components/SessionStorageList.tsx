@@ -7,6 +7,7 @@ import { fetchJson } from "@/lib/apiClient";
 import { cn } from "@/lib/cn";
 import type { StreamPlatform } from "@/lib/streamPlatform";
 import { platformLabel } from "@/lib/streamPlatform";
+import { PlatformBrandIcon } from "@/components/brand/PlatformBrandIcon";
 
 interface SessionRow {
   sessionId: string;
@@ -120,6 +121,7 @@ export function SessionStorageList() {
       </div>
       <div className="overflow-hidden border border-[var(--color-card-border)] bg-[var(--color-card-border)]">
         <div className="flex items-center gap-3 bg-[#050805] px-4 py-3 text-sm">
+          <PlatformBrandIcon brand={active.platform ?? "youtube"} size="sm" />
           <div className="min-w-0 flex-1">
             <Link
               href={`/sessions/${active.sessionId}`}

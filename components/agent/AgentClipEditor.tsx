@@ -7,6 +7,14 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Crosshair,
+  DiamondPlus,
+  RotateCcw,
+  Trash2,
+} from "lucide-react";
 import { cn } from "@/lib/cn";
 import { formatSeconds } from "@/lib/time";
 import { MIN_CLIP_SECONDS, MAX_CLIP_SECONDS } from "@/lib/clipConstants";
@@ -40,9 +48,14 @@ import {
 } from "@/lib/browserFaceTracking";
 import { CaptionCueText } from "@/components/CaptionCueText";
 import {
-  activeDynamicPunchEvent,
-  buildDynamicPunchEvents,
-} from "@/lib/captionEmphasis";
+  previewCameraFrameAt,
+  type PreviewCropKeyframe,
+} from "@/lib/reframePlayback";
+import type { VerticalLayout } from "@/lib/verticalLayout";
+import type {
+  CropInterpolation,
+  ManualReframeKeyframe,
+} from "@/lib/professionalReframe";
 
 interface TranscriptChunk {
   id: string;
@@ -59,8 +72,6 @@ interface AgentClipEditorProps {
   sourceDuration: number;
   includeCaptions: boolean;
   onIncludeCaptionsChange: (value: boolean) => void;
-  dynamicPunchInEnabled: boolean;
-  onDynamicPunchInChange: (value: boolean) => void;
   captionAppearance: CaptionAppearance;
   onCaptionAppearanceChange: (value: CaptionAppearance) => void;
   onClipChange: (clip: ClipSuggestionData) => void;
@@ -68,32 +79,13 @@ interface AgentClipEditorProps {
   lookPreset?: ContentLookPresetId;
   /** Normalized face box for centering look crops. */
   faceRect?: { x: number; y: number; width: number; height: number } | null;
-  faceKeyframes?: Array<{ timestampSeconds: number; centerX: number }>;
-}
-
-function trackedCenterAt(
-  keyframes: Array<{ timestampSeconds: number; centerX: number }>,
-  relativeTime: number
-): number | null {
-  if (keyframes.length === 0) return null;
-  if (relativeTime <= keyframes[0]!.timestampSeconds) {
-    return keyframes[0]!.centerX;
-  }
-  for (let index = 1; index < keyframes.length; index++) {
-    const next = keyframes[index]!;
-    if (relativeTime > next.timestampSeconds) continue;
-    const previous = keyframes[index - 1]!;
-    const span = Math.max(
-      0.001,
-      next.timestampSeconds - previous.timestampSeconds
-    );
-    const progress = Math.min(
-      1,
-      Math.max(0, (relativeTime - previous.timestampSeconds) / span)
-    );
-    return previous.centerX + (next.centerX - previous.centerX) * progress;
-  }
-  return keyframes[keyframes.length - 1]!.centerX;
+  faceKeyframes?: PreviewCropKeyframe[];
+  faceBaseCropWidth?: number | null;
+  autoResolvedLayout?: VerticalLayout | null;
+  manualCameraKeyframeCount?: number;
+  onAddCameraKeyframe?: (keyframe: ManualReframeKeyframe) => void;
+  onDeleteCameraKeyframe?: (relativeTime: number) => void;
+  onResetCameraKeyframes?: () => void;
 }
 
 export function AgentClipEditor({
@@ -103,14 +95,18 @@ export function AgentClipEditor({
   sourceDuration,
   includeCaptions,
   onIncludeCaptionsChange,
-  dynamicPunchInEnabled,
-  onDynamicPunchInChange,
   captionAppearance,
   onCaptionAppearanceChange,
   onClipChange,
   lookPreset = "auto",
   faceRect = null,
   faceKeyframes = [],
+  faceBaseCropWidth = null,
+  autoResolvedLayout = null,
+  manualCameraKeyframeCount = 0,
+  onAddCameraKeyframe,
+  onDeleteCameraKeyframe,
+  onResetCameraKeyframes,
 }: AgentClipEditorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
@@ -130,6 +126,8 @@ export function AgentClipEditor({
   const [browserTrackingStatus, setBrowserTrackingStatus] = useState<
     "idle" | "loading" | "ready" | "unavailable"
   >("idle");
+  const [cameraInterpolation, setCameraInterpolation] =
+    useState<CropInterpolation>("ease_in_out");
   const startRef = useRef(clip.startTimeSeconds);
   const endRef = useRef(clip.endTimeSeconds);
   startRef.current = clip.startTimeSeconds;
@@ -167,7 +165,11 @@ export function AgentClipEditor({
       const [events, cap] = await Promise.all([
         fetchJson<{
           transcriptChunks?: TranscriptChunk[];
-        }>(`/api/sessions/${sessionId}/events`),
+        }>(
+          `/api/sessions/${sessionId}/events?start=${encodeURIComponent(
+            Math.max(0, clip.startTimeSeconds - 120)
+          )}&end=${encodeURIComponent(clip.endTimeSeconds + 120)}`
+        ),
         fetchJson<{ edits?: CaptionEditsMap }>(
           `/api/sessions/${sessionId}/captions`
         ),
@@ -184,7 +186,12 @@ export function AgentClipEditor({
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [
+    sessionId,
+    clip.id,
+    clip.startTimeSeconds,
+    clip.endTimeSeconds,
+  ]);
 
   const cues = useMemo(() => {
     const track = buildCaptionTrack(chunks, "vertical");
@@ -200,32 +207,24 @@ export function AgentClipEditor({
     () => lookupCueAtTime(cues, currentTime),
     [cues, currentTime]
   );
-  const dynamicPunchEvents = useMemo(
-    () => buildDynamicPunchEvents(cues),
-    [cues]
-  );
-  const activePunch = useMemo(
-    () =>
-      dynamicPunchInEnabled
-        ? activeDynamicPunchEvent(dynamicPunchEvents, currentTime)
-        : null,
-    [dynamicPunchEvents, dynamicPunchInEnabled, currentTime]
-  );
-
   const previewStyles = useMemo(
     () => captionPreviewStyle(captionAppearance, previewHeight),
     [captionAppearance, previewHeight]
   );
 
-  const trackedFaceCenterX = useMemo(
+  const trackedCameraFrame = useMemo(
     () =>
-      trackedCenterAt(
+      previewCameraFrameAt(
         faceKeyframes,
         Math.max(0, currentTime - clip.startTimeSeconds)
       ),
     [faceKeyframes, currentTime, clip.startTimeSeconds]
   );
   const needsFaceTracking = getContentLookPreset(lookPreset).needsFaceAnalysis;
+  const effectiveLayout =
+    (lookPreset === "auto" ? autoResolvedLayout : null) ??
+    getContentLookPreset(lookPreset).layout;
+  const usesVirtualCamera = effectiveLayout === "subject_aware_crop";
   const hasServerTracking = faceKeyframes.length > 0;
 
   useEffect(() => {
@@ -313,10 +312,65 @@ export function AgentClipEditor({
 
   const effectiveFaceRect = faceRect ?? browserFaceRect;
   const effectiveFaceCenterX =
-    trackedFaceCenterX ??
+    trackedCameraFrame?.centerX ??
     (browserFaceRect
       ? browserFaceRect.x + browserFaceRect.width / 2
       : null);
+  const effectiveFaceCenterY = trackedCameraFrame?.centerY ?? null;
+  const effectiveZoom =
+    faceBaseCropWidth && trackedCameraFrame?.cropWidth
+      ? Math.min(
+          1.35,
+          Math.max(1, faceBaseCropWidth / trackedCameraFrame.cropWidth)
+        )
+      : 1;
+
+  const addCameraKeyframe = useCallback(
+    (patch: Partial<ManualReframeKeyframe> = {}) => {
+      if (!onAddCameraKeyframe) return;
+      const baseWidth =
+        trackedCameraFrame?.cropWidth ?? faceBaseCropWidth ?? 0.316;
+      const baseHeight = trackedCameraFrame?.cropHeight ?? 1;
+      const cropWidth = Math.min(
+        1,
+        Math.max(0.05, patch.cropWidth ?? baseWidth)
+      );
+      const cropHeight = Math.min(
+        1,
+        Math.max(0.05, patch.cropHeight ?? baseHeight)
+      );
+      onAddCameraKeyframe({
+        timestampSeconds: Math.max(0, currentTime - clip.startTimeSeconds),
+        centerX: Math.min(
+          1 - cropWidth / 2,
+          Math.max(
+            cropWidth / 2,
+            patch.centerX ?? effectiveFaceCenterX ?? 0.5
+          )
+        ),
+        centerY: Math.min(
+          1 - cropHeight / 2,
+          Math.max(
+            cropHeight / 2,
+            patch.centerY ?? effectiveFaceCenterY ?? 0.5
+          )
+        ),
+        cropWidth,
+        cropHeight,
+        interpolation: patch.interpolation ?? cameraInterpolation,
+      });
+    },
+    [
+      cameraInterpolation,
+      clip.startTimeSeconds,
+      currentTime,
+      effectiveFaceCenterX,
+      effectiveFaceCenterY,
+      faceBaseCropWidth,
+      onAddCameraKeyframe,
+      trackedCameraFrame,
+    ]
+  );
 
   useEffect(() => {
     const video = videoRef.current;
@@ -464,7 +518,9 @@ export function AgentClipEditor({
             videoRef={videoRef}
             faceRect={effectiveFaceRect}
             faceCenterX={effectiveFaceCenterX}
-            dynamicPunchActive={Boolean(activePunch)}
+            faceCenterY={effectiveFaceCenterY}
+            zoom={effectiveZoom}
+            layoutOverride={lookPreset === "auto" ? autoResolvedLayout : null}
             className="mx-auto max-h-[56vh] w-full rounded-none border-0"
             onTimeUpdate={(e) => {
               const t = e.currentTarget.currentTime;
@@ -503,10 +559,9 @@ export function AgentClipEditor({
                     <p
                       key={activeCue.id}
                       style={previewStyles.text}
-                      className={cn(
-                        "whitespace-pre-line line-clamp-2",
-                        captionAnimationClass(captionAppearance.animation)
-                      )}
+                      className={`whitespace-pre-line break-words ${captionAnimationClass(
+                        captionAppearance.animation
+                      )}`}
                     >
                       <CaptionCueText
                         cue={activeCue}
@@ -521,6 +576,115 @@ export function AgentClipEditor({
           </LookVideoStage>
         </div>
       </div>
+
+      {usesVirtualCamera && hasServerTracking && onAddCameraKeyframe && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--color-card-border)] bg-[var(--color-card)] p-2">
+          <div
+            className="flex h-8 items-center rounded-md border border-[var(--color-card-border)] bg-[var(--color-secondary)] p-0.5"
+            role="group"
+            aria-label="Camera keyframe transition"
+          >
+            {(
+              [
+                ["ease_in_out", "Move"],
+                ["cut", "Cut"],
+                ["hold", "Hold"],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setCameraInterpolation(value)}
+                className={cn(
+                  "h-7 rounded px-2 text-[10px] font-semibold transition-colors",
+                  cameraInterpolation === value
+                    ? "bg-[var(--color-foreground)] text-[var(--color-background)]"
+                    : "text-[var(--color-muted)] hover:text-[var(--color-foreground)]"
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex h-8 items-center rounded-md border border-[var(--color-card-border)] bg-[var(--color-secondary)] p-0.5">
+            <button
+              type="button"
+              onClick={() =>
+                addCameraKeyframe({
+                  centerX: (effectiveFaceCenterX ?? 0.5) - 0.05,
+                })
+              }
+              className="flex h-7 w-7 items-center justify-center rounded text-[var(--color-muted)] hover:bg-[var(--color-card)] hover:text-[var(--color-foreground)]"
+              aria-label="Nudge camera left and add keyframe"
+              title="Nudge camera left"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => addCameraKeyframe({ centerX: 0.5 })}
+              className="flex h-7 w-7 items-center justify-center rounded text-[var(--color-muted)] hover:bg-[var(--color-card)] hover:text-[var(--color-foreground)]"
+              aria-label="Recenter camera and add keyframe"
+              title="Recenter camera"
+            >
+              <Crosshair className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                addCameraKeyframe({
+                  centerX: (effectiveFaceCenterX ?? 0.5) + 0.05,
+                })
+              }
+              className="flex h-7 w-7 items-center justify-center rounded text-[var(--color-muted)] hover:bg-[var(--color-card)] hover:text-[var(--color-foreground)]"
+              aria-label="Nudge camera right and add keyframe"
+              title="Nudge camera right"
+            >
+              <ArrowRight className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => addCameraKeyframe()}
+            className="flex h-8 items-center gap-1.5 rounded-md bg-[var(--color-accent)] px-2.5 text-[11px] font-semibold text-[var(--color-accent-foreground)] hover:bg-[var(--color-accent-hover)]"
+          >
+            <DiamondPlus className="h-3.5 w-3.5" />
+            Add keyframe
+          </button>
+
+          <div className="ml-auto flex items-center gap-1">
+            <span className="mr-1 text-[10px] font-medium text-[var(--color-muted)]">
+              {manualCameraKeyframeCount} manual
+            </span>
+            <button
+              type="button"
+              disabled={manualCameraKeyframeCount === 0}
+              onClick={() =>
+                onDeleteCameraKeyframe?.(
+                  Math.max(0, currentTime - clip.startTimeSeconds)
+                )
+              }
+              className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--color-muted)] hover:bg-[var(--color-secondary)] hover:text-[var(--color-foreground)] disabled:opacity-35"
+              aria-label="Delete nearest manual camera keyframe"
+              title="Delete nearest keyframe"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              disabled={manualCameraKeyframeCount === 0}
+              onClick={onResetCameraKeyframes}
+              className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--color-muted)] hover:bg-[var(--color-secondary)] hover:text-[var(--color-foreground)] disabled:opacity-35"
+              aria-label="Reset camera framing to Auto"
+              title="Reset to Auto"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="space-y-2 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-3">
         <div className="flex justify-between text-[11px] text-[var(--color-muted)]">
@@ -582,18 +746,6 @@ export function AgentClipEditor({
             />
             Show &amp; burn captions
           </label>
-          <label className="flex items-center gap-2 text-xs">
-            <input
-              type="checkbox"
-              checked={dynamicPunchInEnabled}
-              onChange={(e) => onDynamicPunchInChange(e.target.checked)}
-              className="accent-[var(--color-accent)]"
-            />
-            Dynamic punch-ins
-          </label>
-          <p className="text-[10px] leading-4 text-[var(--color-muted)]">
-            Adds restrained zooms around emphasized moments.
-          </p>
           <CaptionAppearancePanel
             appearance={captionAppearance}
             onChange={onCaptionAppearanceChange}

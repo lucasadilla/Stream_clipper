@@ -82,6 +82,7 @@ export async function resolvePublishMedia(options: {
   clipSuggestionId: string;
   platform: SocialPlatform;
   youtubeFormat?: "shorts" | "standard";
+  instagramFormat?: "reel" | "feed";
 }): Promise<PreparedMedia> {
   const clip = await loadClipContext(options.clipSuggestionId);
   const preferredExportKey =
@@ -92,7 +93,9 @@ export async function resolvePublishMedia(options: {
       : options.platform === "tiktok"
         ? "tiktok"
         : options.platform === "instagram"
-          ? "instagram_reels"
+          ? options.instagramFormat === "feed"
+            ? "instagram_feed"
+            : "instagram_reels"
           : options.platform === "facebook"
             ? "facebook_reels"
             : options.platform === "x"
@@ -215,6 +218,7 @@ export async function createPublishGroup(options: {
       clipSuggestionId: clip.id,
       platform: dest.platform,
       youtubeFormat: settings.youtubeFormat,
+      instagramFormat: settings.instagramFormat,
     });
 
     let content = dest.content
@@ -799,6 +803,7 @@ export async function executeSocialPublishJob(jobId: string): Promise<void> {
         ).clipSuggestionId,
         platform: job.platform as SocialPlatform,
         youtubeFormat: settings.youtubeFormat,
+        instagramFormat: settings.instagramFormat,
       });
       await prisma.socialPublishJob.update({
         where: { id: jobId },

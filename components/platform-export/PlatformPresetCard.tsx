@@ -1,5 +1,6 @@
 import type { PlatformKey } from "@/lib/platforms/types";
 import { cn } from "@/lib/cn";
+import { PlatformBrandIcon } from "@/components/brand/PlatformBrandIcon";
 
 export interface PlatformCardDefinition {
   key: PlatformKey;
@@ -39,16 +40,7 @@ export function PlatformPresetCard({
       />
       <div className="pointer-events-none relative z-10 flex h-full flex-col">
         <div className="flex items-start justify-between gap-4">
-          <span
-            className={cn(
-              "flex h-9 min-w-9 items-center justify-center border px-2 font-mono text-[10px] font-bold",
-              selected
-                ? "border-[#95ff00] bg-[#95ff00] text-black"
-                : "border-[#34402f] text-[#96a390]"
-            )}
-          >
-            {platform.short}
-          </span>
+          <PlatformBrandIcon brand={platform.key} size="sm" />
           <span
             aria-hidden="true"
             className={cn(

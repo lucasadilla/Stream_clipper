@@ -9,7 +9,18 @@ import {
   type SyntheticEvent,
 } from "react";
 import { createPortal } from "react-dom";
-import { Pause, Play, RotateCcw, X } from "lucide-react";
+import {
+  Check,
+  Copy,
+  Download,
+  Link2,
+  LockKeyhole,
+  Pause,
+  Play,
+  RotateCcw,
+  Send,
+  X,
+} from "lucide-react";
 import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/button";
 import { AgentClipEditor } from "@/components/agent/AgentClipEditor";
@@ -33,10 +44,6 @@ import {
   type TranscriptChunkInput,
 } from "@/lib/captionTrack";
 import {
-  activeDynamicPunchEvent,
-  buildDynamicPunchEvents,
-} from "@/lib/captionEmphasis";
-import {
   CONTENT_LOOK_PRESETS,
   getContentLookPreset,
   lookPresetFromLayout,
@@ -58,8 +65,35 @@ import { triggerFileDownload } from "@/lib/clientDownload";
 import { clipThumbnailApiUrl } from "@/lib/downloadUrls";
 import { fetchJson } from "@/lib/apiClient";
 import { formatSeconds } from "@/lib/time";
+import { PlatformBrandIcon } from "@/components/brand/PlatformBrandIcon";
+import type {
+  ManualReframeKeyframe,
+  ReframeStyle,
+} from "@/lib/professionalReframe";
+import type { VerticalLayout } from "@/lib/verticalLayout";
+import {
+  previewCameraFrameAt,
+  type PreviewCropKeyframe,
+} from "@/lib/reframePlayback";
 
 type StudioTab = "edit" | "preview" | "export";
+
+function mergeManualPreviewKeyframes(
+  automatic: PreviewCropKeyframe[],
+  manual: ManualReframeKeyframe[]
+): PreviewCropKeyframe[] {
+  if (manual.length === 0) return automatic;
+  return [
+    ...automatic.filter(
+      (frame) =>
+        !manual.some(
+          (override) =>
+            Math.abs(override.timestampSeconds - frame.timestampSeconds) < 0.2
+        )
+    ),
+    ...manual,
+  ].sort((a, b) => a.timestampSeconds - b.timestampSeconds);
+}
 
 const PREVIEW_PLATFORMS: PlatformKey[] = [
   "youtube_shorts",
@@ -164,10 +198,8 @@ interface AgentClipStudioModalProps {
   playbackUrl: string | null;
   sourceDuration: number;
   includeCaptions: boolean;
-  dynamicPunchInEnabled: boolean;
   captionAppearance: CaptionAppearance;
   onIncludeCaptionsChange: (value: boolean) => void;
-  onDynamicPunchInChange: (value: boolean) => void;
   onCaptionAppearanceChange: (value: CaptionAppearance) => void;
   onClipChange: (clip: ClipSuggestionData) => void;
   onClose: () => void;
@@ -176,7 +208,10 @@ interface AgentClipStudioModalProps {
 function buildVerticalSelection(
   presetId: ContentLookPresetId,
   faceAnalysisJobId: string | null,
-  captionsEnabled: boolean
+  captionsEnabled: boolean,
+  reframeStyle: ReframeStyle = "professional",
+  lockSubject = false,
+  manualKeyframes: ManualReframeKeyframe[] = []
 ): VerticalLayoutSelection {
   const preset = getContentLookPreset(presetId);
   const base = defaultVerticalLayoutSelection();
@@ -185,6 +220,12 @@ function buildVerticalSelection(
     layout: preset.layout,
     faceAnalysisJobId: faceAnalysisJobId ?? undefined,
     faceSelection: { mode: "auto" },
+    reframe: {
+      ...base.reframe,
+      style: reframeStyle,
+      lockSubject,
+      manualKeyframes,
+    },
     stacked: {
       ...base.stacked,
       facecamPosition: "top",
@@ -208,10 +249,8 @@ export function AgentClipStudioModal({
   playbackUrl,
   sourceDuration,
   includeCaptions,
-  dynamicPunchInEnabled,
   captionAppearance,
   onIncludeCaptionsChange,
-  onDynamicPunchInChange,
   onCaptionAppearanceChange,
   onClipChange,
   onClose,
@@ -220,6 +259,9 @@ export function AgentClipStudioModal({
   const scrollRef = useRef<HTMLDivElement>(null);
   const [tab, setTab] = useState<StudioTab>("edit");
   const [lookPreset, setLookPreset] = useState<ContentLookPresetId>("auto");
+  const [reframeStyle, setReframeStyle] =
+    useState<ReframeStyle>("professional");
+  const [lockSubject, setLockSubject] = useState(false);
   const [faceJobId, setFaceJobId] = useState<string | null>(null);
   const [faceRect, setFaceRect] = useState<{
     x: number;
@@ -227,9 +269,14 @@ export function AgentClipStudioModal({
     width: number;
     height: number;
   } | null>(null);
-  const [faceKeyframes, setFaceKeyframes] = useState<
-    Array<{ timestampSeconds: number; centerX: number }>
+  const [faceKeyframes, setFaceKeyframes] = useState<PreviewCropKeyframe[]>([]);
+  const [faceBaseCropWidth, setFaceBaseCropWidth] = useState<number | null>(null);
+  const [autoResolvedLayout, setAutoResolvedLayout] =
+    useState<VerticalLayout | null>(null);
+  const [manualReframeKeyframes, setManualReframeKeyframes] = useState<
+    ManualReframeKeyframe[]
   >([]);
+  const manualReframeKeyframesRef = useRef<ManualReframeKeyframe[]>([]);
   const [analyzingFace, setAnalyzingFace] = useState(false);
   const [analysisProgress, setAnalysisProgress] = useState(0);
   const [faceTrackingReady, setFaceTrackingReady] = useState(false);
@@ -263,6 +310,12 @@ export function AgentClipStudioModal({
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [packing, setPacking] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [copyingPackage, setCopyingPackage] = useState(false);
+  const [downloadingPlatform, setDownloadingPlatform] =
+    useState<PlatformKey | null>(null);
+  const [platformDownloadUrls, setPlatformDownloadUrls] = useState<
+    Partial<Record<PlatformKey, string>>
+  >({});
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionOk, setActionOk] = useState<string | null>(null);
   includeCaptionsRef.current = includeCaptions;
@@ -296,22 +349,37 @@ export function AgentClipStudioModal({
     userChoseLookRef.current = false;
     setTab("edit");
     setDownloadUrl(null);
+    setPlatformDownloadUrls({});
+    setDownloadingPlatform(null);
+    setCopyingPackage(false);
     setActionError(null);
     setActionOk(null);
-    setPlatformCopies(platformCopiesForClip(clip));
+    setPlatformCopies(
+      platformCopiesForClip({ title: clip.title, reason: clip.reason })
+    );
     setPreviewTime(clip.startTimeSeconds);
     setPreviewPlaying(false);
     setLookPreset("auto");
+    setReframeStyle("professional");
+    setLockSubject(false);
     setFaceJobId(null);
     setFaceRect(null);
     setFaceKeyframes([]);
+    setFaceBaseCropWidth(null);
+    setAutoResolvedLayout(null);
+    manualReframeKeyframesRef.current = [];
+    setManualReframeKeyframes([]);
     setAnalyzingFace(true);
     setAnalysisProgress(0);
     setFaceTrackingReady(false);
     setAnalysisError(null);
 
     void (async () => {
-      const loadFaceFromJob = async (jobId: string) => {
+      const loadFaceFromJob = async (
+        jobId: string,
+        requestedStyle: ReframeStyle = "professional",
+        requestedLock = false
+      ) => {
         const poll = await fetchJson<{
           error?: string;
           job?: {
@@ -335,10 +403,23 @@ export function AgentClipStudioModal({
             previewKeyframes?: Array<{
               timestampSeconds: number;
               centerX: number;
+              centerY?: number;
+              cropWidth?: number;
+              cropHeight?: number;
+              interpolation?: "hold" | "ease_in_out" | "linear" | "cut";
             }>;
             warnings?: string[];
+            sourceWidth?: number;
+            sourceHeight?: number;
+            recommendation?: { layout?: VerticalLayout };
           };
-        }>(`/api/face-analysis/${jobId}`);
+          }>(
+          `/api/face-analysis/${jobId}?style=${encodeURIComponent(
+            requestedStyle
+          )}&lockSubject=${requestedLock ? "true" : "false"}&startSeconds=${encodeURIComponent(
+            clip.startTimeSeconds
+          )}&endSeconds=${encodeURIComponent(clip.endTimeSeconds)}`
+        );
         if (cancelled) return "cancelled" as const;
         if (!poll.ok || !poll.data.job) {
           setAnalyzingFace(false);
@@ -364,12 +445,26 @@ export function AgentClipStudioModal({
         const candidate = job.primaryCandidate;
         const rect = candidate?.faceRect ?? candidate?.rect ?? null;
         if (rect) setFaceRect(rect);
+        setAutoResolvedLayout(job.recommendation?.layout ?? null);
+        if (job.sourceWidth && job.sourceHeight) {
+          setFaceBaseCropWidth(
+            Math.min(
+              1,
+              Math.max(0.05, (9 / 16) * (job.sourceHeight / job.sourceWidth))
+            )
+          );
+        }
         const keyframes = (job.previewKeyframes ?? []).filter(
           (keyframe) =>
             Number.isFinite(keyframe.timestampSeconds) &&
             Number.isFinite(keyframe.centerX)
         );
-        setFaceKeyframes(keyframes);
+        setFaceKeyframes(
+          mergeManualPreviewKeyframes(
+            keyframes,
+            manualReframeKeyframesRef.current
+          )
+        );
         setAnalyzingFace(false);
         setAnalysisProgress(100);
         setFaceTrackingReady(Boolean(rect || keyframes.length > 0));
@@ -389,9 +484,26 @@ export function AgentClipStudioModal({
         configuration?: {
           layout?: string;
           faceAnalysisJobId?: string | null;
+          settings?: {
+            reframe?: {
+              style?: ReframeStyle;
+              lockSubject?: boolean;
+              manualKeyframes?: ManualReframeKeyframe[];
+            };
+          };
         } | null;
       }>(`/api/clips/${clip.id}/vertical-layout`);
       if (ok && data.configuration) {
+        const savedStyle =
+          data.configuration.settings?.reframe?.style ?? "professional";
+        const savedLock =
+          data.configuration.settings?.reframe?.lockSubject ?? false;
+        const savedManual =
+          data.configuration.settings?.reframe?.manualKeyframes ?? [];
+        setReframeStyle(savedStyle);
+        setLockSubject(savedLock);
+        manualReframeKeyframesRef.current = savedManual;
+        setManualReframeKeyframes(savedManual);
         if (
           !userChoseLookRef.current &&
           lookGenRef.current === initialLookGeneration
@@ -401,7 +513,9 @@ export function AgentClipStudioModal({
         if (data.configuration.faceAnalysisJobId) {
           setFaceJobId(data.configuration.faceAnalysisJobId);
           const status = await loadFaceFromJob(
-            data.configuration.faceAnalysisJobId
+            data.configuration.faceAnalysisJobId,
+            savedStyle,
+            savedLock
           );
           if (status === "completed") return;
         }
@@ -483,9 +597,65 @@ export function AgentClipStudioModal({
   }, [
     open,
     clip.id,
+    clip.title,
+    clip.reason,
     clip.startTimeSeconds,
     clip.endTimeSeconds,
     sessionId,
+  ]);
+
+  useEffect(() => {
+    if (!open || !faceJobId || !faceTrackingReady) return;
+    let cancelled = false;
+    void fetchJson<{
+      job?: {
+        status?: string;
+        previewKeyframes?: PreviewCropKeyframe[];
+        sourceWidth?: number;
+        sourceHeight?: number;
+      };
+    }>(
+      `/api/face-analysis/${faceJobId}?style=${encodeURIComponent(
+        reframeStyle
+      )}&lockSubject=${lockSubject ? "true" : "false"}&startSeconds=${encodeURIComponent(
+        clip.startTimeSeconds
+      )}&endSeconds=${encodeURIComponent(clip.endTimeSeconds)}`
+    ).then(({ ok, data }) => {
+      if (cancelled || !ok || data.job?.status !== "completed") return;
+      setFaceKeyframes(
+        mergeManualPreviewKeyframes(
+          (data.job.previewKeyframes ?? []).filter(
+            (keyframe) =>
+              Number.isFinite(keyframe.timestampSeconds) &&
+              Number.isFinite(keyframe.centerX)
+          ),
+          manualReframeKeyframes
+        )
+      );
+      if (data.job.sourceWidth && data.job.sourceHeight) {
+        setFaceBaseCropWidth(
+          Math.min(
+            1,
+            Math.max(
+              0.05,
+              (9 / 16) * (data.job.sourceHeight / data.job.sourceWidth)
+            )
+          )
+        );
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    open,
+    faceJobId,
+    faceTrackingReady,
+    reframeStyle,
+    lockSubject,
+    clip.startTimeSeconds,
+    clip.endTimeSeconds,
+    manualReframeKeyframes,
   ]);
 
   useEffect(() => {
@@ -512,7 +682,9 @@ export function AgentClipStudioModal({
     void (async () => {
       const [events, captions] = await Promise.all([
         fetchJson<{ transcriptChunks?: TranscriptChunkInput[] }>(
-          `/api/sessions/${sessionId}/events`
+          `/api/sessions/${sessionId}/events?start=${encodeURIComponent(
+            Math.max(0, clip.startTimeSeconds - 2)
+          )}&end=${encodeURIComponent(clip.endTimeSeconds + 2)}`
         ),
         fetchJson<{ edits?: CaptionEditsMap }>(
           `/api/sessions/${sessionId}/captions`
@@ -529,17 +701,45 @@ export function AgentClipStudioModal({
     return () => {
       cancelled = true;
     };
-  }, [open, sessionId, tab]);
+  }, [open, sessionId, tab, clip.id, clip.startTimeSeconds, clip.endTimeSeconds]);
 
   const previewMeta = PLATFORM_PRESETS[previewPlatform];
   const thumbUrl = clipThumbnailApiUrl(clip.id);
 
   const duration = clip.endTimeSeconds - clip.startTimeSeconds;
   const activePlatformCopy = platformCopies[previewPlatform];
+  const activeSocialPlatform = EXPORT_TO_SOCIAL[previewPlatform] ?? null;
+  const activePlatformAccounts = useMemo(
+    () =>
+      activeSocialPlatform
+        ? accounts.filter((account) => account.platform === activeSocialPlatform)
+        : [],
+    [accounts, activeSocialPlatform]
+  );
+  const activePlatformAccount =
+    activePlatformAccounts.find((account) => account.isDefault) ??
+    activePlatformAccounts[0] ??
+    null;
+  const activeConnectHref = activeSocialPlatform
+    ? `/api/social/accounts/${activeSocialPlatform}/connect?redirectAfter=${encodeURIComponent(
+        `/sessions/${sessionId}`
+      )}`
+    : "/settings/connected-accounts";
   const previewElapsed = Math.max(
     0,
     Math.min(duration, previewTime - clip.startTimeSeconds)
   );
+  const platformCameraFrame = useMemo(
+    () => previewCameraFrameAt(faceKeyframes, previewElapsed),
+    [faceKeyframes, previewElapsed]
+  );
+  const platformCameraZoom =
+    faceBaseCropWidth && platformCameraFrame?.cropWidth
+      ? Math.min(
+          1.35,
+          Math.max(1, faceBaseCropWidth / platformCameraFrame.cropWidth)
+        )
+      : 1;
   const platformCaptionCues = useMemo(() => {
     const track = buildCaptionTrack(platformCaptionChunks, "vertical");
     return applyCaptionEdits(track, platformCaptionEdits).filter(
@@ -556,17 +756,6 @@ export function AgentClipStudioModal({
   const activePlatformCaptionCue = useMemo(
     () => lookupCueAtTime(platformCaptionCues, previewTime),
     [platformCaptionCues, previewTime]
-  );
-  const platformPunchEvents = useMemo(
-    () => buildDynamicPunchEvents(platformCaptionCues),
-    [platformCaptionCues]
-  );
-  const activePlatformPunch = useMemo(
-    () =>
-      dynamicPunchInEnabled
-        ? activeDynamicPunchEvent(platformPunchEvents, previewTime)
-        : null,
-    [dynamicPunchInEnabled, platformPunchEvents, previewTime]
   );
   const durationHint = useMemo(() => {
     const rec = previewMeta.recommendedDuration;
@@ -651,11 +840,20 @@ export function AgentClipStudioModal({
   };
 
   const saveLayout = useCallback(
-    async (presetId: ContentLookPresetId, jobId: string | null) => {
+    async (
+      presetId: ContentLookPresetId,
+      jobId: string | null,
+      style: ReframeStyle = reframeStyle,
+      locked: boolean = lockSubject,
+      manual: ManualReframeKeyframe[] = manualReframeKeyframes
+    ) => {
       const selection = buildVerticalSelection(
         presetId,
         jobId,
-        includeCaptions
+        includeCaptions,
+        style,
+        locked,
+        manual
       );
       await fetchJson(`/api/clips/${clip.id}/vertical-layout`, {
         method: "PUT",
@@ -664,7 +862,13 @@ export function AgentClipStudioModal({
       });
       return selection;
     },
-    [clip.id, includeCaptions]
+    [
+      clip.id,
+      includeCaptions,
+      reframeStyle,
+      lockSubject,
+      manualReframeKeyframes,
+    ]
   );
 
   /** Instant look change — video updates via CSS; persist in background. */
@@ -699,6 +903,90 @@ export function AgentClipStudioModal({
     [clip.id, faceJobId, saveLayout]
   );
 
+  const selectReframeStyle = useCallback(
+    (style: ReframeStyle) => {
+      setReframeStyle(style);
+      void saveLayout(lookPreset, faceJobId, style, lockSubject);
+    },
+    [faceJobId, lockSubject, lookPreset, saveLayout]
+  );
+
+  const toggleSubjectLock = useCallback(() => {
+    const next = !lockSubject;
+    setLockSubject(next);
+    void saveLayout(lookPreset, faceJobId, reframeStyle, next);
+  }, [faceJobId, lockSubject, lookPreset, reframeStyle, saveLayout]);
+
+  const upsertManualCameraKeyframe = useCallback(
+    (keyframe: ManualReframeKeyframe) => {
+      const previousManual = manualReframeKeyframesRef.current;
+      const next = [
+        ...previousManual.filter(
+          (item) =>
+            Math.abs(item.timestampSeconds - keyframe.timestampSeconds) >= 0.2
+        ),
+        keyframe,
+      ].sort((a, b) => a.timestampSeconds - b.timestampSeconds);
+      manualReframeKeyframesRef.current = next;
+      setManualReframeKeyframes(next);
+      setFaceKeyframes((current) =>
+        mergeManualPreviewKeyframes(
+          current.filter(
+            (frame) =>
+              !previousManual.some(
+                (manual) =>
+                  Math.abs(manual.timestampSeconds - frame.timestampSeconds) <
+                  0.2
+              )
+          ),
+          next
+        )
+      );
+      void saveLayout(lookPreset, faceJobId, reframeStyle, lockSubject, next);
+    },
+    [faceJobId, lockSubject, lookPreset, reframeStyle, saveLayout]
+  );
+
+  const deleteManualCameraKeyframe = useCallback(
+    (relativeTime: number) => {
+      const previousManual = manualReframeKeyframesRef.current;
+      if (previousManual.length === 0) return;
+      const closest = [...previousManual].sort(
+        (a, b) =>
+          Math.abs(a.timestampSeconds - relativeTime) -
+          Math.abs(b.timestampSeconds - relativeTime)
+      )[0]!;
+      if (Math.abs(closest.timestampSeconds - relativeTime) > 0.75) return;
+      const next = previousManual.filter((item) => item !== closest);
+      manualReframeKeyframesRef.current = next;
+      setManualReframeKeyframes(next);
+      setFaceKeyframes((current) =>
+        current.filter(
+          (frame) =>
+            Math.abs(frame.timestampSeconds - closest.timestampSeconds) >= 0.2
+        )
+      );
+      void saveLayout(lookPreset, faceJobId, reframeStyle, lockSubject, next);
+    },
+    [faceJobId, lockSubject, lookPreset, reframeStyle, saveLayout]
+  );
+
+  const resetManualCameraKeyframes = useCallback(() => {
+    const previousManual = manualReframeKeyframesRef.current;
+    manualReframeKeyframesRef.current = [];
+    setManualReframeKeyframes([]);
+    setFaceKeyframes((current) =>
+      current.filter(
+        (frame) =>
+          !previousManual.some(
+            (manual) =>
+              Math.abs(manual.timestampSeconds - frame.timestampSeconds) < 0.2
+          )
+      )
+    );
+    void saveLayout(lookPreset, faceJobId, reframeStyle, lockSubject, []);
+  }, [faceJobId, lockSubject, lookPreset, reframeStyle, saveLayout]);
+
   async function handleRenderDownload() {
     setRendering(true);
     setActionError(null);
@@ -708,7 +996,10 @@ export function AgentClipStudioModal({
       const selection = buildVerticalSelection(
         lookPreset,
         faceJobId,
-        includeCaptions
+        includeCaptions,
+        reframeStyle,
+        lockSubject,
+        manualReframeKeyframes
       );
       const result = await renderClip(
         clip.id,
@@ -719,8 +1010,7 @@ export function AgentClipStudioModal({
         (u) => setRenderProgress(u.progress),
         undefined,
         undefined,
-        selection,
-        dynamicPunchInEnabled
+        selection
       );
       setDownloadUrl(result.downloadUrl);
       await triggerFileDownload(
@@ -744,7 +1034,10 @@ export function AgentClipStudioModal({
       const selection = buildVerticalSelection(
         lookPreset,
         faceJobId,
-        includeCaptions
+        includeCaptions,
+        reframeStyle,
+        lockSubject,
+        manualReframeKeyframes
       );
       const result = await renderClip(
         clip.id,
@@ -755,8 +1048,7 @@ export function AgentClipStudioModal({
         (u) => setRenderProgress(u.progress),
         undefined,
         undefined,
-        selection,
-        dynamicPunchInEnabled
+        selection
       );
       setDownloadUrl(result.downloadUrl);
       onClipChange({ ...clip, status: "rendered" });
@@ -766,6 +1058,201 @@ export function AgentClipStudioModal({
       return false;
     } finally {
       setRendering(false);
+    }
+  }
+
+  function activePackageText(): string {
+    const copy = platformCopies[previewPlatform];
+    return [
+      copy.title,
+      previewPlatform === "x" ? copy.postText : copy.caption,
+      copy.description,
+      copy.hashtags.join(" "),
+      copy.tags.length > 0 ? copy.tags.join(", ") : null,
+      copy.pinnedComment ? `Pinned comment: ${copy.pinnedComment}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  async function handleCopyActivePackage() {
+    try {
+      await navigator.clipboard.writeText(activePackageText());
+      setCopyingPackage(true);
+      setActionError(null);
+      window.setTimeout(() => setCopyingPackage(false), 1400);
+    } catch {
+      setActionError("Could not copy the post package.");
+    }
+  }
+
+  async function preparePlatformDownload(platform: PlatformKey): Promise<string> {
+    const existing = platformDownloadUrls[platform];
+    if (existing) return existing;
+
+    const ready = await ensureRendered();
+    if (!ready) throw new Error("The clip could not be rendered.");
+
+    const response = await fetch(`/api/clips/${clip.id}/platform-exports`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        selected: [platform],
+        platforms: [platform],
+        includeCaptions,
+        burnSubtitles: includeCaptions,
+        generateCopy: true,
+        copyOverrides: { [platform]: platformCopies[platform] },
+      }),
+    });
+    const body = (await response.json()) as {
+      error?: string;
+      pack?: { id?: string };
+    };
+    if (!response.ok || !body.pack?.id) {
+      throw new Error(body.error ?? "Could not prepare this platform export.");
+    }
+
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      const packResponse = await fetch(
+        `/api/platform-export-packs/${body.pack.id}`,
+        { cache: "no-store" }
+      );
+      const packBody = (await packResponse.json()) as {
+        error?: string;
+        pack?: {
+          exports?: Array<{
+            platform: PlatformKey;
+            status: string;
+            progress: number;
+            downloadUrl: string | null;
+            errorMessage?: string | null;
+          }>;
+        };
+      };
+      if (!packResponse.ok) {
+        throw new Error(packBody.error ?? "Could not check the platform export.");
+      }
+      const item = packBody.pack?.exports?.find(
+        (candidate) => candidate.platform === platform
+      );
+      if (item) {
+        setRenderProgress(item.progress);
+        if (item.status === "completed" && item.downloadUrl) {
+          setPlatformDownloadUrls((current) => ({
+            ...current,
+            [platform]: item.downloadUrl!,
+          }));
+          return item.downloadUrl;
+        }
+        if (item.status === "failed") {
+          throw new Error(item.errorMessage ?? "Platform export failed.");
+        }
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    }
+    throw new Error("Timed out preparing the platform export.");
+  }
+
+  async function handlePlatformPreviewDownload() {
+    setDownloadingPlatform(previewPlatform);
+    setActionError(null);
+    setActionOk(null);
+    try {
+      const url = await preparePlatformDownload(previewPlatform);
+      await triggerFileDownload(
+        url,
+        `${clip.title.slice(0, 40) || "clip"}-${previewPlatform}.mp4`
+      );
+      setActionOk(`${PLATFORM_PRESETS[previewPlatform].name} download started.`);
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : "Platform download failed."
+      );
+    } finally {
+      setDownloadingPlatform(null);
+    }
+  }
+
+  async function handlePlatformPreviewPost() {
+    if (!activePlatformAccount || !activeSocialPlatform) return;
+    setPublishing(true);
+    setActionError(null);
+    setActionOk(null);
+    try {
+      await preparePlatformDownload(previewPlatform);
+      const settings = {
+        ...(activeSocialPlatform === "youtube"
+          ? {
+              youtubeFormat:
+                previewPlatform === "youtube_landscape"
+                  ? ("standard" as const)
+                  : ("shorts" as const),
+            }
+          : {}),
+        ...(activeSocialPlatform === "facebook"
+          ? { facebookFormat: "reel" as const }
+          : {}),
+        ...(activeSocialPlatform === "instagram"
+          ? {
+              instagramFormat:
+                previewPlatform === "instagram_feed"
+                  ? ("feed" as const)
+                  : ("reel" as const),
+            }
+          : {}),
+      };
+      const response = await fetch(
+        `/api/social/clips/${clip.id}/publish-groups`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            destinations: [
+              {
+                connectedSocialAccountId: activePlatformAccount.id,
+                platform: activeSocialPlatform,
+                settings,
+                content: socialContentFromCopy(
+                  activeSocialPlatform,
+                  platformCopies[previewPlatform]
+                ),
+              },
+            ],
+          }),
+        }
+      );
+      const body = (await response.json()) as {
+        error?: string;
+        group?: { id?: string };
+      };
+      if (!response.ok) throw new Error(body.error ?? "Publish failed.");
+      if (!body.group?.id) throw new Error("Publish draft was not created.");
+
+      const publishResponse = await fetch(
+        `/api/social/publish-groups/${body.group.id}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "publish" }),
+        }
+      );
+      const publishBody = (await publishResponse.json()) as { error?: string };
+      if (!publishResponse.ok) {
+        throw new Error(publishBody.error ?? "Could not queue the post.");
+      }
+      setActionOk(
+        `${PLATFORM_PRESETS[previewPlatform].name} post queued for ${
+          activePlatformAccount.displayName ||
+          activePlatformAccount.username ||
+          "your connected account"
+        }.`
+      );
+      window.open(`/clips/${clip.id}/publish`, "_blank");
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Publish failed.");
+    } finally {
+      setPublishing(false);
     }
   }
 
@@ -1022,6 +1509,52 @@ export function AgentClipStudioModal({
                     );
                   })}
                 </div>
+                {(lookPreset === "just_chatting" || lookPreset === "auto") && (
+                  <div className="mt-3 flex flex-col gap-2 rounded-lg border border-[var(--color-card-border)] bg-[var(--color-secondary)]/45 p-2.5 sm:flex-row sm:items-center sm:justify-between">
+                    <div
+                      className="grid min-w-0 grid-cols-5 gap-1"
+                      role="group"
+                      aria-label="Auto framing style"
+                    >
+                      {(
+                        [
+                          ["professional", "Pro"],
+                          ["dynamic", "Dynamic"],
+                          ["stable", "Stable"],
+                          ["close", "Close"],
+                          ["context", "Context"],
+                        ] as const
+                      ).map(([id, label]) => (
+                        <button
+                          key={id}
+                          type="button"
+                          onClick={() => selectReframeStyle(id)}
+                          className={cn(
+                            "min-w-0 rounded-md px-2 py-1.5 text-[10px] font-semibold transition-colors sm:text-[11px]",
+                            reframeStyle === id
+                              ? "bg-[var(--color-foreground)] text-[var(--color-background)]"
+                              : "text-[var(--color-muted)] hover:bg-[var(--color-card)] hover:text-[var(--color-foreground)]"
+                          )}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={toggleSubjectLock}
+                      className={cn(
+                        "flex shrink-0 items-center justify-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] font-semibold transition-colors",
+                        lockSubject
+                          ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
+                          : "border-[var(--color-card-border)] text-[var(--color-muted)] hover:text-[var(--color-foreground)]"
+                      )}
+                    >
+                      <LockKeyhole className="h-3.5 w-3.5" aria-hidden="true" />
+                      {lockSubject ? "Person locked" : "Lock person"}
+                    </button>
+                  </div>
+                )}
                 {analysisError && (
                   <p className="mt-2 text-xs text-[var(--color-warning,#e6b84d)]">
                     {analysisError}
@@ -1048,14 +1581,18 @@ export function AgentClipStudioModal({
                 sourceDuration={sourceDuration}
                 includeCaptions={includeCaptions}
                 onIncludeCaptionsChange={onIncludeCaptionsChange}
-                dynamicPunchInEnabled={dynamicPunchInEnabled}
-                onDynamicPunchInChange={onDynamicPunchInChange}
                 captionAppearance={captionAppearance}
                 onCaptionAppearanceChange={onCaptionAppearanceChange}
                 onClipChange={onClipChange}
                 lookPreset={lookPreset}
                 faceRect={faceRect}
                 faceKeyframes={faceKeyframes}
+                faceBaseCropWidth={faceBaseCropWidth}
+                autoResolvedLayout={autoResolvedLayout}
+                manualCameraKeyframeCount={manualReframeKeyframes.length}
+                onAddCameraKeyframe={upsertManualCameraKeyframe}
+                onDeleteCameraKeyframe={deleteManualCameraKeyframe}
+                onResetCameraKeyframes={resetManualCameraKeyframes}
               />
             </div>
           )}
@@ -1076,6 +1613,9 @@ export function AgentClipStudioModal({
                 onChange={(platform) => {
                   resetPreviewPlayback();
                   setPreviewPlatform(platform);
+                  setCopyingPackage(false);
+                  setActionError(null);
+                  setActionOk(null);
                 }}
               />
 
@@ -1097,7 +1637,12 @@ export function AgentClipStudioModal({
                         playbackUrl={playbackUrl}
                         videoRef={platformVideoRef}
                         faceRect={faceRect}
-                        dynamicPunchActive={Boolean(activePlatformPunch)}
+                        faceCenterX={platformCameraFrame?.centerX}
+                        faceCenterY={platformCameraFrame?.centerY}
+                        zoom={platformCameraZoom}
+                        layoutOverride={
+                          lookPreset === "auto" ? autoResolvedLayout : null
+                        }
                         className="h-full w-full rounded-none border-0"
                         onTimeUpdate={onPlatformPreviewTimeUpdate}
                         onPlay={() => setPreviewPlaying(true)}
@@ -1162,6 +1707,85 @@ export function AgentClipStudioModal({
                   onReset={resetPlatformCopy}
                 />
               </div>
+
+              <div className="flex w-full flex-col gap-4 border-y border-[var(--color-card-border)] bg-[#050805] px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-center gap-3">
+                  <PlatformBrandIcon brand={previewPlatform} size="sm" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-[var(--color-foreground)]">
+                      {previewMeta.name}
+                    </p>
+                    <p className="truncate text-[11px] text-[var(--color-muted)]">
+                      {activePlatformAccount
+                        ? `Connected to ${
+                            activePlatformAccount.displayName ||
+                            activePlatformAccount.username ||
+                            "your account"
+                          }`
+                        : `${previewMeta.name} is not connected`}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyActivePackage()}
+                    className="inline-flex h-10 items-center gap-2 border border-[var(--color-card-border)] px-3 text-xs font-semibold text-[var(--color-foreground)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                  >
+                    {copyingPackage ? (
+                      <Check className="h-4 w-4 text-[var(--color-accent)]" />
+                    ) : (
+                      <Copy className="h-4 w-4" />
+                    )}
+                    {copyingPackage ? "Copied" : "Copy package"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={Boolean(downloadingPlatform) || rendering || publishing}
+                    onClick={() => void handlePlatformPreviewDownload()}
+                    className="inline-flex h-10 items-center gap-2 border border-[var(--color-card-border)] px-3 text-xs font-semibold text-[var(--color-foreground)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-45"
+                  >
+                    <Download className="h-4 w-4" />
+                    {downloadingPlatform === previewPlatform ||
+                    (rendering && !publishing)
+                      ? `Preparing ${renderProgress}%`
+                      : platformDownloadUrls[previewPlatform]
+                        ? "Download again"
+                        : "Download video"}
+                  </button>
+                  {activePlatformAccount ? (
+                    <button
+                      type="button"
+                      disabled={publishing || Boolean(downloadingPlatform) || rendering}
+                      onClick={() => void handlePlatformPreviewPost()}
+                      className="inline-flex h-10 items-center gap-2 bg-[var(--color-accent)] px-4 text-xs font-semibold text-black transition-colors hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-45"
+                    >
+                      <Send className="h-4 w-4" />
+                      {publishing ? "Preparing post..." : "Post"}
+                    </button>
+                  ) : (
+                    <a
+                      href={activeConnectHref}
+                      className="inline-flex h-10 items-center gap-2 bg-[var(--color-accent)] px-4 text-xs font-semibold text-black transition-colors hover:bg-[var(--color-accent-hover)]"
+                    >
+                      <Link2 className="h-4 w-4" />
+                      Connect
+                    </a>
+                  )}
+                </div>
+              </div>
+
+              {(actionError || actionOk) && (
+                <div className="w-full text-center text-xs">
+                  {actionError && (
+                    <p className="text-[var(--color-danger)]">{actionError}</p>
+                  )}
+                  {actionOk && (
+                    <p className="text-[var(--color-accent)]">{actionOk}</p>
+                  )}
+                </div>
+              )}
 
               <Button
                 type="button"

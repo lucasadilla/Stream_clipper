@@ -5,10 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import posthog from "posthog-js";
 import { EditorHeader } from "@/components/layout/EditorHeader";
-import {
-  ClipSuggestionCard,
-  type ClipSuggestionData,
-} from "@/components/ClipSuggestionCard";
+import type { ClipSuggestionData } from "@/components/ClipSuggestionCard";
 import { AgentClipPickGrid } from "@/components/agent/AgentClipPickGrid";
 import { AgentClipEditor } from "@/components/agent/AgentClipEditor";
 import { AgentClipStudioModal } from "@/components/agent/AgentClipStudioModal";
@@ -38,7 +35,7 @@ import {
   PromptInputTextarea,
 } from "@/components/ui/prompt-input";
 import { Button } from "@/components/ui/button";
-import { ArrowUp } from "lucide-react";
+import { ArrowUp, MessageSquareText, Sparkles, X } from "lucide-react";
 import {
   DEFAULT_AGENT_WIZARD_STATE,
   LIVE_NOW_ROLL_SECONDS,
@@ -57,6 +54,7 @@ import {
 } from "@/components/VerticalLayoutPicker";
 import { triggerFileDownload } from "@/lib/clientDownload";
 import { LIVE_TICK_MS } from "@/lib/timelineConstants";
+import { mergeClipSuggestions } from "@/lib/clipSuggestionMerge";
 
 interface AgentSessionData {
   id: string;
@@ -112,21 +110,6 @@ function withThumbnails(
   }));
 }
 
-function mergeClipSuggestions(
-  current: ClipSuggestionData[],
-  incoming: ClipSuggestionData[]
-): ClipSuggestionData[] {
-  const incomingById = new Map(incoming.map((clip) => [clip.id, clip]));
-  const currentIds = new Set(current.map((clip) => clip.id));
-  return [
-    ...current.flatMap((clip) => {
-      const updated = incomingById.get(clip.id);
-      return updated ? [updated] : [];
-    }),
-    ...incoming.filter((clip) => !currentIds.has(clip.id)),
-  ];
-}
-
 export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   const router = useRouter();
   const [session, setSession] = useState<AgentSessionData | null>(null);
@@ -145,7 +128,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   const [wizard, setWizard] = useState<AgentWizardState>({
     ...DEFAULT_AGENT_WIZARD_STATE,
   });
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [suggesting, setSuggesting] = useState(false);
   const [findingElapsedSec, setFindingElapsedSec] = useState(0);
   const [getMoreLoading, setGetMoreLoading] = useState(false);
@@ -167,7 +149,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   const suggestStarted = useRef(false);
   const rollingInFlight = useRef(false);
   const liveTickInFlight = useRef(false);
-  const lastSessionRefreshAt = useRef(0);
   const visibleClips = useMemo(
     () => clips.filter((clip) => clip.status !== "rejected"),
     [clips]
@@ -208,7 +189,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     const nextWizard = readAgentWizardState(data.session.metadataJson);
     setWizard(nextWizard);
     if (nextWizard.selectedClipIds.length) {
-      setSelectedIds(new Set(nextWizard.selectedClipIds));
     }
   }, [sessionId]);
 
@@ -484,10 +464,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
         if (typeof data.searchableChunks === "number") {
           setSearchableChunks(data.searchableChunks);
         }
-        if (Date.now() - lastSessionRefreshAt.current >= 10_000) {
-          lastSessionRefreshAt.current = Date.now();
-          void loadSession().catch(() => {});
-        }
       } catch {
         // worker may still be progressing
       } finally {
@@ -510,7 +486,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     session?.id,
     transcriptionBehind,
     transcribedSeconds,
-    loadSession,
   ]);
 
   useEffect(() => {
@@ -654,9 +629,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   ]);
 
   const activeClipId =
-    wizard.selectedClipIds[wizard.queueIndex] ??
-    [...selectedIds][wizard.queueIndex] ??
-    null;
+    wizard.selectedClipIds[wizard.queueIndex] ?? null;
   const activeClip = clips.find((c) => c.id === activeClipId) ?? null;
   const studioClip = studioClipId
     ? clips.find((c) => c.id === studioClipId) ?? null
@@ -688,65 +661,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       alert(err instanceof Error ? err.message : "Delete failed");
       setDeleting(false);
     }
-  }
-
-  function toggleClip(clipId: string) {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(clipId)) next.delete(clipId);
-      else next.add(clipId);
-      return next;
-    });
-  }
-
-  async function continueFromPick() {
-    const ids = [...selectedIds];
-    if (ids.length === 0) {
-      alert("Select at least one clip to continue.");
-      return;
-    }
-    // live_now keeps unselected suggestions around for later; batch modes reject them.
-    const rejectOthers = wizard.cadence !== "live_now";
-    const rejectedIds = rejectOthers
-      ? clips.map((c) => c.id).filter((id) => !selectedIds.has(id))
-      : [];
-    await Promise.all([
-      ...ids.map((id) =>
-        fetchJson(`/api/clips/${id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: "saved" }),
-        })
-      ),
-      ...rejectedIds.map((id) =>
-        fetchJson(`/api/clips/${id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: "rejected" }),
-        })
-      ),
-    ]);
-    setClips((prev) =>
-      prev.map((c) => {
-        if (selectedIds.has(c.id)) return { ...c, status: "saved" };
-        if (rejectOthers) return { ...c, status: "rejected" };
-        return c;
-      })
-    );
-    await persistWizard({
-      step: "edit",
-      selectedClipIds: ids,
-      queueIndex: 0,
-      lookPreset: "auto",
-      faceAnalysisJobId: null,
-    });
-    setExportDoneUrl(null);
-    setExportError(null);
-    posthog.capture("agent_clips_picked", {
-      session_id: sessionId,
-      count: ids.length,
-      cadence: wizard.cadence,
-    });
   }
 
   async function continueFromEdit() {
@@ -809,7 +723,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           includeCaptions: wizard.includeCaptions,
-          dynamicPunchIn: wizard.dynamicPunchInEnabled,
           captionAppearance,
           format: "vertical",
           verticalLayout: selection,
@@ -916,7 +829,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
         const without = prev.filter((c) => c.id !== clip.id);
         return [clip, ...without];
       });
-      setSelectedIds((prev) => new Set(prev).add(clip.id));
       setTurns((prev) => [
         ...prev,
         {
@@ -930,11 +842,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       ]);
       if (wizard.step === "pick" || wizard.step === "transcribing") {
         await persistWizard({ step: "pick", suggestRequested: true });
-      } else if (!wizard.selectedClipIds.includes(clip.id)) {
-        // Add custom finds into the edit/export queue when past pick.
-        await persistWizard({
-          selectedClipIds: [...wizard.selectedClipIds, clip.id],
-        });
       }
     } catch (err) {
       setTurns((prev) => [
@@ -1148,7 +1055,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
         </button>
       )}
 
-      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+      <div className="relative flex min-h-0 flex-1 flex-col">
         <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-4">
           {wizard.cadence === "after_stream" &&
             !streamEnded && (
@@ -1248,21 +1155,18 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                 </p>
               )}
               {wizard.cadence === "live_now" && isLive && (
-                <p className="text-xs text-[var(--color-muted)]">
-                  New suggestions appear about every minute as the transcript
-                  grows. Select clips anytime to edit and export.
-                </p>
+                <div className="flex items-center gap-2 border-l-2 border-[var(--color-accent)] bg-[var(--color-accent)]/5 px-3 py-2 text-xs text-[var(--color-muted)]">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-accent)]" />
+                  New moments are added to the top while the stream continues.
+                </div>
               )}
               <AgentClipPickGrid
                 clips={withThumbnails(
                   sessionId,
                   visibleClips
                 )}
-                selectedIds={selectedIds}
-                onToggle={toggleClip}
                 onOpenClip={(id) => {
                   setStudioClipId(id);
-                  setSelectedIds((prev) => new Set(prev).add(id));
                 }}
                 onGetMore={() =>
                   void runSuggest({
@@ -1273,37 +1177,19 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                 getMoreLoading={getMoreLoading}
                 suggesting={suggesting}
                 findingElapsedSec={findingElapsedSec}
+                isLive={Boolean(isLive)}
+                onOpenAssistant={() => setShowFindChat(true)}
               />
-              <div className="flex flex-wrap items-center justify-between gap-3">
+              {!showFindChat && (
                 <button
                   type="button"
-                  className="text-xs text-[var(--color-accent)] hover:underline"
-                  onClick={() => setShowFindChat((v) => !v)}
+                  onClick={() => setShowFindChat(true)}
+                  className="fixed bottom-6 right-6 z-30 flex h-12 items-center gap-2 border border-[var(--color-accent)] bg-[var(--color-accent)] px-4 text-sm font-semibold text-black shadow-[0_16px_44px_rgba(0,0,0,0.35)] transition-transform hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-background)]"
                 >
-                  {showFindChat ? "Hide find chat" : "Find another moment"}
+                  <MessageSquareText className="h-4 w-4" aria-hidden="true" />
+                  Find a specific moment
                 </button>
-                <div className="flex flex-wrap gap-2">
-                  {selectedIds.size === 1 && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => {
-                        const id = [...selectedIds][0];
-                        if (id) setStudioClipId(id);
-                      }}
-                    >
-                      Open studio
-                    </Button>
-                  )}
-                  <Button
-                    type="button"
-                    disabled={selectedIds.size === 0}
-                    onClick={() => void continueFromPick()}
-                  >
-                    Batch wizard · {selectedIds.size || 0}
-                  </Button>
-                </div>
-              </div>
+              )}
             </div>
           )}
 
@@ -1346,10 +1232,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                 includeCaptions={wizard.includeCaptions}
                 onIncludeCaptionsChange={(value) => {
                   void persistWizard({ includeCaptions: value });
-                }}
-                dynamicPunchInEnabled={wizard.dynamicPunchInEnabled}
-                onDynamicPunchInChange={(value) => {
-                  void persistWizard({ dynamicPunchInEnabled: value });
                 }}
                 captionAppearance={captionAppearance}
                 onCaptionAppearanceChange={(next) => {
@@ -1444,8 +1326,31 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
           )}
 
           {(showFindChat || wizard.step === "pick") && showFindChat && (
-            <div className="mt-6 overflow-hidden rounded-xl border border-[var(--color-card-border)]">
-              <div className="relative max-h-72 min-h-[200px]">
+            <div className="fixed bottom-5 right-5 z-40 flex max-h-[min(620px,calc(100vh-2.5rem))] w-[min(410px,calc(100vw-2.5rem))] flex-col overflow-hidden border border-[var(--color-card-border)] bg-[var(--color-card)] shadow-[0_24px_80px_rgba(0,0,0,0.55)]">
+              <div className="flex items-center justify-between border-b border-[var(--color-card-border)] px-4 py-3">
+                <div className="flex items-center gap-3">
+                  <span className="grid h-8 w-8 place-items-center bg-[var(--color-accent)] text-black">
+                    <Sparkles className="h-4 w-4" aria-hidden="true" />
+                  </span>
+                  <div>
+                    <p className="text-sm font-semibold text-[var(--color-foreground)]">
+                      Moment assistant
+                    </p>
+                    <p className="text-[11px] text-[var(--color-muted)]">
+                      Describe it. Clipper finds it.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowFindChat(false)}
+                  className="grid h-8 w-8 place-items-center text-[var(--color-muted)] transition-colors hover:bg-white/5 hover:text-[var(--color-foreground)]"
+                  aria-label="Close moment assistant"
+                >
+                  <X className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </div>
+              <div className="relative min-h-[220px] flex-1 overflow-hidden">
                 <ChatContainerRoot className="h-full px-3">
                   <ChatContainerContent className="space-y-4 py-4">
                     {turns.length === 0 && (
@@ -1484,6 +1389,24 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                 </ChatContainerRoot>
               </div>
               <div className="border-t border-[var(--color-card-border)] p-3">
+                {turns.length === 0 && (
+                  <div className="mb-3 flex flex-wrap gap-1.5">
+                    {[
+                      "The funniest reaction",
+                      "When they talked about pricing",
+                      "The comeback near the end",
+                    ].map((example) => (
+                      <button
+                        key={example}
+                        type="button"
+                        onClick={() => setPrompt(example)}
+                        className="border border-[var(--color-card-border)] px-2.5 py-1.5 text-left text-[11px] text-[var(--color-muted)] transition-colors hover:border-[var(--color-accent)]/60 hover:text-[var(--color-foreground)]"
+                      >
+                        {example}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <PromptInput
                   value={prompt}
                   onValueChange={setPrompt}
@@ -1511,54 +1434,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
           )}
         </section>
 
-        <aside className="hidden min-h-0 w-[300px] shrink-0 flex-col border-l border-[var(--color-card-border)] lg:flex">
-          <div className="border-b border-[var(--color-card-border)] px-3 py-2">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8f9b89]">
-              Queue
-            </p>
-          </div>
-          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
-            {wizard.selectedClipIds.length === 0 ? (
-              <p className="text-xs text-[var(--color-muted)]">
-                Selected clips appear here.
-              </p>
-            ) : (
-              wizard.selectedClipIds.map((id, index) => {
-                const clip = clips.find((c) => c.id === id);
-                if (!clip) return null;
-                return (
-                  <div
-                    key={id}
-                    className={cn(
-                      "rounded-lg border p-2 text-xs",
-                      index === wizard.queueIndex
-                        ? "border-[var(--color-accent)]"
-                        : "border-[var(--color-card-border)]"
-                    )}
-                  >
-                    <p className="font-medium line-clamp-2">{clip.title}</p>
-                    <p className="mt-1 text-[10px] text-[var(--color-muted)]">
-                      {clip.status}
-                    </p>
-                  </div>
-                );
-              })
-            )}
-            {activeClip && wizard.step !== "pick" && (
-              <ClipSuggestionCard
-                clip={activeClip}
-                canRender={false}
-                includeCaptions={wizard.includeCaptions}
-                captionAppearance={captionAppearance}
-                onUpdate={(next) => {
-                  setClips((prev) =>
-                    prev.map((c) => (c.id === next.id ? next : c))
-                  );
-                }}
-              />
-            )}
-          </div>
-        </aside>
       </div>
 
       {studioClip && (
@@ -1569,13 +1444,9 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
           playbackUrl={playbackUrl}
           sourceDuration={recordedSeconds}
           includeCaptions={wizard.includeCaptions}
-          dynamicPunchInEnabled={wizard.dynamicPunchInEnabled}
           captionAppearance={captionAppearance}
           onIncludeCaptionsChange={(value) => {
             void persistWizard({ includeCaptions: value });
-          }}
-          onDynamicPunchInChange={(value) => {
-            void persistWizard({ dynamicPunchInEnabled: value });
           }}
           onCaptionAppearanceChange={(next) => {
             setCaptionAppearance(next);

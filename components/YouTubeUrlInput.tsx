@@ -9,6 +9,7 @@ import { cn } from "@/lib/cn";
 import type { BillingAccountSummary } from "@/services/billingService";
 import type { SessionMode } from "@/lib/sessionMode";
 import { ClippingModeModal } from "@/components/ClippingModeModal";
+import { PlatformBrandIcon } from "@/components/brand/PlatformBrandIcon";
 
 export function StreamUrlInput() {
   const [url, setUrl] = useState("");
@@ -93,19 +94,25 @@ export function StreamUrlInput() {
     <>
       <form onSubmit={handleSubmit} className="w-full max-w-2xl">
         <div className="grid gap-px overflow-hidden border border-[var(--color-card-border)] bg-[var(--color-card-border)] sm:grid-cols-[1fr_auto]">
-          <input
-            type="text"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="YouTube, Twitch, or Kick live / VOD link"
-            required
-            className={cn(
-              "h-14 min-w-0 border-0 bg-[#020302]/92",
-              "px-4 text-sm text-[var(--color-foreground)] placeholder:text-[var(--color-muted)]",
-              "shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]",
-              "focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
-            )}
-          />
+          <div className="flex min-w-0 items-center bg-[#020302]/92 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] focus-within:ring-2 focus-within:ring-[var(--color-accent)]">
+            <span className="flex shrink-0 items-center gap-2 pl-4" aria-hidden="true">
+              <PlatformBrandIcon brand="youtube" size="xs" variant="mark" />
+              <PlatformBrandIcon brand="twitch" size="xs" variant="mark" />
+              <PlatformBrandIcon brand="kick" size="xs" variant="mark" />
+            </span>
+            <input
+              type="text"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="Paste a live stream or VOD link"
+              required
+              className={cn(
+                "h-14 min-w-0 flex-1 border-0 bg-transparent",
+                "px-4 text-sm text-[var(--color-foreground)] placeholder:text-[var(--color-muted)]",
+                "focus:outline-none"
+              )}
+            />
+          </div>
           <button
             type="submit"
             disabled={loading || !url.trim() || hasAccess === false}

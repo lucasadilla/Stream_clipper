@@ -6,7 +6,7 @@
     "predev": "node scripts/copy-mediapipe-assets.mjs",
     "dev": "next dev",
     "prebuild": "node scripts/copy-mediapipe-assets.mjs",
-    "build": "next build --webpack",
+    "build": "next build",
     "start": "node scripts/start-production.js",
     "start:next": "next start",
     "lint": "next lint",

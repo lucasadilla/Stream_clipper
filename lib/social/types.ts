@@ -56,6 +56,7 @@ export interface SocialPublishSettings {
   allowStitch?: boolean;
   shareToFeed?: boolean;
   youtubeFormat?: "shorts" | "standard";
+  instagramFormat?: "reel" | "feed";
   facebookFormat?: "reel" | "page_video";
   /** Direct post vs send to creator inbox drafts */
   tiktokMode?: "direct" | "inbox";

@@ -16,7 +16,6 @@ import {
   type CaptionCue,
   type CaptionWord,
 } from "@/lib/captionTrack";
-import { selectCaptionEmphasisWordIndex } from "@/lib/captionEmphasis";
 
 export interface GenerateAssOptions {
   cues: Array<
@@ -58,41 +57,10 @@ function formatAssTime(seconds: number): string {
   return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
 }
 
-/**
- * Entrance animations tuned to match the editor CSS.
- * Applied once per cue (not per karaoke syllable).
- */
-function animationOverride(
-  animation: CaptionAppearance["animation"],
-  width: number,
-  height: number,
-  appearance: CaptionAppearance,
-  fontSize: number
+function captionAnimationOverride(
+  animation: CaptionAppearance["animation"]
 ): string {
-  switch (animation) {
-    case "fade":
-      return "\\fad(220,0)";
-    case "pop":
-      return (
-        "\\fscx86\\fscy86\\alpha&HFF&" +
-        "\\t(0,192,\\fscx106\\fscy106\\alpha&H00&)" +
-        "\\t(192,320,\\fscx100\\fscy100)"
-      );
-    case "slideUp": {
-      const marginV = Math.round((appearance.verticalOffsetPercent / 100) * height);
-      const marginH = Math.round(width * 0.05);
-      let x = width / 2;
-      if (appearance.horizontal === "left") x = marginH;
-      if (appearance.horizontal === "right") x = width - marginH;
-      let y = height - marginV;
-      if (appearance.vertical === "top") y = marginV;
-      if (appearance.vertical === "center") y = height / 2;
-      const fromY = Math.round(y + Math.max(12, fontSize * 0.7));
-      return `\\move(${Math.round(x)},${fromY},${Math.round(x)},${Math.round(y)},0,280)\\fad(120,0)`;
-    }
-    default:
-      return "";
-  }
+  return animation === "fade" ? "\\fad(200,0)" : "";
 }
 
 /**
@@ -143,7 +111,7 @@ function karaokeAssBody(
   baseColor: string,
   highlightColor: string,
   karaokeEnabled: boolean,
-  smartEmphasisEnabled: boolean
+  wordReveal: boolean
 ): string {
   const usable = words
     .map((word) => {
@@ -159,9 +127,6 @@ function karaokeAssBody(
     Math.max(0, Math.round((seconds - cueStart) * 1000));
 
   const parts: string[] = [];
-  const emphasisIndex = smartEmphasisEnabled
-    ? selectCaptionEmphasisWordIndex(usable.map((word) => word.word))
-    : null;
   let lineLen = 0;
   let linesUsed = 1;
   const maxLines = 2;
@@ -178,45 +143,21 @@ function karaokeAssBody(
     const spacer = index < usable.length - 1 ? " " : "";
     const startMs = toMs(word.start);
     const endMs = Math.max(startMs + 1, toMs(word.end));
-    const emphasized = emphasisIndex === index;
-    const startColor =
-      emphasized && !karaokeEnabled ? highlightColor : baseColor;
     const timedColor = karaokeEnabled
       ? `\\t(${startMs},${startMs},\\c${highlightColor}&)\\t(${endMs},${endMs},\\c${baseColor}&)`
       : "";
-    const bold = emphasized ? "\\b1" : "\\b0";
+    const reveal = wordReveal
+      ? `\\alpha&HFF&\\t(${startMs},${startMs + 90},\\alpha&H00&)`
+      : "";
     // Start in base color; flip to highlight for this word's window; restore base.
     // Override form is \c&HBBGGRR& (trailing & required).
     parts.push(
-      `{\\c${startColor}&${timedColor}${bold}}${escapeAssText(piece)}${spacer}`
+      `{\\c${baseColor}&${reveal}${timedColor}\\b0}${escapeAssText(piece)}${spacer}`
     );
     lineLen = lineLen > 0 ? lineLen + 1 + piece.length : piece.length;
   }
 
   return parts.join("");
-}
-
-function smartPlainAssBody(
-  text: string,
-  capitalization: CaptionAppearance["capitalization"],
-  baseColor: string,
-  highlightColor: string
-): string {
-  const tokens = text.split(/(\s+)/);
-  const wordTokens = tokens.filter((token) => token && !/^\s+$/.test(token));
-  const emphasisIndex = selectCaptionEmphasisWordIndex(wordTokens);
-  let wordIndex = -1;
-  return tokens
-    .map((token) => {
-      if (/^\s+$/.test(token)) return escapeAssText(token);
-      wordIndex += 1;
-      const label = escapeAssText(
-        applyCaptionCapitalization(token, capitalization)
-      );
-      if (wordIndex !== emphasisIndex) return label;
-      return `{\\c${highlightColor}&\\b1}${label}{\\c${baseColor}&\\b0}`;
-    })
-    .join("");
 }
 
 /** Build a full ASS script matching CaptionAppearance for libass burn-in. */
@@ -317,8 +258,8 @@ export function generateAss(options: GenerateAssOptions): string {
     1,
   ].join(",");
 
-  const anim = animationOverride(app.animation, width, height, app, fontSize);
   const blurTag = edge.blur > 0 ? `\\blur${edge.blur.toFixed(2)}` : "";
+  const animationTag = captionAnimationOverride(app.animation);
   const dialogueLines: string[] = [];
 
   for (const cue of cues) {
@@ -326,13 +267,13 @@ export function generateAss(options: GenerateAssOptions): string {
     const start = formatAssTime(cue.startTimeSeconds);
     const end = formatAssTime(cue.endTimeSeconds);
     const words =
-      (app.karaokeEnabled || app.smartEmphasisEnabled) &&
+      (app.karaokeEnabled || app.animation === "wordReveal") &&
       cue.words &&
       cue.words.length > 0
         ? cue.words
         : null;
 
-    const overrideParts = [anim, blurTag].filter(Boolean).join("");
+    const overrideParts = [animationTag, blurTag].filter(Boolean).join("");
     const override = overrideParts ? `{${overrideParts}}` : "";
 
     if (words) {
@@ -345,19 +286,12 @@ export function generateAss(options: GenerateAssOptions): string {
         baseColor,
         highlightColor,
         app.karaokeEnabled,
-        app.smartEmphasisEnabled
+        app.animation === "wordReveal"
       );
       if (!body) {
-        const fallback = app.smartEmphasisEnabled
-          ? smartPlainAssBody(
-              cue.text,
-              app.capitalization,
-              baseColor,
-              highlightColor
-            )
-          : escapeAssText(
-              applyCaptionCapitalization(cue.text, app.capitalization)
-            );
+        const fallback = escapeAssText(
+          applyCaptionCapitalization(cue.text, app.capitalization)
+        );
         const style = plainStyleLine ? "Plain" : "Default";
         dialogueLines.push(
           `Dialogue: 0,${start},${end},${style},,0,0,0,,${override}${fallback}`
@@ -370,16 +304,9 @@ export function generateAss(options: GenerateAssOptions): string {
       continue;
     }
 
-    const body = app.smartEmphasisEnabled
-      ? smartPlainAssBody(
-          cue.text,
-          app.capitalization,
-          baseColor,
-          highlightColor
-        )
-      : escapeAssText(
-          applyCaptionCapitalization(cue.text, app.capitalization)
-        );
+    const body = escapeAssText(
+      applyCaptionCapitalization(cue.text, app.capitalization)
+    );
     const style = plainStyleLine ? "Plain" : "Default";
     dialogueLines.push(
       `Dialogue: 0,${start},${end},${style},,0,0,0,,${override}${body}`

@@ -71,7 +71,7 @@ export async function verifyUserPassword(
       );
     }
     throw new Error(
-      "This account has no password yet. Use “Email me a magic link” once, then you can set a password — or create a new password below by registering."
+      "This account has no password yet. Choose Create account and set a password for this email."
     );
   }
 
@@ -111,7 +111,7 @@ export async function registerWithPassword(params: {
     if (existing.passwordHash) {
       throw new Error("An account with this email already exists. Sign in instead.");
     }
-    // OAuth / magic-link user adding a password
+    // Existing OAuth or legacy passwordless user adding a password.
     const updated = await prisma.user.update({
       where: { id: existing.id },
       data: {

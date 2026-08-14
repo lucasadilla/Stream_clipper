@@ -13,6 +13,11 @@ import {
   buildActiveSpeakerCropPlan,
   buildSubjectCropPlan,
 } from "@/lib/verticalLayout";
+import {
+  generateProfessionalReframePlan,
+  REFRAME_STYLES,
+  type ReframeStyle,
+} from "@/lib/professionalReframe";
 
 export const runtime = "nodejs";
 
@@ -73,8 +78,48 @@ export async function GET(
     const usableTracks = result.tracks.filter(
       (track) => track.points.length >= 3
     );
-    const previewKeyframes =
-      result.classification === "multiple_faces" && usableTracks.length >= 2
+    const requestedStyle = request.nextUrl.searchParams.get("style");
+    const style = REFRAME_STYLES.includes(requestedStyle as ReframeStyle)
+      ? (requestedStyle as ReframeStyle)
+      : "professional";
+    const lockSubject = request.nextUrl.searchParams.get("lockSubject") === "true";
+    const requestedStartParam = request.nextUrl.searchParams.get("startSeconds");
+    const requestedEndParam = request.nextUrl.searchParams.get("endSeconds");
+    const requestedStart =
+      requestedStartParam == null ? Number.NaN : Number(requestedStartParam);
+    const requestedEnd =
+      requestedEndParam == null ? Number.NaN : Number(requestedEndParam);
+    const clipStartSeconds = Number.isFinite(requestedStart)
+      ? Math.max(result.startSeconds, requestedStart)
+      : result.startSeconds;
+    const clipEndSeconds = Number.isFinite(requestedEnd)
+      ? Math.min(result.endSeconds, Math.max(clipStartSeconds + 0.1, requestedEnd))
+      : result.endSeconds;
+    const requestedPlan = generateProfessionalReframePlan({
+      clipId: result.clipId ?? job.id,
+      clipStartSeconds,
+      clipEndSeconds,
+      sourceWidth: result.sourceWidth,
+      sourceHeight: result.sourceHeight,
+      classification: result.classification,
+      tracks: result.tracks,
+      sampledFrames: Math.max(
+        1,
+        Math.round(result.sampleFps * (result.endSeconds - result.startSeconds))
+      ),
+      primaryTrackId: result.primaryCandidate?.trackId,
+      lockedTrackId: lockSubject ? result.primaryCandidate?.trackId : undefined,
+      sceneChanges: result.professionalPlan?.scenes
+        .filter((scene) => scene.transitionIn === "hard_cut")
+        .map((scene) => ({
+          timestampSeconds: scene.startSeconds,
+          score: scene.confidence,
+        })),
+      style,
+    });
+    const previewKeyframes = requestedPlan.cropKeyframes.length
+      ? requestedPlan.cropKeyframes
+      : result.classification === "multiple_faces" && usableTracks.length >= 2
         ? buildActiveSpeakerCropPlan(
             usableTracks,
             result.startSeconds,
@@ -101,6 +146,17 @@ export async function GET(
         recommendation: result.recommendation,
         warnings: result.warnings,
         previewKeyframes,
+        professionalPlan: requestedPlan
+          ? {
+              version: requestedPlan.version,
+              style: requestedPlan.style,
+              sourceLayout: requestedPlan.sourceLayout,
+              overallConfidence: requestedPlan.overallConfidence,
+              scenes: requestedPlan.scenes,
+              shots: requestedPlan.shots,
+              validation: requestedPlan.validation,
+            }
+          : null,
         frameUrl: result.frameStoragePath
           ? `/api/storage/${result.frameStoragePath.replace(/\\/g, "/")}?inline=1`
           : null,

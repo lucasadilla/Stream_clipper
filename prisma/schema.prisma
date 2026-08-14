@@ -84,7 +84,7 @@ model BillingAccount {
   @@index([email])
 }
 
-/// Auth.js (NextAuth) identity — OAuth + email magic-link users
+/// Auth.js (NextAuth) identity for OAuth and email/password users
 model User {
   id            String    @id @default(cuid())
   name          String?

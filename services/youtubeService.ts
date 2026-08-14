@@ -196,18 +196,7 @@ export async function getStreamSession(sessionId: string) {
         ],
       },
       clipSuggestions: { orderBy: { createdAt: "desc" } },
-      renderJobs: { orderBy: { createdAt: "desc" }, take: 10 },
-      chatTracking: true,
       liveRecording: true,
-      _count: {
-        select: {
-          chatMessages: true,
-          eventWindows: true,
-          transcriptChunks: true,
-          audioEvents: true,
-          visualEvents: true,
-        },
-      },
     },
   });
 }

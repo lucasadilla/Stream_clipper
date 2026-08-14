@@ -14,7 +14,6 @@ import {
   captionPreviewStyle,
   type CaptionAppearance,
 } from "@/lib/captionAppearance";
-import { cn } from "@/lib/cn";
 import type { RefObject } from "react";
 import { CaptionCueText } from "@/components/CaptionCueText";
 
@@ -90,7 +89,7 @@ export function CaptionTrackLayer({
         }
         if (
           appearance.karaokeEnabled ||
-          appearance.smartEmphasisEnabled
+          appearance.animation === "wordReveal"
         ) {
           setPlayhead(t);
         }
@@ -105,7 +104,7 @@ export function CaptionTrackLayer({
     track,
     playerRef,
     appearance.karaokeEnabled,
-    appearance.smartEmphasisEnabled,
+    appearance.animation,
   ]);
 
   if (!enabled) return null;
@@ -127,10 +126,9 @@ export function CaptionTrackLayer({
           <p
             key={activeCue.id}
             style={previewStyles.text}
-            className={cn(
-              "whitespace-pre-line line-clamp-2",
-              captionAnimationClass(appearance.animation)
-            )}
+            className={`whitespace-pre-line break-words ${captionAnimationClass(
+              appearance.animation
+            )}`}
           >
             <CaptionCueText
               cue={activeCue}
