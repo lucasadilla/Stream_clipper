@@ -13,6 +13,7 @@ import {
 import { getPostHogClient } from "@/lib/posthog-server";
 import {
   normalizeEditorState,
+  sequenceFitsRange,
   sequenceDuration,
 } from "@/lib/editorState";
 import { parseVerticalLayoutRequest } from "@/lib/verticalLayout";
@@ -125,6 +126,19 @@ export async function POST(
         return errorResponse(err.message, err.status);
       }
       throw err;
+    }
+
+    if (
+      editorState.segments.length > 0 &&
+      !sequenceFitsRange(editorState.segments, {
+        start: clip.startTimeSeconds,
+        end: clip.endTimeSeconds,
+      })
+    ) {
+      return errorResponse(
+        "Timeline cuts do not match the selected clip range. Reopen export and try again.",
+        400
+      );
     }
 
     const outputDuration =

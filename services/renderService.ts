@@ -52,6 +52,7 @@ import {
   type VerticalLayoutRequest,
 } from "@/lib/verticalLayout";
 import { resolveVerticalLayout } from "@/services/verticalLayoutService";
+import { rangeCoversWholeSource } from "@/lib/renderRange";
 
 const PREVIEW_MAX_SECONDS = 5;
 const PREVIEW_HEIGHT = 640;
@@ -357,11 +358,15 @@ export async function executeRenderJob(
       ? renderStart + (seg.sourceEnd - effectiveStart)
       : renderEnd;
 
-    // Muxed segment-* files are already the requested range — avoid a second
-    // ffmpeg pass when the cut is essentially the whole file.
+    // Some muxed segment-* files already equal the requested range. Only skip
+    // ffmpeg when both in and out points cover the whole cached file.
     const alreadyCut =
-      cutStart < 0.05 &&
-      path.basename(inputPath).toLowerCase().startsWith("segment-");
+      path.basename(inputPath).toLowerCase().startsWith("segment-") &&
+      rangeCoversWholeSource(
+        cutStart,
+        cutEnd,
+        renderSource.durationSeconds
+      );
     if (alreadyCut) {
       await fs.copyFile(inputPath, outputPath);
     } else {

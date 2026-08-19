@@ -30,7 +30,6 @@ import {
   emptyEditorState,
   normalizeEditorState,
   segmentDuration,
-  sequenceDuration,
   type EditorState,
   type TimelineMarker,
 } from "@/lib/editorState";
@@ -1154,10 +1153,9 @@ export function LiveTimeline({
 
   const zoomLabel = zoom <= 1.02 ? "Fit" : `${Math.round(zoom * 100)}%`;
   const atMinZoom = zoom <= 1.02;
-  const renderDuration =
-    editorState.segments.length > 0
-      ? sequenceDuration(editorState.segments)
-      : selection.end - selection.start;
+  // Export opens on the visibly selected in/out range. A saved multi-cut
+  // sequence can still be chosen explicitly inside the export dialog.
+  const renderDuration = selection.end - selection.start;
   const canUndo = historyVersion >= 0 && undoStack.current.length > 0;
   const canRedo = historyVersion >= 0 && redoStack.current.length > 0;
   const showOverlayTrack = editorState.overlays.length > 0;

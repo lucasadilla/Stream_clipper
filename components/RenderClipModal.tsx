@@ -44,8 +44,8 @@ import {
 } from "@/lib/clipConstants";
 import type { BillingAccountSummary } from "@/services/billingService";
 import {
-  sequenceBounds,
-  sequenceDuration,
+  resolveEditorExportPlan,
+  type EditorExportScope,
   type EditorState,
 } from "@/lib/editorState";
 import {
@@ -100,19 +100,17 @@ export function RenderClipModal({
   const [downloadFilename, setDownloadFilename] = useState("clip.mp4");
   const [downloadDone, setDownloadDone] = useState(false);
   const [betaAccess, setBetaAccess] = useState(false);
+  const [exportScope, setExportScope] = useState<EditorExportScope>("selection");
   const [verticalLayout, setVerticalLayout] = useState<VerticalLayoutSelection>(
     defaultVerticalLayoutSelection
   );
   const exportAbortRef = useRef<AbortController | null>(null);
   const prevOpenRef = useRef(false);
-  /** Snapshot of selection taken when the modal opens. */
-  const openSelectionRef = useRef(selection);
 
   const sequence = editorState?.segments ?? [];
-  const bounds = sequenceBounds(sequence);
-  const effectiveSelection = bounds ?? selection;
-  const duration =
-    sequence.length > 0 ? sequenceDuration(sequence) : selection.end - selection.start;
+  const exportPlan = resolveEditorExportPlan(selection, editorState, exportScope);
+  const effectiveSelection = exportPlan.selection;
+  const duration = exportPlan.duration;
   const maxClipSeconds = betaAccess ? 60 : MAX_CLIP_SECONDS;
   const canRender =
     duration >= MIN_CLIP_SECONDS && duration <= maxClipSeconds;
@@ -133,13 +131,13 @@ export function RenderClipModal({
     prevOpenRef.current = open;
     if (!justOpened) return;
 
-    openSelectionRef.current = bounds ?? selection;
     setPhase("configure");
     setExportStep("saving");
     setExportProgress(0);
+    setExportScope("selection");
     setFormat("vertical");
     setVerticalLayout(defaultVerticalLayoutSelection());
-    setTitle(`Clip ${formatSeconds((bounds ?? selection).start)}`);
+    setTitle(`Clip ${formatSeconds(selection.start)}`);
     setDescription("");
     setTagsText("");
     setBurnCaptions(includeCaptions);
@@ -151,7 +149,7 @@ export function RenderClipModal({
     setDownloadUrl(null);
     setDownloadFilename("clip.mp4");
     setDownloadDone(false);
-  }, [open, bounds, selection, includeCaptions]);
+  }, [open, selection, includeCaptions]);
 
   useEffect(() => {
     if (!open) return;
@@ -236,7 +234,14 @@ export function RenderClipModal({
     exportAbortRef.current?.abort();
     const abort = new AbortController();
     exportAbortRef.current = abort;
-    const renderSelection = openSelectionRef.current;
+    // Snapshot the complete plan at click time so background timeline updates
+    // cannot change the range while an export is running.
+    const renderPlan = resolveEditorExportPlan(
+      selection,
+      editorState,
+      exportScope
+    );
+    const renderSelection = renderPlan.selection;
     setPhase("exporting");
     setExportStep("saving");
     setExportProgress(0);
@@ -260,8 +265,8 @@ export function RenderClipModal({
         captionAppearance,
         burnCaptions
           ? captionCues.filter((cue) =>
-              sequence.length > 0
-                ? sequence.some(
+              renderPlan.scope === "sequence"
+                ? renderPlan.editorState!.segments.some(
                     (segment) =>
                       cue.startTimeSeconds <= segment.sourceEnd &&
                       cue.endTimeSeconds >= segment.sourceStart
@@ -275,7 +280,7 @@ export function RenderClipModal({
           setExportProgress((prev) => Math.max(prev, update.progress));
           setExportStep("rendering");
         },
-        editorState,
+        renderPlan.editorState,
         abort.signal,
         format === "vertical"
           ? { ...verticalLayout, captions: { ...verticalLayout.captions, enabled: burnCaptions } }
@@ -407,7 +412,7 @@ export function RenderClipModal({
                       : title.trim() || "Export clip"}
                 </h2>
                 <p className="text-xs text-[var(--color-muted)]">
-                  {sequence.length > 0
+                  {exportPlan.scope === "sequence"
                     ? `${sequence.length} cuts · ${formatDuration(duration)}`
                     : `${formatSeconds(effectiveSelection.start)}–${formatSeconds(effectiveSelection.end)} · ${formatDuration(duration)}`}
                 </p>
@@ -460,6 +465,30 @@ export function RenderClipModal({
           {phase === "configure" && (
             <div className="grid gap-5 lg:grid-cols-[minmax(0,1.45fr)_minmax(19rem,0.75fr)]">
               <div className="min-w-0 space-y-5">
+                {sequence.length > 0 && (
+                  <section className="space-y-3 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-3 sm:p-4">
+                    <div>
+                      <h3 className="text-sm font-semibold">Export range</h3>
+                      <p className="mt-0.5 text-xs text-[var(--color-muted)]">
+                        Export the green timeline selection, or the complete saved cut sequence.
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <ExportScopeOption
+                        active={exportScope === "selection"}
+                        onClick={() => setExportScope("selection")}
+                        label="Selected range"
+                        sublabel={`${formatSeconds(selection.start)}–${formatSeconds(selection.end)} · ${formatDuration(selection.end - selection.start)}`}
+                      />
+                      <ExportScopeOption
+                        active={exportScope === "sequence"}
+                        onClick={() => setExportScope("sequence")}
+                        label="Full sequence"
+                        sublabel={`${sequence.length} cuts · ${formatDuration(resolveEditorExportPlan(selection, editorState, "sequence").duration)}`}
+                      />
+                    </div>
+                  </section>
+                )}
                 <section className="space-y-3 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-3 sm:p-4">
                   <div>
                     <h3 className="text-sm font-semibold">Format & layout</h3>
@@ -1009,6 +1038,43 @@ function AspectOption({
         </span>
         <span className="text-[10px] text-[var(--color-muted)]">{sublabel}</span>
       </div>
+    </button>
+  );
+}
+
+function ExportScopeOption({
+  active,
+  onClick,
+  label,
+  sublabel,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  sublabel: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "rounded-lg border p-3 text-left transition-colors",
+        active
+          ? "border-[var(--color-accent)] bg-[var(--color-accent)]/14"
+          : "border-[var(--color-card-border)] bg-[var(--color-secondary)] hover:border-[var(--color-accent)]"
+      )}
+    >
+      <span
+        className={cn(
+          "block text-xs font-semibold",
+          active ? "text-[var(--color-accent)]" : "text-[var(--color-foreground)]"
+        )}
+      >
+        {label}
+      </span>
+      <span className="mt-1 block text-[10px] text-[var(--color-muted)]">
+        {sublabel}
+      </span>
     </button>
   );
 }

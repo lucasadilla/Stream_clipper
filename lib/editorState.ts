@@ -63,6 +63,16 @@ export interface EditorState {
   settings: EditorSettings;
 }
 
+export type EditorExportScope = "selection" | "sequence";
+
+export interface EditorExportPlan {
+  scope: EditorExportScope;
+  selection: { start: number; end: number };
+  duration: number;
+  /** Only sequence exports may override the saved clip range. */
+  editorState?: EditorState;
+}
+
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   snapping: true,
   normalizeAudio: false,
@@ -126,6 +136,49 @@ export function sequenceBounds(segments: EditorSegment[]): {
     start: Math.min(...segments.map((segment) => segment.sourceStart)),
     end: Math.max(...segments.map((segment) => segment.sourceEnd)),
   };
+}
+
+/**
+ * Resolve exactly what the export button will render.
+ *
+ * The active in/out selection is deliberately the default. A persisted edit
+ * sequence must be explicitly requested so an old cut cannot silently replace
+ * the range currently highlighted on the timeline.
+ */
+export function resolveEditorExportPlan(
+  selection: { start: number; end: number },
+  editorState: EditorState | undefined,
+  requestedScope: EditorExportScope
+): EditorExportPlan {
+  const sequence = editorState?.segments ?? [];
+  const bounds = sequenceBounds(sequence);
+  if (requestedScope === "sequence" && editorState && bounds) {
+    return {
+      scope: "sequence",
+      selection: bounds,
+      duration: sequenceDuration(sequence),
+      editorState,
+    };
+  }
+
+  return {
+    scope: "selection",
+    selection: { start: selection.start, end: selection.end },
+    duration: Math.max(0, selection.end - selection.start),
+  };
+}
+
+/** Ensure sequence source ranges agree with the clip envelope saved in the DB. */
+export function sequenceFitsRange(
+  segments: EditorSegment[],
+  range: { start: number; end: number },
+  toleranceSeconds = 0.05
+): boolean {
+  return segments.every(
+    (segment) =>
+      segment.sourceStart >= range.start - toleranceSeconds &&
+      segment.sourceEnd <= range.end + toleranceSeconds
+  );
 }
 
 export function normalizeEditorState(value: unknown): EditorState {
