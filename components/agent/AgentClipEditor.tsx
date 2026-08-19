@@ -435,6 +435,36 @@ export function AgentClipEditor({
     }
   }, []);
 
+  const placeClipRangeAt = useCallback(
+    (timeSeconds: number) => {
+      const duration = Math.max(
+        MIN_CLIP_SECONDS,
+        Math.min(MAX_CLIP_SECONDS, clip.endTimeSeconds - clip.startTimeSeconds)
+      );
+      const start = Math.max(0, Math.min(timeSeconds, maxTime - duration));
+      const end = Math.min(maxTime, start + duration);
+      const nextClip = {
+        ...clip,
+        startTimeSeconds: start,
+        endTimeSeconds: end,
+      };
+
+      setDragging(null);
+      onClipChange(nextClip);
+      setCurrentTime(start);
+      const video = videoRef.current;
+      if (video) {
+        try {
+          video.currentTime = start;
+        } catch {
+          // The loaded-metadata effect will apply the new start time.
+        }
+      }
+      void commitRange(start, end);
+    },
+    [clip, commitRange, maxTime, onClipChange]
+  );
+
   useEffect(() => {
     if (!dragging) return;
     const onMove = (event: PointerEvent) => {
@@ -559,9 +589,10 @@ export function AgentClipEditor({
                     <p
                       key={activeCue.id}
                       style={previewStyles.text}
-                      className={`whitespace-pre-line break-words ${captionAnimationClass(
-                        captionAppearance.animation
-                      )}`}
+                      className={cn(
+                        "caption-preview-text whitespace-pre-line break-words",
+                        captionAnimationClass(captionAppearance.animation)
+                      )}
                     >
                       <CaptionCueText
                         cue={activeCue}
@@ -696,12 +727,19 @@ export function AgentClipEditor({
         </div>
         <div
           ref={trackRef}
+          data-testid="agent-clip-selector-timeline"
           className="relative h-10 cursor-pointer rounded bg-[var(--color-secondary)]"
           onPointerDown={(e) => {
             if ((e.target as HTMLElement).dataset.handle) return;
             setDragging("playhead");
             seekVideo(timeFromClientX(e.clientX));
           }}
+          onDoubleClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            placeClipRangeAt(timeFromClientX(event.clientX));
+          }}
+          title="Double-click to move the selected clip range here"
         >
           <div
             className="absolute inset-y-0 bg-[var(--color-accent)]/25"

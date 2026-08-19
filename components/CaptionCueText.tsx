@@ -69,4 +69,3 @@ export function CaptionCueText({
 
   return applyCaptionCapitalization(cue.text, appearance.capitalization);
 }
-

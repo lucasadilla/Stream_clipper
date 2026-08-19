@@ -1,7 +1,13 @@
 import { z } from "zod";
 import { getAiClient, getChatModel, hasAnyAiKey } from "@/lib/aiProvider";
+import { prisma } from "@/lib/db";
+import {
+  buildFallbackPlatformCopy,
+  stripInternalClipCopy,
+} from "@/lib/platformCopyDefaults";
 import { PLATFORM_PRESETS } from "@/lib/platforms/presets";
 import type { PlatformCopy, PlatformKey } from "@/lib/platforms/types";
+import { getTranscriptChunksForRange } from "@/services/transcriptService";
 
 const platformCopySchema = z.object({
   title: z.string().nullable().optional(),
@@ -31,39 +37,8 @@ function cleanHashtag(value: string): string {
   return cleaned ? `#${cleaned}` : "";
 }
 
-function shortQuote(input: GeneratePlatformCopyInput): string {
-  const transcript = input.transcriptText.replace(/\s+/g, " ").trim();
-  const source = transcript || input.clipReason || input.clipTitle;
-  const sentence = source.split(/(?<=[.!?])\s+/)[0] ?? source;
-  return sentence.slice(0, 120).trim();
-}
-
 function fallbackCopy(input: GeneratePlatformCopyInput): PlatformCopy {
-  const preset = PLATFORM_PRESETS[input.platform];
-  const titleLimit = preset.titleLimit ?? 100;
-  const title = input.clipTitle.slice(0, titleLimit);
-  const quote = shortQuote(input);
-  const genericTags = ["#livestream", "#highlights", "#creator"];
-  const hashtags = genericTags.slice(0, preset.hashtagRange?.max ?? 3);
-  const baseCaption = `${quote}${quote && !/[.!?]$/.test(quote) ? "." : ""}`;
-
-  return {
-    title,
-    caption: input.platform === "x" ? null : baseCaption,
-    postText:
-      input.platform === "x"
-        ? `${quote}${quote ? " " : ""}${hashtags[0] ?? ""}`.trim().slice(0, 280)
-        : null,
-    description:
-      input.platform.startsWith("youtube")
-        ? `${input.clipReason}\n\n${hashtags.join(" ")}`.trim()
-        : null,
-    hashtags,
-    tags: ["livestream", "highlights", input.streamerName ?? "creator"].filter(Boolean),
-    quoteText: quote || null,
-    thumbnailText: title.split(/\s+/).slice(0, 6).join(" ").toUpperCase(),
-    pinnedComment: input.platform === "youtube_shorts" ? "What would you have done here?" : null,
-  };
+  return buildFallbackPlatformCopy(input);
 }
 
 function parseJson(content: string): unknown {
@@ -77,20 +52,42 @@ function parseJson(content: string): unknown {
 
 function normalizeCopy(
   raw: z.infer<typeof platformCopySchema>,
-  fallback: PlatformCopy
+  fallback: PlatformCopy,
+  platform: PlatformKey
 ): PlatformCopy {
+  const preset = PLATFORM_PRESETS[platform];
+  const cleanText = (value: string | null | undefined, fallbackValue: string | null) => {
+    const cleaned = value ? stripInternalClipCopy(value) : "";
+    return cleaned || fallbackValue;
+  };
+  const hashtags = [...new Set([...(raw.hashtags ?? []), ...fallback.hashtags]
+    .map(cleanHashtag)
+    .filter(Boolean))]
+    .slice(0, preset.hashtagRange?.hardMax ?? preset.hashtagRange?.max ?? 8);
+  const isYouTube = platform.startsWith("youtube");
+  const isX = platform === "x";
   return {
-    title: raw.title?.trim() || fallback.title,
-    caption: raw.caption?.trim() || fallback.caption,
-    postText: raw.postText?.trim() || fallback.postText,
-    description: raw.description?.trim() || fallback.description,
-    hashtags: (raw.hashtags ?? fallback.hashtags)
-      .map(cleanHashtag)
-      .filter(Boolean),
-    tags: (raw.tags ?? fallback.tags).map((tag) => tag.trim()).filter(Boolean),
-    quoteText: raw.quoteText?.trim().slice(0, 180) || fallback.quoteText,
-    thumbnailText: raw.thumbnailText?.trim().slice(0, 80) || fallback.thumbnailText,
-    pinnedComment: raw.pinnedComment?.trim() || fallback.pinnedComment,
+    title: cleanText(raw.title, fallback.title)?.slice(0, preset.titleLimit ?? 100) ?? null,
+    caption: isX || isYouTube
+      ? null
+      : cleanText(raw.caption, fallback.caption)?.slice(0, preset.captionLimit ?? 2200) ?? null,
+    postText: isX
+      ? cleanText(raw.postText, fallback.postText)?.slice(0, preset.postTextLimit ?? 280) ?? null
+      : null,
+    description: isYouTube
+      ? cleanText(raw.description, fallback.description)?.slice(0, 5000) ?? null
+      : null,
+    hashtags: hashtags.length > 0 ? hashtags : fallback.hashtags,
+    tags: isYouTube
+      ? [...new Set([...(raw.tags ?? []), ...fallback.tags].map((tag) => tag.trim()).filter(Boolean))].slice(0, 15)
+      : [],
+    quoteText: cleanText(raw.quoteText, fallback.quoteText)?.slice(0, 180) ?? null,
+    thumbnailText: isYouTube
+      ? cleanText(raw.thumbnailText, fallback.thumbnailText)?.slice(0, 80) ?? null
+      : null,
+    pinnedComment: isYouTube
+      ? cleanText(raw.pinnedComment, fallback.pinnedComment)?.slice(0, 500) ?? null
+      : null,
   };
 }
 
@@ -101,7 +98,7 @@ export async function generatePlatformCopy(
   if (!hasAnyAiKey()) return fallback;
 
   const preset = PLATFORM_PRESETS[input.platform];
-  const prompt = `Create publishing copy for ${preset.name}. Sound native to the platform, specific to the clip, and human. Avoid corporate language and fake claims.
+  const prompt = `Create a complete, ready-to-publish post package for ${preset.name}. Sound native to the platform, specific to the clip, and human. Avoid corporate language and fake claims.
 
 Limits:
 - title: ${preset.titleLimit ?? 100} characters maximum when used
@@ -110,8 +107,18 @@ Limits:
 - hashtags: ${preset.hashtagRange ? `${preset.hashtagRange.min}-${preset.hashtagRange.max}` : "0-8"}
 - quoteText: one punchy quote under 120 characters
 
-Clip title: ${input.clipTitle}
-Why it matters: ${input.clipReason}
+Editorial requirements:
+- Lead with the strongest truthful hook or payoff; never expose producer notes, timestamps, scoring, or phrases such as "Short candidate".
+- Use searchable proper names, people, games, shows, products, teams, events, or pop-culture topics when they are supported by the transcript or source metadata.
+- Never invent a name, keyword, quote, outcome, or controversy.
+- Make the title/caption worth clicking without vague clickbait.
+- Fill every field that ${preset.name} actually uses. Keep irrelevant fields null.
+- Hashtags and search tags must be specific and discoverable, not generic filler.
+- Description should explain what happens and why it matters without discussing the clipping process.
+- Pinned comments should ask a specific conversation-starting question about this clip.
+
+Grounded working title: ${fallback.title}
+Why it matters: ${stripInternalClipCopy(input.clipReason) || fallback.description || fallback.caption || "Use the transcript context"}
 Stream: ${input.streamTitle ?? "Unknown"}
 Creator: ${input.streamerName ?? "Unknown"}
 Duration: ${Math.round(input.durationSeconds)} seconds
@@ -136,9 +143,67 @@ Return only JSON with keys: title, caption, postText, description, hashtags, tag
     const content = response.choices[0]?.message?.content;
     if (!content) return fallback;
     const parsed = platformCopySchema.parse(parseJson(content));
-    return normalizeCopy(parsed, fallback);
+    return normalizeCopy(parsed, fallback, input.platform);
   } catch (error) {
     console.warn("[platform-copy] using fallback:", error);
     return fallback;
   }
+}
+
+/** Generate preview-ready copy from the same context used by export workers. */
+export async function generatePlatformCopiesForClip(
+  clipSuggestionId: string,
+  platforms: PlatformKey[]
+): Promise<Partial<Record<PlatformKey, PlatformCopy>>> {
+  const clip = await prisma.clipSuggestion.findUnique({
+    where: { id: clipSuggestionId },
+    include: {
+      streamSession: {
+        select: { title: true, channelTitle: true },
+      },
+    },
+  });
+  if (!clip) throw new Error("Clip not found");
+
+  const [transcriptChunks, chatWindows] = await Promise.all([
+    getTranscriptChunksForRange(
+      clip.streamSessionId,
+      clip.startTimeSeconds,
+      clip.endTimeSeconds
+    ),
+    prisma.eventWindow.findMany({
+      where: {
+        streamSessionId: clip.streamSessionId,
+        type: "chat_window",
+        startTimeSeconds: { lte: clip.endTimeSeconds },
+        endTimeSeconds: { gte: clip.startTimeSeconds },
+      },
+      orderBy: { score: "desc" },
+      take: 5,
+      select: { summary: true },
+    }),
+  ]);
+  const transcriptText = transcriptChunks
+    .filter((chunk) => !/^\[(silence|processing error)\]$/i.test(chunk.text.trim()))
+    .map((chunk) => chunk.text.trim())
+    .filter(Boolean)
+    .join(" ")
+    .slice(0, 8000);
+  const base = {
+    clipTitle: clip.title,
+    clipReason: clip.reason,
+    transcriptText,
+    chatSignals: chatWindows.map((item) => item.summary).filter(Boolean).join(" | "),
+    streamTitle: clip.streamSession.title,
+    streamerName: clip.streamSession.channelTitle,
+    durationSeconds: clip.endTimeSeconds - clip.startTimeSeconds,
+  };
+  const uniquePlatforms = [...new Set(platforms)];
+  const copies = await Promise.all(
+    uniquePlatforms.map(async (platform) => [
+      platform,
+      await generatePlatformCopy({ platform, ...base }),
+    ] as const)
+  );
+  return Object.fromEntries(copies) as Partial<Record<PlatformKey, PlatformCopy>>;
 }

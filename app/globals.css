@@ -433,6 +433,12 @@ body[data-render-modal-open] [data-timeline-playhead] {
   transition: opacity 90ms linear;
 }
 
+/* Keep caption animations from being clipped by line-clamp overflow. */
+.caption-preview-text {
+  overflow: visible;
+  -webkit-line-clamp: unset;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .caption-anim-fade { animation: none; }
   .caption-word-reveal { transition: none; }

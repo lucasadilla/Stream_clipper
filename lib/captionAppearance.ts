@@ -264,7 +264,17 @@ export function captionPreviewStyle(
   // CSS percentage padding is based on container width, even vertically.
   // Convert to pixels from frame height so preview and libass use the same
   // coordinate system and selected position survives export exactly.
-  const pad = `${Math.round((app.verticalOffsetPercent / 100) * containerHeightPx)}px`;
+  const requestedPadPx = Math.round(
+    (app.verticalOffsetPercent / 100) * containerHeightPx
+  );
+  // Scale/pop animations can paint beyond the normal glyph box. Keep a small
+  // minimum edge gutter so top/bottom captions are never cropped by the video
+  // frame, even when the position offset slider is set to zero.
+  const animationGutterPx =
+    app.animation === "none"
+      ? 0
+      : Math.ceil(fontPx * 0.14 + outlinePx + Math.min(shadowPx, fontPx * 0.12));
+  const pad = `${Math.max(requestedPadPx, animationGutterPx)}px`;
 
   const shadows: string[] = [];
   if (outlinePx > 0) {
@@ -387,12 +397,19 @@ export function getFfmpegCaptionForceStyle(
     1,
     Math.round((app.fontSize * ASS_PLAY_RES_Y * 10) / REFERENCE_HEIGHT) / 10
   );
-  const marginV = Math.round((app.verticalOffsetPercent / 100) * ASS_PLAY_RES_Y);
   const marginH = Math.round(ASS_PLAY_RES_X * 0.05);
   const useBox = app.backgroundOpacity > 0;
   const outline = useBox
     ? Math.max(0.5, Math.round(fontSize * 1.4) / 10 + app.outlineWidth * 0.35)
     : app.outlineWidth;
+  const requestedMarginV = Math.round(
+    (app.verticalOffsetPercent / 100) * ASS_PLAY_RES_Y
+  );
+  const animationMarginV =
+    app.animation === "none"
+      ? 0
+      : Math.ceil(fontSize * 0.14 + outline + Math.min(app.shadow, 3));
+  const marginV = Math.max(requestedMarginV, animationMarginV);
 
   return [
     `FontName=${app.fontFamily}`,

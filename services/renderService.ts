@@ -118,7 +118,6 @@ export function parseRenderJobParams(value: unknown): RenderShortParams | null {
 }
 
 type BurnCaptionCue = {
-  id?: string;
   startTimeSeconds: number;
   endTimeSeconds: number;
   text: string;
@@ -148,7 +147,6 @@ function mapCaptionsToSequence(
         }))
         .filter((word) => word.end > word.start && word.word.trim().length > 0);
       mapped.push({
-        id: `${cue.id ?? "cue"}-${segment.id}`,
         startTimeSeconds:
           outputOffset + Math.max(0, overlapStart - segment.sourceStart),
         endTimeSeconds:
@@ -413,7 +411,6 @@ export async function executeRenderJob(
 
   if (includeCaptions || textOverlays.length > 0) {
     await updateJobProgress(jobId, 35, "captions");
-    const needsTranscriptCues = includeCaptions;
     const clientCues = (clientCaptionCues ?? []).filter(
       (cue) => {
         if (sequenceSegments.length === 0) {
@@ -429,21 +426,20 @@ export async function executeRenderJob(
         );
       }
     );
-    const chunks = !needsTranscriptCues || clientCues.length
+    const chunks = !includeCaptions || clientCues.length
       ? []
       : await getTranscriptChunksForRange(
           streamSessionId,
           effectiveStart,
           effectiveEnd
         );
-    if (!needsTranscriptCues || clientCues.length > 0 || chunks.length > 0) {
+    if (!includeCaptions || clientCues.length > 0 || chunks.length > 0) {
       const captionEdits = await readCaptionEdits(streamSessionId);
-      const captionLines: BurnCaptionCue[] = !needsTranscriptCues
+      const captionLines: BurnCaptionCue[] = !includeCaptions
         ? []
         : clientCues.length
-        ? clientCues.map((cue, index) => ({
+        ? clientCues.map((cue) => ({
             ...cue,
-            id: `client-${index}`,
             words: cue.words,
           }))
         : applyCaptionEdits(
@@ -462,11 +458,10 @@ export async function executeRenderJob(
             captionEdits
           );
 
-      const shiftedCues: BurnCaptionCue[] = sequenceSegments.length
+      const shiftedCues = sequenceSegments.length
         ? mapCaptionsToSequence(captionLines, sequenceSegments, format)
         : captionLines
-            .map((cue, index) => ({
-              id: cue.id ?? `cue-${index}`,
+            .map((cue) => ({
               startTimeSeconds: Math.max(0, cue.startTimeSeconds - effectiveStart),
               endTimeSeconds: Math.min(
                 effectiveEnd - effectiveStart,
@@ -482,6 +477,7 @@ export async function executeRenderJob(
                 .filter((word) => word.end > word.start && word.word.trim().length > 0),
             }))
             .filter((cue) => cue.endTimeSeconds > cue.startTimeSeconds);
+
       if (includeCaptions && shiftedCues.length === 0 && !preview) {
         throw new Error("Captions are enabled, but no caption cues overlap this clip.");
       }
@@ -509,7 +505,7 @@ export async function executeRenderJob(
       });
 
       const assContent = generateAss({
-        cues: includeCaptions ? shiftedCues : [],
+        cues: shiftedCues,
         overlays: overlayCues,
         appearance,
         width: outputWidth,

@@ -349,7 +349,9 @@ export function LookVideoStage({
             : "",
           layout === "facecam_top_gameplay_bottom" ? "border-t" : "",
           layout === "facecam_bottom_gameplay_top" ? "border-b" : "",
-          "z-[1]"
+          layout === "subject_aware_crop"
+            ? "z-[1] shadow-[0_0_0_999px_rgba(0,0,0,0.55)]"
+            : "z-[1]"
         )}
       >
         {playbackUrl ? (
@@ -534,9 +536,10 @@ function PreviewMedia({
             <p
               key={captionCue.id}
               style={captionStyles.text}
-              className={`whitespace-pre-line break-words ${captionAnimationClass(
-                captionAppearance.animation
-              )}`}
+              className={cn(
+                "caption-preview-text whitespace-pre-line break-words",
+                captionAnimationClass(captionAppearance.animation)
+              )}
             >
               <CaptionCueText
                 cue={captionCue}
@@ -766,7 +769,9 @@ function YouTubeWatchPreview({
           <div className="flex gap-2"><span className="flex items-center gap-1 rounded-full bg-[#272727] px-3 py-1.5 text-[10px] font-semibold"><ThumbsUp className="h-4 w-4" />12K</span><span className="flex items-center gap-1 rounded-full bg-[#272727] px-3 py-1.5 text-[10px] font-semibold"><Share2 className="h-4 w-4" />Share</span></div>
         </div>
         <div className="rounded-xl bg-[#272727] p-3 text-[11px] leading-relaxed"><p className="font-bold">18K views · 2 minutes ago</p><p className="mt-1 line-clamp-2">{description} <span className="text-[#3ea6ff]">{hashtags.join(" ")}</span></p></div>
-        <div className="flex items-start gap-2"><PreviewAvatar size="sm" /><div><p className="text-[9px] font-semibold text-white/55">Pinned by Clipper</p><p className="text-[11px]">{pinnedComment || "What was your favorite part?"}</p></div></div>
+        {pinnedComment ? (
+          <div className="flex items-start gap-2"><PreviewAvatar size="sm" /><div><p className="text-[9px] font-semibold text-white/55">Pinned by Clipper</p><p className="text-[11px]">{pinnedComment}</p></div></div>
+        ) : null}
       </div>
     </div>
   );
@@ -797,10 +802,8 @@ export function PlatformPhoneFrame({
   const output = meta.outputs[0]!;
   const lookLabel = getContentLookPreset(lookPresetId).label;
   const details: PlatformPreviewDetails = {
-    title: copy.title ?? "The moment everyone missed live",
-    caption:
-      copy.caption ??
-      "A standout moment from the stream, clipped while it was happening.",
+    title: copy.title ?? "",
+    caption: copy.caption ?? "",
     postText: copy.postText ?? "",
     description: copy.description ?? copy.caption ?? "",
     hashtags: copy.hashtags,

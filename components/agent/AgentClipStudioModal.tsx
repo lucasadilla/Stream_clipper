@@ -75,6 +75,7 @@ import {
   previewCameraFrameAt,
   type PreviewCropKeyframe,
 } from "@/lib/reframePlayback";
+import { buildFallbackPlatformCopy } from "@/lib/platformCopyDefaults";
 
 type StudioTab = "edit" | "preview" | "export";
 
@@ -104,6 +105,7 @@ const PREVIEW_PLATFORMS: PlatformKey[] = [
   "x",
   "youtube_landscape",
 ];
+const ALL_PLATFORM_KEYS = Object.keys(PLATFORM_PRESETS) as PlatformKey[];
 
 const EXPORT_TO_SOCIAL: Partial<Record<PlatformKey, SocialPlatform>> = {
   youtube_shorts: "youtube",
@@ -116,49 +118,30 @@ const EXPORT_TO_SOCIAL: Partial<Record<PlatformKey, SocialPlatform>> = {
   x: "x",
 };
 
-const DEFAULT_PLATFORM_HASHTAGS: Record<PlatformKey, string[]> = {
-  youtube_shorts: ["#Shorts", "#LiveStream", "#Clipper"],
-  youtube_landscape: ["#LiveStream", "#Highlights"],
-  tiktok: ["#streamtok", "#gaming", "#fyp"],
-  instagram_reels: ["#reels", "#livestream", "#creator"],
-  instagram_feed: ["#livestream", "#highlights", "#creator"],
-  facebook_reels: ["#Reels", "#LiveStream"],
-  facebook_feed: ["#LiveStream", "#Highlights"],
-  x: ["#LiveStream"],
-};
-
 function platformCopyForClip(
   platform: PlatformKey,
-  clip: Pick<ClipSuggestionData, "title" | "reason">
+  clip: Pick<
+    ClipSuggestionData,
+    "title" | "reason" | "startTimeSeconds" | "endTimeSeconds"
+  >
 ): PlatformCopy {
-  const isYouTube =
-    platform === "youtube_shorts" || platform === "youtube_landscape";
-  const title = clip.title.slice(0, PLATFORM_PRESETS[platform].titleLimit ?? 100);
-  return {
-    title,
-    caption: platform === "x" ? null : clip.reason,
-    postText:
-      platform === "x"
-        ? `${clip.title} — ${clip.reason}`.slice(0, 280)
-        : null,
-    description: isYouTube
-      ? `${clip.reason}\n\nClipped from the livestream while it happened.`
-      : null,
-    hashtags: [...DEFAULT_PLATFORM_HASHTAGS[platform]],
-    tags: isYouTube ? ["livestream", "highlights", "clipper"] : [],
-    quoteText: clip.reason.slice(0, 120),
-    thumbnailText: isYouTube
-      ? title.split(/\s+/).slice(0, 6).join(" ").toUpperCase()
-      : null,
-    pinnedComment: isYouTube ? "What would you have done here?" : null,
-  };
+  return buildFallbackPlatformCopy({
+    platform,
+    clipTitle: clip.title,
+    clipReason: clip.reason,
+    transcriptText: "",
+    durationSeconds: clip.endTimeSeconds - clip.startTimeSeconds,
+  });
 }
 
 function platformCopiesForClip(
-  clip: Pick<ClipSuggestionData, "title" | "reason">
+  clip: Pick<
+    ClipSuggestionData,
+    "title" | "reason" | "startTimeSeconds" | "endTimeSeconds"
+  >
 ): Record<PlatformKey, PlatformCopy> {
   return Object.fromEntries(
-    (Object.keys(PLATFORM_PRESETS) as PlatformKey[]).map((platform) => [
+    ALL_PLATFORM_KEYS.map((platform) => [
       platform,
       platformCopyForClip(platform, clip),
     ])
@@ -290,6 +273,9 @@ export function AgentClipStudioModal({
   const [platformCopies, setPlatformCopies] = useState<
     Record<PlatformKey, PlatformCopy>
   >(() => platformCopiesForClip(clip));
+  const platformCopyDefaultsRef = useRef(platformCopiesForClip(clip));
+  const touchedPlatformCopiesRef = useRef(new Set<PlatformKey>());
+  const [generatingPlatformCopy, setGeneratingPlatformCopy] = useState(false);
   const platformVideoRef = useRef<HTMLVideoElement>(null);
   const [previewTime, setPreviewTime] = useState(clip.startTimeSeconds);
   const [previewPlaying, setPreviewPlaying] = useState(false);
@@ -354,9 +340,10 @@ export function AgentClipStudioModal({
     setCopyingPackage(false);
     setActionError(null);
     setActionOk(null);
-    setPlatformCopies(
-      platformCopiesForClip({ title: clip.title, reason: clip.reason })
-    );
+    const initialCopies = platformCopiesForClip(clip);
+    platformCopyDefaultsRef.current = initialCopies;
+    touchedPlatformCopiesRef.current.clear();
+    setPlatformCopies(initialCopies);
     setPreviewTime(clip.startTimeSeconds);
     setPreviewPlaying(false);
     setLookPreset("auto");
@@ -660,6 +647,43 @@ export function AgentClipStudioModal({
 
   useEffect(() => {
     if (!open) return;
+    let cancelled = false;
+    setGeneratingPlatformCopy(true);
+    void fetchJson<{
+      copies?: Partial<Record<PlatformKey, PlatformCopy>>;
+      error?: string;
+    }>(`/api/clips/${clip.id}/platform-copy`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ platforms: ALL_PLATFORM_KEYS }),
+    }).then(({ ok, data }) => {
+      if (cancelled) return;
+      setGeneratingPlatformCopy(false);
+      if (!ok || !data.copies) return;
+      const generated = {
+        ...platformCopyDefaultsRef.current,
+        ...data.copies,
+      } as Record<PlatformKey, PlatformCopy>;
+      platformCopyDefaultsRef.current = generated;
+      setPlatformCopies((current) => {
+        const next = { ...current };
+        for (const platform of ALL_PLATFORM_KEYS) {
+          if (!touchedPlatformCopiesRef.current.has(platform)) {
+            next[platform] = generated[platform];
+          }
+        }
+        return next;
+      });
+    }).catch(() => {
+      if (!cancelled) setGeneratingPlatformCopy(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [clip.id, open]);
+
+  useEffect(() => {
+    if (!open) return;
     void fetchJson<{
       platforms?: Array<{ accounts?: SocialAccount[] }>;
     }>("/api/social/accounts").then(({ ok, data }) => {
@@ -768,6 +792,7 @@ export function AgentClipStudioModal({
   }, [duration, previewMeta]);
 
   const updatePlatformCopy = (next: PlatformCopy) => {
+    touchedPlatformCopiesRef.current.add(previewPlatform);
     setPlatformCopies((current) => ({
       ...current,
       [previewPlatform]: next,
@@ -775,9 +800,10 @@ export function AgentClipStudioModal({
   };
 
   const resetPlatformCopy = () => {
+    touchedPlatformCopiesRef.current.delete(previewPlatform);
     setPlatformCopies((current) => ({
       ...current,
-      [previewPlatform]: platformCopyForClip(previewPlatform, clip),
+      [previewPlatform]: platformCopyDefaultsRef.current[previewPlatform],
     }));
   };
 
@@ -1703,6 +1729,7 @@ export function AgentClipStudioModal({
                   key={previewPlatform}
                   platform={previewPlatform}
                   copy={activePlatformCopy}
+                  generating={generatingPlatformCopy}
                   onChange={updatePlatformCopy}
                   onReset={resetPlatformCopy}
                 />

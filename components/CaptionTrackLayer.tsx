@@ -16,6 +16,7 @@ import {
 } from "@/lib/captionAppearance";
 import type { RefObject } from "react";
 import { CaptionCueText } from "@/components/CaptionCueText";
+import { cn } from "@/lib/utils";
 
 interface CaptionTrackLayerProps {
   enabled: boolean;
@@ -126,9 +127,10 @@ export function CaptionTrackLayer({
           <p
             key={activeCue.id}
             style={previewStyles.text}
-            className={`whitespace-pre-line break-words ${captionAnimationClass(
-              appearance.animation
-            )}`}
+            className={cn(
+              "caption-preview-text whitespace-pre-line break-words",
+              captionAnimationClass(appearance.animation)
+            )}
           >
             <CaptionCueText
               cue={activeCue}

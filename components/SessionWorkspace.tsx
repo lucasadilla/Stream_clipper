@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import posthog from "posthog-js";
 import { EditorHeader } from "@/components/layout/EditorHeader";
 import { VideoPreview } from "@/components/VideoPreview";
@@ -10,7 +9,6 @@ import type { StreamPlayerHandle } from "@/types/streamPlayer";
 import type { StreamPlatform, StreamEmbedInfo } from "@/lib/streamPlatform";
 import { shouldPreferLocalVideoPreview } from "@/lib/streamPlatform";
 import { LiveTimeline, type ClipSelection } from "@/components/LiveTimeline";
-import { ChatPanel } from "@/components/ChatPanel";
 import { LIVE_TICK_MS, LIVE_SEGMENT_SECONDS } from "@/lib/timelineConstants";
 import { THUMB_POLL_MS } from "@/lib/thumbnailConstants";
 import {
@@ -30,11 +28,6 @@ import {
   type CaptionAppearance,
 } from "@/lib/captionAppearance";
 import {
-  buildAudioSpikeMarkers,
-  selectAudioSpikesForTimeline,
-  type AudioSpikeMarker,
-} from "@/lib/audioSpikeTimeline";
-import {
   mergeCaptionEdit,
   type CaptionEditsMap,
 } from "@/lib/captionEdits";
@@ -43,7 +36,6 @@ import {
   sanitizeDurationSeconds,
   sanitizeStreamStartDate,
 } from "@/lib/timelineBounds";
-import type { MarkerKind, TimelineMarker } from "@/lib/editorState";
 import { SourceUploadFallback } from "@/components/SourceUploadFallback";
 import { EditorPreparingScreen } from "@/components/EditorPreparingScreen";
 import {
@@ -63,7 +55,6 @@ interface SessionData {
   youtubeUrl?: string | null;
   title?: string | null;
   liveStatus?: string | null;
-  activeLiveChatId?: string | null;
   actualStartTime?: string | null;
   videoDurationSeconds?: number;
   streamEmbed?: StreamEmbedInfo;
@@ -95,14 +86,6 @@ function timelineThumbsEqual(
         t.url === prev[i]?.url
     )
   );
-}
-
-function markerKindFromEvent(type: string): MarkerKind {
-  const normalized = type.toLowerCase();
-  if (normalized.includes("laugh") || normalized.includes("funny")) return "laughter";
-  if (normalized.includes("chat")) return "chat";
-  if (normalized.includes("topic")) return "topic";
-  return "hype";
 }
 
 function transcriptRevision(
@@ -143,7 +126,6 @@ function mergeById<T extends { id: string }>(
 }
 
 export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
-  const router = useRouter();
   const [session, setSession] = useState<SessionData | null>(null);
   const [transcripts, setTranscripts] = useState<
     Array<{
@@ -211,7 +193,6 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const [editorReady, setEditorReady] = useState(false);
   const [prepareClock, setPrepareClock] = useState(() => Date.now());
   const [error, setError] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState(false);
   const [transcriptionError, setTranscriptionError] = useState<string | null>(null);
   const [sourcePreparationError, setSourcePreparationError] = useState<string | null>(null);
   const [transcribingActive, setTranscribingActive] = useState(false);
@@ -219,17 +200,11 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const [captionAppearance, setCaptionAppearance] = useState<CaptionAppearance>(
     readCaptionAppearancePreference
   );
-  const [audioSpikes, setAudioSpikes] = useState<AudioSpikeMarker[]>([]);
-  const [aiMarkers, setAiMarkers] = useState<TimelineMarker[]>([]);
   const [captionEdits, setCaptionEdits] = useState<CaptionEditsMap>({});
   const [assistantOpen, setAssistantOpen] = useState(false);
   const {
     monitorHeight,
     setMonitorHeight,
-    chatWidth,
-    setChatWidth,
-    chatVisible,
-    toggleChatVisible,
   } = useEditorLayoutPrefs();
   const captionSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const playerRef = useRef<StreamPlayerHandle>(null);
@@ -431,56 +406,16 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         const { ok, data } = await fetchJson<{
           cursor?: string;
           transcriptChunks?: typeof transcripts;
-          eventWindows?: Array<{
-            id: string;
-            startTimeSeconds: number;
-            endTimeSeconds: number;
-            type: string;
-            score: number;
-            summary?: string | null;
-          }>;
-          audioEvents?: Array<{
-            id: string;
-            startTimeSeconds: number;
-            endTimeSeconds: number;
-            type: string;
-            score: number;
-            summary?: string | null;
-            rawData?: unknown;
-          }>;
         }>(eventsUrl);
         if (!ok) return;
 
         const chunks = data.transcriptChunks ?? [];
-        const nextMarkers = (data.eventWindows ?? []).map(
-          (event) =>
-            ({
-              id: `event-${event.id}`,
-              timeSeconds: event.startTimeSeconds,
-              endTimeSeconds: event.endTimeSeconds,
-              label: event.summary?.trim() || event.type.replace(/_/g, " "),
-              kind: markerKindFromEvent(event.type),
-              score: event.score,
-              source: "ai",
-            }) satisfies TimelineMarker
-        );
-        setAiMarkers((current) =>
-          reset
-            ? nextMarkers
-            : mergeById(current, nextMarkers, (marker) => marker.timeSeconds)
-        );
-        const nextAudioSpikes = selectAudioSpikesForTimeline(
-          buildAudioSpikeMarkers(data.audioEvents ?? [])
-        );
-        setAudioSpikes((current) =>
-          reset
-            ? nextAudioSpikes
-            : mergeById(
-                current,
-                nextAudioSpikes,
-                (spike) => spike.startTimeSeconds
-              )
-        );
+        // Never blank a loaded transcript with a transient empty poll
+        // (e.g. mid-rebuild wipe). Keep previous until nonempty data returns.
+        if (chunks.length === 0 && prevTranscriptIds.current.size > 0) {
+          if (data.cursor) eventsCursorRef.current = data.cursor;
+          return;
+        }
 
         setTranscripts((current) => {
           const next = reset
@@ -848,31 +783,6 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
     return () => clearInterval(id);
   }, [session?.liveStatus]);
 
-  async function handleDeleteSession() {
-    const size = session?.storageLabel ? ` (${session.storageLabel})` : "";
-    if (
-      !window.confirm(
-        `Delete this session and free disk space${size}?\n\nRemoves local recordings, frames, and rendered clips.`
-      )
-    ) {
-      return;
-    }
-
-    setDeleting(true);
-    try {
-      const { ok, data } = await fetchJson<{ error?: string; storageLabel?: string }>(
-        `/api/sessions/${sessionId}`,
-        { method: "DELETE" }
-      );
-      if (!ok) throw new Error(data.error ?? "Delete failed");
-      posthog.capture("session_deleted", { session_id: sessionId });
-      router.push("/");
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Delete failed");
-      setDeleting(false);
-    }
-  }
-
   // Hooks must run before any early return (loading / error).
   const segmentTranscripts = useMemo(
     () =>
@@ -963,7 +873,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   if (error || !session) {
     return (
       <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
-        <EditorHeader title="Editor" />
+        <EditorHeader title="Editor" compact />
         <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6">
           <p className="text-[var(--color-danger)]">{error ?? "Session not found"}</p>
           <Link href="/" className="text-[var(--color-accent)] text-sm hover:underline">
@@ -1055,10 +965,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         storageLabel={session.storageLabel}
         isLive={isLive}
         recordedSeconds={recordedSeconds}
-        deleting={deleting}
-        onDelete={handleDeleteSession}
-        chatVisible={chatVisible}
-        onToggleChat={toggleChatVisible}
+        compact
       />
 
       <div className="relative flex-1 min-h-0">
@@ -1081,7 +988,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
             />
           )}
 
-          {/* Program monitor + optional chat (right of video) */}
+          {/* Program monitor */}
           <div
             className="flex shrink-0 border-b border-[var(--color-card-border)]"
             style={{ height: monitorHeight }}
@@ -1113,44 +1020,6 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
               />
             </div>
 
-            {chatVisible && (
-              <>
-                <div
-                  role="separator"
-                  aria-orientation="vertical"
-                  aria-label="Resize chat"
-                  title="Drag to resize chat"
-                  className="group relative z-10 hidden w-1.5 shrink-0 cursor-col-resize bg-[#0a100a] hover:bg-[var(--color-accent)]/40 md:block"
-                  onPointerDown={(event) =>
-                    beginPaneResize({
-                      axis: "col",
-                      startSize: chatWidth,
-                      onResize: setChatWidth,
-                      event,
-                      invert: true,
-                    })
-                  }
-                >
-                  <span className="pointer-events-none absolute inset-y-0 -left-1 -right-1" />
-                </div>
-
-                <div
-                  className="hidden min-h-0 shrink-0 border-l border-[var(--color-card-border)] md:block"
-                  style={{ width: chatWidth }}
-                >
-                  <ChatPanel
-                    sessionId={sessionId}
-                    hasLiveChat={Boolean(session.activeLiveChatId)}
-                    currentTime={currentTime}
-                    onSeek={seekTo}
-                    autoStart={Boolean(isLive && session.activeLiveChatId)}
-                    onChatStarted={() => {
-                      void loadEvents();
-                    }}
-                  />
-                </div>
-              </>
-            )}
           </div>
 
           <div
@@ -1192,8 +1061,6 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
               captionAppearance={captionAppearance}
               captionEdits={captionEdits}
               onCaptionEdit={handleCaptionEdit}
-              audioSpikes={audioSpikes}
-              aiMarkers={aiMarkers}
             />
           </div>
         </div>

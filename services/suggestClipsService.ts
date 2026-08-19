@@ -581,7 +581,9 @@ export async function autoSuggestClips(
         {
           ...candidate,
           title: ranked.title,
-          reason: `${ranked.rationale} ${candidate.reason}`.slice(0, 2000),
+          // `reason` is surfaced as public description/caption context. Keep
+          // ranking rationale internal so producer notes never reach a post.
+          reason: candidate.reason,
           rankingEvidence: ranked.evidence,
           titleAccuracyScore: ranked.titleAccuracyScore,
           clickabilityScore: ranked.clickabilityScore,

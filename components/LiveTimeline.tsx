@@ -27,9 +27,6 @@ import { cn } from "@/lib/cn";
 import type { LiveTimelineSegment } from "@/lib/timelineSegments";
 import type { TimelineThumbnail } from "@/services/timelineThumbnailService";
 import {
-  type AudioSpikeMarker,
-} from "@/lib/audioSpikeTimeline";
-import {
   emptyEditorState,
   normalizeEditorState,
   segmentDuration,
@@ -78,8 +75,6 @@ interface LiveTimelineProps {
       endTimeSeconds: number;
     }>
   ) => void;
-  audioSpikes?: AudioSpikeMarker[];
-  aiMarkers?: TimelineMarker[];
 }
 
 type CaptionPatch = Partial<{
@@ -209,8 +204,6 @@ export function LiveTimeline({
   captionAppearance,
   captionEdits = {},
   onCaptionEdit,
-  audioSpikes = [],
-  aiMarkers = [],
 }: LiveTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const rulerRef = useRef<HTMLDivElement>(null);
@@ -243,6 +236,7 @@ export function LiveTimeline({
   const scrubRaf = useRef<number | null>(null);
   const pendingScrub = useRef<number | null>(null);
   const playheadElRef = useRef<HTMLDivElement | null>(null);
+  const lastTrackClickRef = useRef<{ at: number; clientX: number } | null>(null);
   const currentTimeRef = useRef(currentTime);
   currentTimeRef.current = currentTime;
   const [isPlaying, setIsPlaying] = useState(false);
@@ -445,26 +439,14 @@ export function LiveTimeline({
   );
 
   const showCaptionTrack = captionCues.length > 0;
-  // Audio spikes stay as ruler markers; the dedicated A1 waveform lane is removed.
-
   const timelineMarkers = useMemo(() => {
-    const audioMarkers: TimelineMarker[] = audioSpikes.map((marker) => ({
-      id: `audio-${marker.id}`,
-      timeSeconds: marker.startTimeSeconds,
-      endTimeSeconds: marker.endTimeSeconds,
-      label:
-        marker.summary ||
-        (marker.type === "volume_spike" ? "Volume spike" : "Loud section"),
-      kind: "audio",
-      score: marker.score,
-      source: "ai",
-    }));
-    const byId = new Map<string, TimelineMarker>();
-    for (const marker of [...editorState.markers, ...aiMarkers, ...audioMarkers]) {
-      byId.set(marker.id, marker);
-    }
-    return [...byId.values()].sort((a, b) => a.timeSeconds - b.timeSeconds);
-  }, [aiMarkers, audioSpikes, editorState.markers]);
+    // Keep the ruler intentional and quiet: only markers placed by the editor
+    // are shown. Automatic audio/chat/hype detections still inform clip
+    // suggestions, but no longer clutter or affect snapping on the timeline.
+    return editorState.markers
+      .filter((marker) => marker.source === "manual")
+      .sort((a, b) => a.timeSeconds - b.timeSeconds);
+  }, [editorState.markers]);
 
   const snapPoints = useMemo(
     () => [
@@ -842,6 +824,26 @@ export function LiveTimeline({
     setScrubPreview(next.start);
     onScrub(next.start);
     setDragging(null);
+  }
+
+  function handleTrackPointerDownCapture(event: React.PointerEvent) {
+    if (event.button !== 0 || event.shiftKey) return;
+
+    const now = Date.now();
+    const previous = lastTrackClickRef.current;
+    const isDoubleClick =
+      previous != null &&
+      now - previous.at <= 450 &&
+      Math.abs(event.clientX - previous.clientX) <= 16;
+
+    lastTrackClickRef.current = isDoubleClick
+      ? null
+      : { at: now, clientX: event.clientX };
+
+    if (!isDoubleClick) return;
+    event.preventDefault();
+    event.stopPropagation();
+    placeClipSelectionAt(timeFromVideoTrack(event.clientX));
   }
 
   function handleVideoTrackPointerDown(e: React.PointerEvent) {
@@ -1250,15 +1252,6 @@ export function LiveTimeline({
           </span>
         </div>
 
-        {audioSpikes.length > 0 && (
-          <span
-            className="text-[10px] font-medium uppercase text-[var(--color-accent)] tabular-nums"
-            title="Audio spikes on timeline"
-          >
-            Audio {audioSpikes.length}
-          </span>
-        )}
-
         <div className="ml-auto flex items-center gap-0.5 rounded-md border border-[#1a2419] bg-[#070a07] p-0.5">
           <ToolBtn onClick={zoomOut} title="Zoom out" disabled={atMinZoom}>
             <ZoomOut className="h-3.5 w-3.5" strokeWidth={2.25} />
@@ -1333,6 +1326,8 @@ export function LiveTimeline({
       <div
         ref={scrollRef}
         className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden"
+        onPointerDownCapture={handleTrackPointerDownCapture}
+        title="Double-click anywhere on the timeline to place the clip selection"
       >
         <div
           className="flex h-full"
@@ -1456,7 +1451,15 @@ export function LiveTimeline({
             </div>
 
             {/* Tracks stack — fixed track heights (Premiere-style) */}
-            <div className="relative flex shrink-0 flex-col">
+            <div
+              className="relative flex shrink-0 flex-col"
+              onDoubleClickCapture={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                placeClipSelectionAt(timeFromVideoTrack(event.clientX));
+              }}
+              title="Double-click anywhere in the tracks to place the clip selection"
+            >
               {/* V1 Video track */}
               <div
                 ref={videoTrackRef}

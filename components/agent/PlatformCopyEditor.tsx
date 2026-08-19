@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Check, Copy, RotateCcw } from "lucide-react";
+import { Check, Copy, LoaderCircle, RotateCcw } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { PLATFORM_PRESETS } from "@/lib/platforms/presets";
 import type { PlatformCopy, PlatformKey } from "@/lib/platforms/types";
@@ -10,6 +10,7 @@ import { PlatformBrandIcon } from "@/components/brand/PlatformBrandIcon";
 interface PlatformCopyEditorProps {
   platform: PlatformKey;
   copy: PlatformCopy;
+  generating?: boolean;
   onChange: (copy: PlatformCopy) => void;
   onReset: () => void;
 }
@@ -42,6 +43,7 @@ const inputClass =
 export function PlatformCopyEditor({
   platform,
   copy,
+  generating = false,
   onChange,
   onReset,
 }: PlatformCopyEditorProps) {
@@ -65,15 +67,16 @@ export function PlatformCopyEditor({
   const packageText = useMemo(
     () =>
       [
-        copy.title,
-        isX ? copy.postText : copy.caption,
-        copy.description,
+        isYouTube ? copy.title : null,
+        isX ? copy.postText : isYouTube ? copy.description : copy.caption,
         copy.hashtags.join(" "),
+        isYouTube && copy.tags.length ? `Search tags: ${copy.tags.join(", ")}` : null,
+        isYouTube && copy.thumbnailText ? `Thumbnail: ${copy.thumbnailText}` : null,
         copy.pinnedComment && `Pinned comment: ${copy.pinnedComment}`,
       ]
         .filter(Boolean)
         .join("\n\n"),
-    [copy, isX]
+    [copy, isX, isYouTube]
   );
 
   const update = <K extends keyof PlatformCopy>(key: K, value: PlatformCopy[K]) =>
@@ -142,7 +145,7 @@ export function PlatformCopyEditor({
               placeholder="What should the post say?"
             />
           </label>
-        ) : (
+        ) : !isYouTube ? (
           <label className="block text-[11px] font-medium text-[var(--color-muted)]">
             <span className="flex items-center justify-between gap-2">
               Caption <FieldCount value={copy.caption ?? ""} limit={preset.captionLimit} />
@@ -155,7 +158,7 @@ export function PlatformCopyEditor({
               placeholder="Add context and a hook"
             />
           </label>
-        )}
+        ) : null}
 
         {isYouTube && (
           <label className="block text-[11px] font-medium text-[var(--color-muted)]">
@@ -231,7 +234,12 @@ export function PlatformCopyEditor({
 
       <div className="mt-4 flex items-center justify-between gap-3 border-t border-[var(--color-card-border)] pt-3">
         <span className="flex items-center gap-1.5 text-[10px] text-[var(--color-muted)]">
-          <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-accent)]" /> Saved in this studio
+          {generating ? (
+            <LoaderCircle className="h-3 w-3 animate-spin text-[var(--color-accent)]" />
+          ) : (
+            <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-accent)]" />
+          )}
+          {generating ? "Optimizing from source + transcript" : "Ready to post"}
         </span>
         <button
           type="button"

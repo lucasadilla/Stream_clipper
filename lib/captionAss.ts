@@ -184,10 +184,19 @@ export function generateAss(options: GenerateAssOptions): string {
   );
 
   const fontSize = Math.max(1, Math.round((app.fontSize * height) / 1080));
-  const marginV = Math.round((app.verticalOffsetPercent / 100) * height);
-  const marginH = Math.round(width * 0.05);
   const useBox = app.backgroundOpacity > 0;
   const edge = readabilityOverrides(app, fontSize);
+  const requestedMarginV = Math.round(
+    (app.verticalOffsetPercent / 100) * height
+  );
+  // libass clips scaled text at the video boundary. Reserve the same kind of
+  // safety gutter as the live preview when an entrance animation is enabled.
+  const animationMarginV =
+    app.animation === "none"
+      ? 0
+      : Math.ceil(fontSize * 0.14 + edge.bord + edge.shad);
+  const marginV = Math.max(requestedMarginV, animationMarginV);
+  const marginH = Math.round(width * 0.05);
   const alignment = assAlignment(app.vertical, app.horizontal);
 
   const baseColor = hexToAssColor(app.color);

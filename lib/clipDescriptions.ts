@@ -101,47 +101,48 @@ export function buildSpecificClipTitle(input: BuildClipCopyInput): string {
   return `Peak moment · ${formatSeconds(startTimeSeconds)}`;
 }
 
-/** Build a specific reason citing why this would make a great short. */
+function cleanPublishableContext(value: string | null | undefined): string {
+  return (value ?? "")
+    .replace(/\[(?:silence|processing error|live transcript[^\]]*)\]/gi, " ")
+    .replace(/\bGreat\s+\d+s\s+Short candidate at\s+\d{1,3}:\d{2}(?::\d{2})?\.?/gi, " ")
+    .replace(/^(?:Hook line|Audio|Hype spike|Chat reacted hard):\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Build public-facing context for the clip, never internal scoring copy. */
 export function buildSpecificClipReason(input: BuildClipCopyInput): string {
-  const parts: string[] = [];
   const {
-    startTimeSeconds,
-    endTimeSeconds,
     chatMessages,
     transcriptText,
     eventSummary,
     audioSummary,
     hypeHits,
   } = input;
+  const transcript = cleanPublishableContext(transcriptText);
+  const transcriptSentences = transcript
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length >= 18 && sentence.length <= 240);
+  const transcriptSummary = transcriptSentences.slice(0, 2).join(" ").slice(0, 420);
+  if (transcriptSummary) return transcriptSummary;
 
-  const dur = Math.round(endTimeSeconds - startTimeSeconds);
-  parts.push(`Great ${dur}s Short candidate at ${formatSeconds(startTimeSeconds)}.`);
-
-  if (chatMessages?.length) {
-    const quotes = chatMessages
-      .slice(0, 3)
-      .map(
-        (m) =>
-          `"${m.messageText.trim().slice(0, 80)}"${m.authorName ? ` (${m.authorName})` : ""}`
-      );
-    parts.push(`Chat reacted hard: ${quotes.join(", ")}.`);
-  } else if (hypeHits?.length) {
-    parts.push(`Hype spike: ${hypeHits.map((h) => `"${h}"`).join(", ")}.`);
+  const hook = extractClipHook(transcript);
+  const supportingContext = [eventSummary, audioSummary]
+    .map(cleanPublishableContext)
+    .find((value) => value.length >= 18);
+  if (hook && supportingContext && !supportingContext.includes(hook)) {
+    return `${hook}. ${supportingContext}`.slice(0, 420);
   }
+  if (supportingContext) return supportingContext.slice(0, 420);
+  if (hook) return `${hook}.`.replace(/\.\.$/, ".");
 
-  const hook = extractClipHook(transcriptText);
-  if (hook) {
-    parts.push(`Hook line: “${hook}”.`);
-  } else if (transcriptText && !transcriptText.includes("placeholder")) {
-    parts.push(`Audio: “${transcriptText.trim().slice(0, 110)}”.`);
-  }
-
-  if (audioSummary) parts.push(audioSummary);
-  if (eventSummary && !parts.some((p) => p.includes(eventSummary.slice(0, 20)))) {
-    parts.push(eventSummary);
-  }
-
-  return parts.join(" ").replace(/\s+/g, " ").trim();
+  const chatLine = chatMessages?.map((message) => cleanPublishableContext(message.messageText))
+    .find((value) => value.length >= 12);
+  if (chatLine) return chatLine.slice(0, 280);
+  const hypeLine = hypeHits?.map(cleanPublishableContext).find(Boolean);
+  if (hypeLine) return hypeLine.slice(0, 280);
+  return "A complete standout moment with the setup and payoff intact.";
 }
 
 function pickBestChatLine(messages: ChatQuote[]): ChatQuote | null {
