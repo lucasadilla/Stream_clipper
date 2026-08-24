@@ -44,6 +44,15 @@ RUN npm ci
 COPY . .
 
 ENV NEXT_TELEMETRY_DISABLED=1
+# Next inlines NEXT_PUBLIC_* at build time. Railway passes service variables
+# as Docker build-args only when they are declared here — otherwise the
+# browser bundle ships with an empty PostHog token and never records visits.
+ARG NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN=""
+ARG NEXT_PUBLIC_POSTHOG_HOST="https://us.i.posthog.com"
+ARG NEXT_PUBLIC_SITE_URL="https://streamclipper.stream"
+ENV NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN=$NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN
+ENV NEXT_PUBLIC_POSTHOG_HOST=$NEXT_PUBLIC_POSTHOG_HOST
+ENV NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL
 RUN npm run build
 
 ENV NODE_ENV=production

@@ -35,6 +35,12 @@ if (pushCode !== 0) {
   );
   process.exit(pushCode);
 }
+if (!process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN?.trim()) {
+  console.warn(
+    "[start] NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN is unset — PostHog will not record visitors. Set the project API key (phc_...) and rebuild the Docker image."
+  );
+}
+
 console.info("[start] Schema is up to date. Starting Next.js...");
 
 const next = spawn("npx", ["next", "start"], {
