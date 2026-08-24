@@ -1,4 +1,11 @@
 import type { NextConfig } from "next";
+import {
+  getPosthogAssetHost,
+  getPosthogIngestHost,
+} from "./lib/posthogHost";
+
+const posthogIngestHost = getPosthogIngestHost();
+const posthogAssetHost = getPosthogAssetHost(posthogIngestHost);
 
 const nextConfig: NextConfig = {
   experimental: {
@@ -29,15 +36,15 @@ const nextConfig: NextConfig = {
     return [
       {
         source: "/ingest/static/:path*",
-        destination: "https://us-assets.i.posthog.com/static/:path*",
+        destination: `${posthogAssetHost}/static/:path*`,
       },
       {
         source: "/ingest/array/:path*",
-        destination: "https://us-assets.i.posthog.com/array/:path*",
+        destination: `${posthogAssetHost}/array/:path*`,
       },
       {
         source: "/ingest/:path*",
-        destination: "https://us.i.posthog.com/:path*",
+        destination: `${posthogIngestHost}/:path*`,
       },
     ];
   },
