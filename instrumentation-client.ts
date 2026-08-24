@@ -15,6 +15,12 @@ if (projectToken) {
     defaults: "2026-05-30",
     // Anonymous pageviews should show up as visitors, not only signed-in users.
     person_profiles: "always",
+    // App Router: `defaults` sets capture_pageview to "history_change", which
+    // skips the first load. Visitors then show in Live (flags/session) but
+    // never in Web Analytics, which is built on $pageview. Capture those in
+    // PostHogPageView instead, and keep pageleave for bounce rate.
+    capture_pageview: false,
+    capture_pageleave: true,
     capture_exceptions: true,
     debug: process.env.NODE_ENV === "development",
   });
