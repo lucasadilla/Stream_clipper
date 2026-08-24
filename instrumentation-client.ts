@@ -1,5 +1,6 @@
 import posthog from "posthog-js";
 import { getPosthogUiHost } from "@/lib/posthogHost";
+import { captureVisiblePosthogPageview } from "@/lib/posthogPageview";
 
 const projectToken = process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN;
 
@@ -23,5 +24,8 @@ if (projectToken) {
     capture_pageleave: true,
     capture_exceptions: true,
     debug: process.env.NODE_ENV === "development",
+    loaded: (client) => {
+      captureVisiblePosthogPageview(client);
+    },
   });
 }
