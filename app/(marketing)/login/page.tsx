@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, Suspense } from "react";
+import { useEffect, useMemo, useRef, useState, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getProviders, signIn, signOut } from "next-auth/react";
@@ -8,10 +8,19 @@ import posthog from "posthog-js";
 import { fetchJson } from "@/lib/apiClient";
 import { cn } from "@/lib/cn";
 import {
+  readLoginFormCredentials,
+  shouldIgnoreAutomaticLoginSubmit,
+  withTimeout,
+} from "@/lib/loginForm";
+import {
   authProviderBrand,
   PlatformBrandIcon,
 } from "@/components/brand/PlatformBrandIcon";
 import type { BillingAccountSummary } from "@/services/billingService";
+
+const AUTH_WAIT_MS = 20_000;
+const AUTH_TIMEOUT_MESSAGE =
+  "Sign-in is taking too long. Check your connection and try again.";
 
 type ProviderInfo = { id: string; name: string };
 type Mode = "signin" | "signup";
@@ -26,6 +35,7 @@ function LoginPageInner() {
   const [loading, setLoading] = useState(false);
   const [account, setAccount] = useState<BillingAccountSummary | null>(null);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const formArmedRef = useRef(false);
 
   const authError = searchParams.get("error");
 
@@ -91,13 +101,23 @@ function LoginPageInner() {
     [providers]
   );
 
+  function armLoginForm() {
+    formArmedRef.current = true;
+  }
+
   async function handleOAuth(providerId: string) {
     setLoading(true);
     setError(null);
     try {
-      await signIn(providerId, { callbackUrl: "/welcome" });
+      await withTimeout(
+        signIn(providerId, { callbackUrl: "/welcome" }),
+        AUTH_WAIT_MS,
+        AUTH_TIMEOUT_MESSAGE
+      );
+      setError("Sign-in did not continue. Try another method or refresh the page.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sign-in failed");
+    } finally {
       setLoading(false);
     }
   }
@@ -105,31 +125,58 @@ function LoginPageInner() {
   async function finishAuthSession() {
     // Prefer an explicit sync so the billing cookie is set on this response
     // and we refuse to navigate if the Auth.js session cookie never landed.
-    const synced = await fetchJson<{
-      account?: BillingAccountSummary;
-      error?: string;
-    }>("/api/auth/session-sync", { method: "POST" });
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const synced = await fetchJson<{
+        account?: BillingAccountSummary;
+        error?: string;
+      }>("/api/auth/session-sync", { method: "POST" });
 
-    if (!synced.ok || !synced.data.account) {
-      throw new Error(
+      if (synced.ok && synced.data.account) {
+        posthog.identify(synced.data.account.id, {
+          email: synced.data.account.email,
+        });
+        posthog.capture("user_signed_in", {
+          unlimited_access: synced.data.account.unlimitedAccess ?? false,
+        });
+        setAccount(synced.data.account);
+        router.push("/welcome");
+        router.refresh();
+        return;
+      }
+
+      lastError = new Error(
         synced.data.error ??
           "Signed up, but the session cookie was not saved. On local dev set AUTH_URL=http://localhost:3000 (not the production URL), restart, and try again."
       );
+      if (synced.status !== 401 || attempt === 3) break;
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
     }
 
-    posthog.identify(synced.data.account.id, {
-      email: synced.data.account.email,
-    });
-    posthog.capture("user_signed_in", {
-      unlimited_access: synced.data.account.unlimitedAccess ?? false,
-    });
-    setAccount(synced.data.account);
-    router.push("/welcome");
-    router.refresh();
+    throw lastError ?? new Error("Could not sync session");
   }
 
-  async function handlePasswordSubmit(event: React.FormEvent) {
+  async function handlePasswordSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    event.stopPropagation();
+
+    const submitted = readLoginFormCredentials(
+      new FormData(event.currentTarget),
+      { email, password }
+    );
+
+    if (
+      shouldIgnoreAutomaticLoginSubmit({
+        formArmed: formArmedRef.current,
+        email: submitted.email,
+        password: submitted.password,
+      })
+    ) {
+      return;
+    }
+
+    setEmail(submitted.email);
+    setPassword(submitted.password);
     setLoading(true);
     setError(null);
     try {
@@ -139,7 +186,10 @@ function LoginPageInner() {
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ email, password }),
+            body: JSON.stringify({
+              email: submitted.email,
+              password: submitted.password,
+            }),
           }
         );
         if (!ok) {
@@ -147,12 +197,16 @@ function LoginPageInner() {
         }
       }
 
-      const result = await signIn("credentials", {
-        email,
-        password,
-        redirect: false,
-        callbackUrl: "/welcome",
-      });
+      const result = await withTimeout(
+        signIn("credentials", {
+          email: submitted.email,
+          password: submitted.password,
+          redirect: false,
+          callbackUrl: "/welcome",
+        }),
+        AUTH_WAIT_MS,
+        AUTH_TIMEOUT_MESSAGE
+      );
 
       if (result?.error) {
         const detail =
@@ -302,7 +356,10 @@ function LoginPageInner() {
               </div>
 
               <form
+                method="dialog"
                 onSubmit={(e) => void handlePasswordSubmit(e)}
+                onPointerDown={armLoginForm}
+                onKeyDown={armLoginForm}
                 className="space-y-4"
               >
                 <label className="block space-y-2">
@@ -310,6 +367,8 @@ function LoginPageInner() {
                     Email
                   </span>
                   <input
+                    id="login-email"
+                    name="email"
                     type="email"
                     required
                     autoComplete="email"
@@ -328,6 +387,8 @@ function LoginPageInner() {
                     Password
                   </span>
                   <input
+                    id="login-password"
+                    name="password"
                     type="password"
                     required
                     minLength={8}
@@ -353,6 +414,7 @@ function LoginPageInner() {
                 <button
                   type="submit"
                   disabled={loading}
+                  onPointerDown={armLoginForm}
                   className="h-12 w-full bg-[var(--color-accent)] text-sm font-semibold text-black hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                 >
                   {loading
