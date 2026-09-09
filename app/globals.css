@@ -147,6 +147,19 @@ body {
   --color-accent-foreground: #020302;
 }
 
+.agent-shell {
+  --color-background: #07090b;
+  --color-card: #0d0f12;
+  --color-card-border: #2b3034;
+  --color-muted: #90989a;
+  --color-secondary: #15191d;
+  --color-secondary-foreground: #f4f2eb;
+  --color-border: #2b3034;
+  --color-input: #343a40;
+  --color-popover: #0d0f12;
+  --color-popover-foreground: #f4f2eb;
+}
+
 .marketing-home {
   background: #020302;
   --page-scroll-progress: 0;

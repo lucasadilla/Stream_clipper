@@ -9,6 +9,7 @@ import {
   type SyntheticEvent,
 } from "react";
 import { createPortal } from "react-dom";
+import Image from "next/image";
 import {
   Check,
   Copy,
@@ -19,6 +20,8 @@ import {
   Play,
   RotateCcw,
   Send,
+  SlidersHorizontal,
+  Smartphone,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -76,6 +79,10 @@ import {
   type PreviewCropKeyframe,
 } from "@/lib/reframePlayback";
 import { buildFallbackPlatformCopy } from "@/lib/platformCopyDefaults";
+import {
+  loadClipStudioCaptions,
+  updateClipStudioCaptionCache,
+} from "@/lib/clipStudioPreload";
 
 type StudioTab = "edit" | "preview" | "export";
 
@@ -241,12 +248,19 @@ export function AgentClipStudioModal({
   const [mounted, setMounted] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [tab, setTab] = useState<StudioTab>("edit");
+  const [previewPrimed, setPreviewPrimed] = useState(false);
   const [lookPreset, setLookPreset] = useState<ContentLookPresetId>("auto");
   const [reframeStyle, setReframeStyle] =
     useState<ReframeStyle>("professional");
   const [lockSubject, setLockSubject] = useState(false);
   const [faceJobId, setFaceJobId] = useState<string | null>(null);
   const [faceRect, setFaceRect] = useState<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const [instantFaceRect, setInstantFaceRect] = useState<{
     x: number;
     y: number;
     width: number;
@@ -284,6 +298,7 @@ export function AgentClipStudioModal({
   >([]);
   const [platformCaptionEdits, setPlatformCaptionEdits] =
     useState<CaptionEditsMap>({});
+  const [platformCaptionsLoading, setPlatformCaptionsLoading] = useState(true);
   const [selectedPlatforms, setSelectedPlatforms] = useState<PlatformKey[]>([
     "youtube_shorts",
     "tiktok",
@@ -310,6 +325,16 @@ export function AgentClipStudioModal({
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  useEffect(() => {
+    if (!open) {
+      setPreviewPrimed(false);
+      return;
+    }
+    setPreviewPrimed(false);
+    const timer = window.setTimeout(() => setPreviewPrimed(true), 180);
+    return () => window.clearTimeout(timer);
+  }, [open, clip.id]);
 
   // Native <video controls> steals wheel (volume). Forward those wheels to the modal scroller.
   useEffect(() => {
@@ -340,7 +365,12 @@ export function AgentClipStudioModal({
     setCopyingPackage(false);
     setActionError(null);
     setActionOk(null);
-    const initialCopies = platformCopiesForClip(clip);
+    const initialCopies = platformCopiesForClip({
+      title: clip.title,
+      reason: clip.reason,
+      startTimeSeconds: clip.startTimeSeconds,
+      endTimeSeconds: clip.endTimeSeconds,
+    });
     platformCopyDefaultsRef.current = initialCopies;
     touchedPlatformCopiesRef.current.clear();
     setPlatformCopies(initialCopies);
@@ -351,6 +381,7 @@ export function AgentClipStudioModal({
     setLockSubject(false);
     setFaceJobId(null);
     setFaceRect(null);
+    setInstantFaceRect(null);
     setFaceKeyframes([]);
     setFaceBaseCropWidth(null);
     setAutoResolvedLayout(null);
@@ -467,6 +498,35 @@ export function AgentClipStudioModal({
         return "completed" as const;
       };
 
+      // Start or reuse tracking immediately while the saved layout loads.
+      // The API deduplicates this request against existing work for the range.
+      const faceRequest = fetchJson<{
+        analysisJobId?: string;
+        status?: string;
+        error?: string;
+      }>(`/api/sessions/${sessionId}/face-analysis`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          startSeconds: clip.startTimeSeconds,
+          endSeconds: clip.endTimeSeconds,
+          clipSuggestionId: clip.id,
+          sampleFps: 2.5,
+          priority: true,
+        }),
+      }).catch((error: unknown) => ({
+        ok: false,
+        status: 0,
+        data: {
+          analysisJobId: undefined,
+          status: undefined,
+          error:
+            error instanceof Error
+              ? error.message
+              : "Face tracking could not be started.",
+        },
+      }));
+
       const { ok, data } = await fetchJson<{
         configuration?: {
           layout?: string;
@@ -508,24 +568,7 @@ export function AgentClipStudioModal({
         }
       }
 
-      const face = await fetchJson<{
-        analysisJobId?: string;
-        status?: string;
-        error?: string;
-      }>(
-        `/api/sessions/${sessionId}/face-analysis`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            startSeconds: clip.startTimeSeconds,
-            endSeconds: clip.endTimeSeconds,
-            clipSuggestionId: clip.id,
-            sampleFps: 2.5,
-            priority: true,
-          }),
-        }
-      );
+      const face = await faceRequest;
       if (cancelled) return;
       if (!face.ok || !face.data.analysisJobId) {
         setAnalyzingFace(false);
@@ -699,33 +742,33 @@ export function AgentClipStudioModal({
   }, [open]);
 
   useEffect(() => {
-    if (!open || tab !== "preview") return;
+    if (!open) return;
     let cancelled = false;
+    setPlatformCaptionsLoading(true);
     setPlatformCaptionChunks([]);
     setPlatformCaptionEdits({});
-    void (async () => {
-      const [events, captions] = await Promise.all([
-        fetchJson<{ transcriptChunks?: TranscriptChunkInput[] }>(
-          `/api/sessions/${sessionId}/events?start=${encodeURIComponent(
-            Math.max(0, clip.startTimeSeconds - 2)
-          )}&end=${encodeURIComponent(clip.endTimeSeconds + 2)}`
-        ),
-        fetchJson<{ edits?: CaptionEditsMap }>(
-          `/api/sessions/${sessionId}/captions`
-        ),
-      ]);
-      if (cancelled) return;
-      if (events.ok) {
-        setPlatformCaptionChunks(events.data.transcriptChunks ?? []);
-      }
-      if (captions.ok) {
-        setPlatformCaptionEdits(captions.data.edits ?? {});
-      }
-    })();
+    void loadClipStudioCaptions(
+      sessionId,
+      clip.startTimeSeconds,
+      clip.endTimeSeconds
+    )
+      .then((bundle) => {
+        if (cancelled) return;
+        setPlatformCaptionChunks(bundle.chunks);
+        setPlatformCaptionEdits(bundle.edits);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPlatformCaptionChunks([]);
+        setPlatformCaptionEdits({});
+      })
+      .finally(() => {
+        if (!cancelled) setPlatformCaptionsLoading(false);
+      });
     return () => {
       cancelled = true;
     };
-  }, [open, sessionId, tab, clip.id, clip.startTimeSeconds, clip.endTimeSeconds]);
+  }, [open, sessionId, clip.id, clip.startTimeSeconds, clip.endTimeSeconds]);
 
   const previewMeta = PLATFORM_PRESETS[previewPlatform];
   const thumbUrl = clipThumbnailApiUrl(clip.id);
@@ -1426,7 +1469,7 @@ export function AgentClipStudioModal({
 
   return createPortal(
     <div
-      className="editor-shell fixed inset-0 z-[2147483000] bg-black/80 text-[var(--color-foreground)]"
+      className="editor-shell fixed inset-0 z-[2147483000] bg-black/75 text-[var(--color-foreground)] backdrop-blur-md"
       role="dialog"
       aria-modal="true"
       aria-label="Edit clip"
@@ -1438,68 +1481,99 @@ export function AgentClipStudioModal({
         style={{ WebkitOverflowScrolling: "touch" }}
         onClick={onClose}
       >
-        <div className="flex min-h-full justify-center px-3 py-4 sm:px-6 sm:py-8">
+        <div className="flex min-h-full justify-center p-2 sm:p-4 lg:p-6">
           <div
-            className="relative my-auto flex w-full max-w-6xl flex-col rounded-2xl border border-[var(--color-card-border)] bg-[var(--color-background)] shadow-2xl"
+            className="relative my-auto flex w-full max-w-[90rem] flex-col overflow-hidden rounded-lg border border-white/10 bg-[#050705] shadow-[0_30px_100px_rgba(0,0,0,0.72)]"
             onClick={(e) => e.stopPropagation()}
           >
-            <header className="sticky top-0 z-20 flex shrink-0 items-start justify-between gap-3 border-b border-[var(--color-card-border)] bg-[var(--color-background)] px-4 py-3 sm:px-5">
-              <div className="min-w-0">
-                <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">
-                  Clip studio
-                </p>
-                <h2 className="truncate text-lg font-semibold">{clip.title}</h2>
-                <p className="text-xs text-[var(--color-muted)]">
-                  {formatSeconds(clip.startTimeSeconds)}–
-                  {formatSeconds(clip.endTimeSeconds)} ·{" "}
-                  {formatSeconds(duration)}
-                </p>
+            <header className="sticky top-0 z-20 flex shrink-0 items-center justify-between gap-4 border-b border-white/[0.08] bg-[#050705]/95 px-4 py-3 backdrop-blur-xl sm:px-5">
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-[var(--color-accent)]/25 bg-[var(--color-accent)]/10">
+                  <Image src="/clipper-mark.svg" alt="" width={20} height={20} />
+                </span>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-[var(--color-accent)]">
+                      Clip studio
+                    </p>
+                    <span className="h-1 w-1 rounded-full bg-white/20" />
+                    <p className="font-mono text-[9px] text-[var(--color-muted)]">
+                      {formatSeconds(duration)}
+                    </p>
+                  </div>
+                  <h2 className="max-w-[min(60vw,42rem)] truncate text-sm font-semibold sm:text-base">
+                    {clip.title}
+                  </h2>
+                </div>
               </div>
               <button
                 type="button"
                 onClick={onClose}
-                className="rounded-lg p-2 text-[var(--color-muted)] transition-colors hover:bg-[var(--color-secondary)] hover:text-[var(--color-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+                className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-transparent text-[var(--color-muted)] transition-colors hover:border-white/10 hover:bg-white/[0.04] hover:text-[var(--color-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
                 aria-label="Close"
               >
-                <X className="h-5 w-5" />
+                <X className="h-4 w-4" />
               </button>
             </header>
 
-            <div className="sticky top-[4.5rem] z-20 flex shrink-0 gap-1 border-b border-[var(--color-card-border)] bg-[var(--color-background)] px-3 py-2">
+            <div className="sticky top-[4rem] z-20 flex shrink-0 items-center justify-center gap-2 border-b border-white/[0.08] bg-[#030403]/95 px-3 backdrop-blur-xl sm:gap-6">
               {(
                 [
-                  ["edit", "Edit"],
-                  ["preview", "Platform preview"],
-                  ["export", "Download / Post"],
+                  ["edit", "Edit", SlidersHorizontal],
+                  ["preview", "Preview", Smartphone],
+                  ["export", "Export", Download],
                 ] as const
-              ).map(([id, label]) => (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => setTab(id)}
-                  className={cn(
-                    "rounded-lg px-3 py-1.5 text-xs font-semibold",
-                    tab === id
-                      ? "bg-[var(--color-accent)] text-[var(--color-accent-foreground)]"
-                      : "text-[var(--color-muted)] hover:bg-[var(--color-secondary)] hover:text-[var(--color-foreground)]"
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
+              ).map(([id, label, Icon]) => {
+                const active = tab === id;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setTab(id)}
+                    className={cn(
+                      "relative flex h-11 items-center gap-2 border-b-2 px-3 text-xs font-semibold transition-colors",
+                      active
+                        ? "border-[var(--color-accent)] text-white"
+                        : "border-transparent text-[var(--color-muted)] hover:text-white"
+                    )}
+                  >
+                    <Icon
+                      className={cn(
+                        "h-3.5 w-3.5",
+                        active && "text-[var(--color-accent)]"
+                      )}
+                      aria-hidden="true"
+                    />
+                    {label}
+                  </button>
+                );
+              })}
             </div>
 
-            <div className="p-4 pb-10 sm:p-5 sm:pb-12">
-          {tab === "edit" && (
-            <div className="space-y-5">
-              <div>
-                <p className="mb-1 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--color-muted)]">
-                  Look
-                </p>
-                <p className="mb-3 text-xs text-[var(--color-muted)]">
-                  Tap to change — the preview updates instantly.
-                </p>
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="p-4 pb-8 sm:p-5 lg:p-6 lg:pb-10">
+          <div className={cn(tab !== "edit" && "hidden")} aria-hidden={tab !== "edit"}>
+            <div className="space-y-6">
+              <section className="border-b border-white/[0.08] pb-5">
+                <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--color-accent)]">
+                      Composition
+                    </p>
+                    <p className="mt-1 text-xs text-[var(--color-muted)]">
+                      Choose how Clipper frames the moment.
+                    </p>
+                  </div>
+                  <p className="text-[10px] font-medium text-[var(--color-muted)]">
+                    {formatSeconds(clip.startTimeSeconds)}–{formatSeconds(clip.endTimeSeconds)}
+                  </p>
+                </div>
+                <div
+                  className="grid gap-2"
+                  style={{
+                    gridTemplateColumns:
+                      "repeat(auto-fit, minmax(min(100%, 12rem), 1fr))",
+                  }}
+                >
                   {CONTENT_LOOK_PRESETS.map((preset) => {
                     const selected = lookPreset === preset.id;
                     return (
@@ -1508,16 +1582,16 @@ export function AgentClipStudioModal({
                         type="button"
                         onClick={() => selectLook(preset.id)}
                         className={cn(
-                          "flex min-w-0 items-center gap-2.5 rounded-xl border bg-[var(--color-card)] px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]",
+                          "flex min-w-0 items-center gap-2.5 rounded-lg border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]",
                           selected
-                            ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 ring-1 ring-[var(--color-accent)]"
-                            : "border-[var(--color-card-border)] hover:border-[var(--color-accent)]/60 hover:bg-[var(--color-secondary)]"
+                            ? "border-[var(--color-accent)]/55 bg-[var(--color-accent)]/[0.08]"
+                            : "border-white/[0.08] bg-[#080a08] hover:border-white/20 hover:bg-[#0c100c]"
                         )}
                       >
                         <LookLayoutMock
                           presetId={preset.id}
                           frameUrl={thumbUrl}
-                          className="h-14 w-8 shrink-0 rounded-md"
+                          className="h-12 w-7 shrink-0 rounded"
                         />
                         <span className="min-w-0">
                           <span className="flex items-center gap-1.5 text-xs font-semibold leading-snug">
@@ -1527,7 +1601,7 @@ export function AgentClipStudioModal({
                             />
                             {preset.label}
                           </span>
-                          <span className="mt-0.5 block text-[11px] leading-snug text-[var(--color-muted)]">
+                          <span className="mt-0.5 block line-clamp-2 text-[10px] leading-4 text-[var(--color-muted)]">
                             {preset.behavior}
                           </span>
                         </span>
@@ -1536,7 +1610,7 @@ export function AgentClipStudioModal({
                   })}
                 </div>
                 {(lookPreset === "just_chatting" || lookPreset === "auto") && (
-                  <div className="mt-3 flex flex-col gap-2 rounded-lg border border-[var(--color-card-border)] bg-[var(--color-secondary)]/45 p-2.5 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="mt-3 flex flex-col gap-2 border-t border-white/[0.06] pt-3 sm:flex-row sm:items-center sm:justify-between">
                     <div
                       className="grid min-w-0 grid-cols-5 gap-1"
                       role="group"
@@ -1598,7 +1672,7 @@ export function AgentClipStudioModal({
                     Face tracking ready
                   </p>
                 )}
-              </div>
+              </section>
 
               <AgentClipEditor
                 sessionId={sessionId}
@@ -1619,12 +1693,33 @@ export function AgentClipStudioModal({
                 onAddCameraKeyframe={upsertManualCameraKeyframe}
                 onDeleteCameraKeyframe={deleteManualCameraKeyframe}
                 onResetCameraKeyframes={resetManualCameraKeyframes}
+                showHeader={false}
+                prefetchedTranscriptChunks={platformCaptionChunks}
+                prefetchedCaptionEdits={platformCaptionEdits}
+                prefetchedCaptionsLoading={platformCaptionsLoading}
+                onCaptionEditsChange={(edits) => {
+                  setPlatformCaptionEdits(edits);
+                  updateClipStudioCaptionCache(
+                    sessionId,
+                    clip.startTimeSeconds,
+                    clip.endTimeSeconds,
+                    edits
+                  );
+                }}
+                active={tab === "edit"}
+                onPreviewFaceRectChange={setInstantFaceRect}
               />
             </div>
-          )}
+          </div>
 
-          {tab === "preview" && (
-            <div className="mx-auto flex max-w-6xl flex-col items-center gap-5">
+          {(tab === "preview" || previewPrimed) && (
+            <div
+              className={cn(
+                "mx-auto max-w-6xl flex-col items-center gap-5",
+                tab === "preview" ? "flex" : "hidden"
+              )}
+              aria-hidden={tab !== "preview"}
+            >
               <div className="w-full space-y-1.5 text-center">
                 <h3 className="text-base font-semibold">Platform preview</h3>
                 <p className="text-xs text-[var(--color-muted)]">
@@ -1662,7 +1757,9 @@ export function AgentClipStudioModal({
                         presetId={lookPreset}
                         playbackUrl={playbackUrl}
                         videoRef={platformVideoRef}
-                        faceRect={faceRect}
+                        posterUrl={thumbUrl}
+                        preload={tab === "preview" ? "auto" : "metadata"}
+                        faceRect={faceRect ?? instantFaceRect}
                         faceCenterX={platformCameraFrame?.centerX}
                         faceCenterY={platformCameraFrame?.centerY}
                         zoom={platformCameraZoom}

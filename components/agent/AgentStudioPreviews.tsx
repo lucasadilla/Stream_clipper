@@ -190,6 +190,8 @@ export function LookVideoStage({
   presetId,
   playbackUrl,
   videoRef,
+  posterUrl,
+  preload = "auto",
   className,
   children,
   onTimeUpdate,
@@ -204,6 +206,8 @@ export function LookVideoStage({
   presetId: ContentLookPresetId;
   playbackUrl: string | null;
   videoRef: RefObject<HTMLVideoElement | null>;
+  posterUrl?: string | null;
+  preload?: "none" | "metadata" | "auto";
   className?: string;
   children?: ReactNode;
   onTimeUpdate?: (event: SyntheticEvent<HTMLVideoElement>) => void;
@@ -331,11 +335,12 @@ export function LookVideoStage({
       >
         <video
           ref={mirrorRef}
+          src={needsMirror ? playbackUrl ?? undefined : undefined}
           className={mirrorVideoClass}
           style={{ objectPosition: facePos }}
           muted
           playsInline
-          preload="auto"
+          preload={preload}
         />
       </div>
 
@@ -357,6 +362,8 @@ export function LookVideoStage({
         {playbackUrl ? (
           <video
             ref={videoRef}
+            src={playbackUrl ?? undefined}
+            poster={posterUrl ?? undefined}
             className={cn(
               primaryVideoClass,
               "transition-[object-position,transform] duration-500 ease-out motion-reduce:transition-none"
@@ -377,6 +384,7 @@ export function LookVideoStage({
                 layout === "subject_aware_crop" ? facePos : undefined,
             }}
             playsInline
+            preload={preload}
             controls
             onTimeUpdate={onTimeUpdate}
             onPlay={onPlay}

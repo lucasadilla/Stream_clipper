@@ -873,7 +873,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   if (error || !session) {
     return (
       <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
-        <EditorHeader title="Editor" compact />
+        <EditorHeader title="Editor" mode="timeline" compact />
         <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6">
           <p className="text-[var(--color-danger)]">{error ?? "Session not found"}</p>
           <Link href="/" className="text-[var(--color-accent)] text-sm hover:underline">
@@ -962,6 +962,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
     <div className="editor-shell h-screen flex flex-col bg-[var(--color-background)] overflow-hidden">
       <EditorHeader
         title={session.title}
+        mode="timeline"
         storageLabel={session.storageLabel}
         isLive={isLive}
         recordedSeconds={recordedSeconds}

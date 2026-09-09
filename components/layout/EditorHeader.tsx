@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { HardDrive, Home, Trash2 } from "lucide-react";
 import { SiteLogo } from "@/components/layout/SiteLogo";
 import { cn } from "@/lib/cn";
 
@@ -10,6 +11,7 @@ interface EditorHeaderProps {
   deleting?: boolean;
   onDelete?: () => void;
   compact?: boolean;
+  mode?: "agent" | "timeline" | "editor";
 }
 
 function formatLiveClock(seconds: number): string {
@@ -30,47 +32,48 @@ export function EditorHeader({
   recordedSeconds = 0,
   deleting,
   onDelete,
-  compact = false,
+  mode = "editor",
 }: EditorHeaderProps) {
   return (
-    <header className="editor-header shrink-0 border-b border-[#21301f] bg-[#020302]">
+    <header
+      className={cn(
+        "editor-header relative z-30 shrink-0 border-b border-white/[0.08] backdrop-blur-xl",
+        mode === "agent" ? "bg-[#0a0b0d]/95" : "bg-[#030403]/95"
+      )}
+    >
       <div
-        className={cn(
-          "mx-auto flex w-full max-w-[1440px] items-center justify-between px-4 sm:px-6 lg:px-8",
-          compact
-            ? "h-16 gap-3 sm:h-[4.5rem] sm:gap-5"
-            : "h-[var(--site-header-height)] gap-4"
-        )}
+        className="grid h-14 w-full items-center gap-2 px-3 sm:h-[4.5rem] sm:gap-4 sm:px-5 lg:px-6"
+        style={{ gridTemplateColumns: "auto minmax(0, 1fr) auto" }}
       >
-        <div className={cn("flex min-w-0 items-center", compact ? "gap-3 sm:gap-4" : "gap-4 sm:gap-5")}>
+        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
           <SiteLogo
-            className={cn(
-              compact &&
-                "[&_.site-logo-mark]:h-9 [&_.site-logo-mark]:w-12"
-            )}
+            showText={false}
+            className="[&_.site-logo-mark]:h-8 [&_.site-logo-mark]:w-10 sm:[&_.site-logo-mark]:h-9 sm:[&_.site-logo-mark]:w-11"
           />
-          <div className={cn("hidden w-px bg-[#243524] sm:block", compact ? "h-8" : "h-10")} />
-          <div className="min-w-0">
-            <p className={cn("hidden font-medium uppercase tracking-[0.16em] text-white/45 sm:block", compact ? "text-[9px]" : "text-[11px]")}>
-              Editor
-            </p>
-            <h1 className={cn("truncate font-[var(--font-display)] leading-tight text-[#F1EFE7]", compact ? "text-base sm:text-lg" : "text-lg sm:text-xl")}>
-              {title ?? "Untitled session"}
-            </h1>
-          </div>
         </div>
 
-        <div className="flex shrink-0 items-center gap-2 sm:gap-3">
+        <div className="min-w-0 px-1 sm:px-4">
+          <h1 className="truncate text-xs font-medium text-[#F1EFE7] sm:text-sm">
+            {title ?? "Untitled session"}
+          </h1>
+        </div>
+
+        <div className="flex shrink-0 items-center justify-end gap-1.5 sm:gap-2">
           {storageLabel && storageLabel !== "0 B" && (
-            <span className={cn("hidden rounded-full border border-[#243524] bg-[#0c100c] font-mono text-xs text-white/55 lg:inline", compact ? "px-3 py-1.5" : "px-4 py-2")}>
-              {storageLabel}
+            <span className="hidden h-8 items-center gap-1.5 border-r border-white/10 pr-3 font-mono text-[10px] text-white/45 lg:flex">
+              <HardDrive className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>{storageLabel}</span>
             </span>
           )}
 
           {isLive && (
-            <span className={cn("inline-flex items-center gap-2 rounded-full border border-red-500/35 bg-red-500/10 font-mono font-semibold text-[#ff8f8f]", compact ? "h-9 px-3 text-xs sm:h-10 sm:px-4" : "h-12 px-4 text-sm sm:h-14 sm:px-5")}>
-              <span className="h-2.5 w-2.5 rounded-full bg-red-500 animate-pulse" />
-              LIVE {formatLiveClock(recordedSeconds)}
+            <span className="inline-flex h-8 items-center gap-1.5 rounded border border-red-400/25 bg-red-500/[0.08] px-2 font-mono text-[10px] font-semibold text-[#ff9c9c] sm:px-2.5">
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-60" />
+                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-red-400" />
+              </span>
+              <span className="hidden sm:block">LIVE</span>
+              {formatLiveClock(recordedSeconds)}
             </span>
           )}
 
@@ -79,23 +82,21 @@ export function EditorHeader({
               type="button"
               onClick={onDelete}
               disabled={deleting}
-              className={cn(
-                "hidden items-center rounded-lg border border-[#30462d] bg-[#070a07] text-sm font-semibold text-white/70 transition-colors hover:border-red-500/50 hover:text-red-400 disabled:opacity-50 sm:inline-flex",
-                compact ? "h-10 px-4" : "h-12 px-5 sm:h-14 sm:px-6"
-              )}
+              className="hidden h-8 w-8 place-items-center rounded border border-white/[0.08] text-white/45 transition-colors hover:border-red-400/30 hover:bg-red-500/[0.08] hover:text-red-300 disabled:cursor-wait disabled:opacity-40 sm:grid"
+              aria-label={deleting ? "Deleting session" : "Delete session"}
+              title={deleting ? "Deleting session" : "Delete session"}
             >
-              {deleting ? "Deleting…" : "Delete"}
+              <Trash2 className={cn("h-3.5 w-3.5", deleting && "animate-pulse")} />
             </button>
           )}
 
           <Link
             href="/"
-            className={cn(
-              "inline-flex items-center rounded-lg bg-[var(--color-accent)] text-sm font-semibold text-[#071006] transition-colors hover:bg-[var(--color-accent-hover)]",
-              compact ? "h-9 px-4 sm:h-10 sm:px-5" : "h-12 px-5 sm:h-14 sm:px-7"
-            )}
+            className="grid h-8 w-8 place-items-center rounded border border-white/[0.08] bg-white/[0.025] text-white/65 transition-colors hover:border-[var(--color-accent)]/35 hover:bg-[var(--color-accent)]/[0.07] hover:text-[var(--color-accent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+            aria-label="Go to home"
+            title="Home"
           >
-            Home
+            <Home className="h-3.5 w-3.5" aria-hidden="true" />
           </Link>
         </div>
       </div>

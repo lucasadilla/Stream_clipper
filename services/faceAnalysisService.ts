@@ -198,18 +198,6 @@ export async function requestFaceAnalysis(options: {
   const end = Math.max(start + 0.5, options.endSeconds);
   const sampleFps = Math.min(8, Math.max(1, options.sampleFps ?? 2.5));
 
-  // Opening Clip Studio is more important than speculative warm-up. Reclaim
-  // old per-clip segments first so the requested analysis has working space.
-  if (options.priority) {
-    const { reclaimEphemeralStorage } = await import(
-      "@/services/storageReclaimService"
-    );
-    await reclaimEphemeralStorage({
-      keepSessionId: options.streamSessionId,
-      pruneSessionSegments: true,
-    }).catch(() => null);
-  }
-
   if (!options.force) {
     const existing = await prisma.faceAnalysisJob.findFirst({
       where: {
@@ -263,6 +251,18 @@ export async function requestFaceAnalysis(options: {
         return { jobId: existing.id, status: existing.status };
       }
     }
+  }
+
+  // Only reclaim storage when a new job is actually needed. Cached tracking
+  // should return immediately when Clip Studio opens.
+  if (options.priority) {
+    const { reclaimEphemeralStorage } = await import(
+      "@/services/storageReclaimService"
+    );
+    await reclaimEphemeralStorage({
+      keepSessionId: options.streamSessionId,
+      pruneSessionSegments: true,
+    }).catch(() => null);
   }
 
   const job = await prisma.faceAnalysisJob.create({

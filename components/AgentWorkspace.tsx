@@ -10,7 +10,7 @@ import { AgentClipPickGrid } from "@/components/agent/AgentClipPickGrid";
 import { AgentClipEditor } from "@/components/agent/AgentClipEditor";
 import { AgentClipStudioModal } from "@/components/agent/AgentClipStudioModal";
 import { fetchJson } from "@/lib/apiClient";
-import { formatDuration, formatSeconds } from "@/lib/time";
+import { formatSeconds } from "@/lib/time";
 import { clipDownloadUrl, clipThumbnailApiUrl } from "@/lib/downloadUrls";
 import {
   readCaptionAppearancePreference,
@@ -42,7 +42,6 @@ import {
   LIVE_NOW_SUGGESTION_CAP,
   readAgentWizardState,
   type AgentWizardState,
-  type AgentWizardStep,
 } from "@/lib/agentWizard";
 import {
   getContentLookPreset,
@@ -87,15 +86,6 @@ const MIN_TRANSCRIPT_SECONDS = 20;
 const MIN_SEARCHABLE_CHUNKS = 1;
 const VOD_SUGGEST_ROLL_SECONDS = 180;
 
-const STEP_LABELS: Record<AgentWizardStep, string> = {
-  transcribing: "Transcribing",
-  pick: "Pick clips",
-  look: "Look",
-  edit: "Edit",
-  export: "Export",
-  done: "Done",
-};
-
 interface AgentWorkspaceProps {
   sessionId: string;
 }
@@ -121,7 +111,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     null
   );
   const [suggestionError, setSuggestionError] = useState<string | null>(null);
-  const [transcribingActive, setTranscribingActive] = useState(false);
   const [transcribedSeconds, setTranscribedSeconds] = useState(0);
   const [searchableChunks, setSearchableChunks] = useState(0);
   const [clips, setClips] = useState<ClipSuggestionData[]>([]);
@@ -435,7 +424,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     const tick = async () => {
       if (transcribeInFlight.current) return;
       transcribeInFlight.current = true;
-      setTranscribingActive(true);
       try {
         const { ok, data } = await fetchJson<{
           error?: string;
@@ -468,7 +456,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
         // worker may still be progressing
       } finally {
         transcribeInFlight.current = false;
-        if (!cancelled) setTranscribingActive(false);
       }
     };
 
@@ -860,8 +847,8 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
 
   if (loading) {
     return (
-      <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
-        <EditorHeader title="Agent" />
+      <div className="editor-shell agent-shell flex min-h-screen flex-col bg-[#07090b]">
+        <EditorHeader title="Agent" mode="agent" />
         <div className="flex-1 flex items-center justify-center">
           <p className="text-[var(--color-muted)] animate-pulse">Loading…</p>
         </div>
@@ -871,8 +858,8 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
 
   if (error || !session) {
     return (
-      <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
-        <EditorHeader title="Agent" />
+      <div className="editor-shell agent-shell flex min-h-screen flex-col bg-[#07090b]">
+        <EditorHeader title="Agent" mode="agent" />
         <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6">
           <p className="text-[var(--color-danger)]">{error ?? "Session not found"}</p>
           <Link href="/" className="text-[var(--color-accent)] text-sm hover:underline">
@@ -888,158 +875,17 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       ? Math.min(100, Math.round((transcribedSeconds / recordedSeconds) * 100))
       : 0;
 
-  const stepOrder: AgentWizardStep[] = [
-    "transcribing",
-    "pick",
-    "edit",
-    "export",
-    "done",
-  ];
-
   return (
-    <div className="editor-shell h-screen flex flex-col bg-[var(--color-background)] overflow-hidden">
+    <div className="editor-shell agent-shell flex h-screen flex-col overflow-hidden bg-[#07090b]">
       <EditorHeader
         title={session.title}
+        mode="agent"
         storageLabel={session.storageLabel}
         isLive={isLive}
         recordedSeconds={recordedSeconds}
         deleting={deleting}
         onDelete={handleDeleteSession}
       />
-
-      <div className="shrink-0 border-b border-[var(--color-card-border)] bg-[#020302] px-4 py-3">
-        <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-[var(--color-muted)]">
-          <div className="flex flex-wrap items-center gap-3">
-            <span className="font-semibold uppercase tracking-[0.12em] text-[var(--color-accent)]">
-              Agent mode
-              {wizard.cadence === "live_now"
-                ? " · live"
-                : wizard.cadence === "after_stream"
-                  ? " · after stream"
-                  : wizard.cadence === "vod_batch"
-                    ? " · VOD"
-                    : ""}
-            </span>
-            <span className="tabular-nums">
-              {formatSeconds(transcribedSeconds)} transcribed
-              {recordedSeconds > 0
-                ? ` · ${formatSeconds(recordedSeconds)} ${isLive ? "captured" : "total"}`
-                : ""}
-            </span>
-            {findingClips && (
-              <span className="flex items-center gap-1.5 text-[var(--color-accent)]">
-                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-accent)]" />
-                Finding clips
-                {findingElapsedSec > 0 ? ` · ${findingElapsedSec}s` : ""}
-              </span>
-            )}
-            {!findingClips &&
-              transcriptionCaughtUp &&
-              !transcriptReady &&
-              visibleClips.length === 0 && (
-              <span className="flex items-center gap-1.5 text-[var(--color-accent)]">
-                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-accent)]" />
-                Preparing transcript…
-              </span>
-            )}
-            {!findingClips &&
-              !transcriptionCaughtUp &&
-              (transcribingActive || transcriptionBehind) && (
-              <span className="flex items-center gap-1.5 text-[var(--color-accent)]">
-                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-accent)]" />
-                Ingesting
-              </span>
-            )}
-            {sourceError && (
-              <span className="text-[var(--color-danger)]">{sourceError}</span>
-            )}
-            {transcriptionError && !sourceError && (
-              <span className="text-[var(--color-warning,#e6b84d)]">
-                {transcriptionError}
-              </span>
-            )}
-            {suggestionError && !sourceError && !transcriptionError && (
-              <span className="text-[var(--color-warning,#e6b84d)]">
-                {suggestionError}
-              </span>
-            )}
-          </div>
-          {findingClips ? (
-            <span className="font-semibold text-[var(--color-accent)]">
-              Working…
-            </span>
-          ) : (
-            recordedSeconds > 0 && (
-              <span className="tabular-nums font-semibold text-[var(--color-foreground)]">
-                {progressPct}%
-              </span>
-            )
-          )}
-        </div>
-        <div
-          className="mt-2 h-1.5 overflow-hidden rounded-full bg-[#141414]"
-          role="progressbar"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={findingClips ? undefined : progressPct}
-          aria-label={
-            findingClips ? "Finding top clips" : "Transcription progress"
-          }
-        >
-          {findingClips ? (
-            <div className="relative h-full w-full">
-              <div className="absolute inset-0 bg-[var(--color-accent)]/25" />
-              <div className="absolute inset-y-0 w-2/5 animate-[agent-indeterminate_1.35s_ease-in-out_infinite] rounded-full bg-[var(--color-accent)]" />
-            </div>
-          ) : (
-            <div
-              className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-500"
-              style={{ width: `${progressPct}%` }}
-            />
-          )}
-        </div>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {stepOrder.map((step) => {
-            const active = wizard.step === step;
-            const idx = stepOrder.indexOf(wizard.step);
-            const stepIdx = stepOrder.indexOf(step);
-            const done = stepIdx < idx;
-            const canJump =
-              step !== "transcribing" &&
-              step !== "done" &&
-              stepIdx <= idx &&
-              (step === "pick"
-                ? wizard.suggestRequested || visibleClips.length > 0
-                : wizard.selectedClipIds.length > 0);
-            const className = cn(
-              "rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide",
-              active
-                ? "bg-[var(--color-accent)] text-black"
-                : done
-                  ? "bg-[#1a2418] text-[var(--color-accent)]"
-                  : "bg-[#141414] text-[var(--color-muted)]",
-              canJump && !active && "cursor-pointer hover:ring-1 hover:ring-[var(--color-accent)]"
-            );
-            if (canJump && !active) {
-              return (
-                <button
-                  key={step}
-                  type="button"
-                  className={className}
-                  onClick={() => void persistWizard({ step })}
-                >
-                  {STEP_LABELS[step]}
-                </button>
-              );
-            }
-            return (
-              <span key={step} className={className}>
-                {STEP_LABELS[step]}
-              </span>
-            );
-          })}
-        </div>
-      </div>
 
       {isActivelyLive && unseenLiveClips > 0 && wizard.step !== "pick" && (
         <button
@@ -1048,7 +894,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
             setUnseenLiveClips(0);
             void persistWizard({ step: "pick" });
           }}
-          className="shrink-0 border-b border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-4 py-2 text-left text-xs font-semibold text-[var(--color-accent)] hover:bg-[var(--color-accent)]/15"
+          className="shrink-0 border-b border-[#65d8c1]/25 bg-[#65d8c1]/[0.08] px-4 py-2 text-left text-xs font-semibold text-[#8ee9d5] hover:bg-[#65d8c1]/[0.12]"
         >
           {unseenLiveClips} new live clip suggestion
           {unseenLiveClips === 1 ? "" : "s"} · View suggestions
@@ -1056,26 +902,15 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       )}
 
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-4">
+        <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 py-6 sm:px-6 lg:px-8">
           {wizard.cadence === "after_stream" &&
             !streamEnded && (
-            <div className="mx-auto flex w-full max-w-lg flex-col items-center justify-center gap-5 py-16 text-center">
-              <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--color-accent)] border-t-transparent" />
-              <div className="space-y-1">
-                <p className="text-sm font-medium text-[var(--color-foreground)]">
-                  Recording &amp; transcribing…
-                </p>
-                <p className="text-xs text-[var(--color-muted)]">
-                  Clips unlock when the stream ends. We&apos;ll propose about 10
-                  moments automatically.
-                </p>
-              </div>
+            <div className="mx-auto flex w-full max-w-lg flex-col justify-center py-16">
               <TranscriptionProgressCard
                 transcribedSeconds={transcribedSeconds}
                 recordedSeconds={recordedSeconds}
                 progressPct={progressPct}
-                isLive={isLive}
-                transcriptionError={transcriptionError}
+                transcriptionError={sourceError ?? transcriptionError}
                 phase="transcribing"
               />
             </div>
@@ -1090,34 +925,12 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
               Boolean(suggestionError) ||
               suggesting) &&
             !(awaitingSuggestRetry && !transcriptionError && !suggestionError) && (
-            <div className="mx-auto flex w-full max-w-lg flex-col items-center justify-center gap-5 py-16 text-center">
-              <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--color-accent)] border-t-transparent" />
-              <div className="space-y-1">
-                <p className="text-sm font-medium text-[var(--color-foreground)]">
-                  {findingClips || suggesting
-                    ? "Finding your top clips…"
-                    : transcriptionCaughtUp && !transcriptReady
-                      ? "Transcription at 100% — finishing searchable text…"
-                      : transcriptionCaughtUp
-                        ? "Transcription complete — starting clip search…"
-                        : "Transcribing your stream…"}
-                </p>
-                <p className="text-xs text-[var(--color-muted)]">
-                  {findingClips || suggesting
-                    ? "Transcript is ready. Scoring moments from the transcript and audio — usually under a minute."
-                    : transcriptionCaughtUp && !transcriptReady
-                      ? "The bar is full, but we still need a bit of searchable transcript before suggesting clips."
-                      : wizard.cadence === "live_now"
-                      ? `Once we have about ${formatDuration(MIN_TRANSCRIPT_SECONDS)} of searchable transcript, clip suggestions will start rolling in.`
-                      : `Once we have about ${formatDuration(MIN_TRANSCRIPT_SECONDS)} of searchable transcript, we\u2019ll propose 10 clips automatically.`}
-                </p>
-              </div>
+            <div className="mx-auto flex w-full max-w-lg flex-col justify-center gap-4 py-16">
               <TranscriptionProgressCard
                 transcribedSeconds={transcribedSeconds}
                 recordedSeconds={recordedSeconds}
                 progressPct={progressPct}
-                isLive={isLive}
-                transcriptionError={transcriptionError}
+                transcriptionError={sourceError ?? transcriptionError ?? suggestionError}
                 phase={
                   findingClips || suggesting ? "finding_clips" : "transcribing"
                 }
@@ -1149,14 +962,14 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
             !(wizard.cadence === "after_stream" && !streamEnded) && (
             <div className="space-y-4">
               {newClipNotice && (
-                <p className="rounded-lg border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 px-3 py-2 text-xs text-[var(--color-accent)]">
+                <p className="rounded border border-[#65d8c1]/30 bg-[#65d8c1]/10 px-3 py-2 text-xs text-[#8ee9d5]">
                   New clip suggestion
                   {wizard.cadence === "live_now" ? " — still watching the live stream" : ""}
                 </p>
               )}
               {wizard.cadence === "live_now" && isLive && (
-                <div className="flex items-center gap-2 border-l-2 border-[var(--color-accent)] bg-[var(--color-accent)]/5 px-3 py-2 text-xs text-[var(--color-muted)]">
-                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-accent)]" />
+                <div className="flex items-center gap-2 border-l-2 border-[#65d8c1] bg-[#65d8c1]/[0.06] px-3 py-2 text-xs text-[#aeb9b8]">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#65d8c1]" />
                   New moments are added to the top while the stream continues.
                 </div>
               )}
@@ -1179,12 +992,14 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                 findingElapsedSec={findingElapsedSec}
                 isLive={Boolean(isLive)}
                 onOpenAssistant={() => setShowFindChat(true)}
+                sessionId={sessionId}
+                playbackUrl={playbackUrl}
               />
               {!showFindChat && (
                 <button
                   type="button"
                   onClick={() => setShowFindChat(true)}
-                  className="fixed bottom-6 right-6 z-30 flex h-12 items-center gap-2 border border-[var(--color-accent)] bg-[var(--color-accent)] px-4 text-sm font-semibold text-black shadow-[0_16px_44px_rgba(0,0,0,0.35)] transition-transform hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-background)]"
+                  className="fixed bottom-6 right-6 z-30 flex h-12 items-center gap-2 rounded-md border border-[#f0b75a] bg-[#f0b75a] px-4 text-sm font-semibold text-[#1b1203] shadow-[0_16px_44px_rgba(0,0,0,0.4)] transition-[transform,background-color] hover:-translate-y-0.5 hover:bg-[#f7c974] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#f0b75a] focus-visible:ring-offset-2 focus-visible:ring-offset-[#07090b]"
                 >
                   <MessageSquareText className="h-4 w-4" aria-hidden="true" />
                   Find a specific moment
@@ -1326,10 +1141,10 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
           )}
 
           {(showFindChat || wizard.step === "pick") && showFindChat && (
-            <div className="fixed bottom-5 right-5 z-40 flex max-h-[min(620px,calc(100vh-2.5rem))] w-[min(410px,calc(100vw-2.5rem))] flex-col overflow-hidden border border-[var(--color-card-border)] bg-[var(--color-card)] shadow-[0_24px_80px_rgba(0,0,0,0.55)]">
-              <div className="flex items-center justify-between border-b border-[var(--color-card-border)] px-4 py-3">
+            <div className="fixed bottom-5 right-5 z-40 flex max-h-[min(620px,calc(100vh-2.5rem))] w-[min(410px,calc(100vw-2.5rem))] flex-col overflow-hidden rounded-lg border border-[#2b3034] bg-[#0d0f12] shadow-[0_24px_80px_rgba(0,0,0,0.6)]">
+              <div className="flex items-center justify-between border-b border-white/[0.08] px-4 py-3">
                 <div className="flex items-center gap-3">
-                  <span className="grid h-8 w-8 place-items-center bg-[var(--color-accent)] text-black">
+                  <span className="grid h-8 w-8 place-items-center rounded-md bg-[#f0b75a] text-[#1b1203]">
                     <Sparkles className="h-4 w-4" aria-hidden="true" />
                   </span>
                   <div>
@@ -1503,7 +1318,6 @@ function TranscriptionProgressCard({
   transcribedSeconds,
   recordedSeconds,
   progressPct,
-  isLive,
   transcriptionError,
   phase = "transcribing",
   findingElapsedSec = 0,
@@ -1511,96 +1325,53 @@ function TranscriptionProgressCard({
   transcribedSeconds: number;
   recordedSeconds: number;
   progressPct: number;
-  isLive: boolean;
   transcriptionError: string | null;
   phase?: "transcribing" | "finding_clips";
   findingElapsedSec?: number;
 }) {
   const finding = phase === "finding_clips";
-  const txDone = finding || progressPct >= 92;
   const tipIndex =
     findingElapsedSec > 0
       ? Math.floor(findingElapsedSec / 4) % FINDING_CLIP_TIPS.length
       : 0;
 
   return (
-    <div className="w-full space-y-3 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] px-4 py-4 text-left">
-      <ol className="space-y-2">
-        <li className="flex items-start gap-2.5 text-sm">
+    <div className="w-full space-y-3 border-y border-white/[0.09] py-4 text-left">
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex min-w-0 items-center gap-2.5">
           <span
             className={cn(
-              "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-bold",
-              txDone
-                ? "bg-[var(--color-accent)] text-black"
-                : "border border-[var(--color-card-border)] text-[var(--color-muted)]"
-            )}
-          >
-            {txDone ? "✓" : "1"}
-          </span>
-          <span>
-            <span
-              className={cn(
-                "font-medium",
-                txDone
-                  ? "text-[var(--color-muted)]"
-                  : "text-[var(--color-foreground)]"
-              )}
-            >
-              {txDone ? "Transcription complete" : "Transcribing stream"}
-            </span>
-            {!finding && (
-              <span className="mt-0.5 block text-xs tabular-nums text-[var(--color-muted)]">
-                {formatSeconds(transcribedSeconds)}
-                {recordedSeconds > 0
-                  ? ` of ${formatSeconds(recordedSeconds)}${
-                      isLive ? " captured" : ""
-                    }`
-                  : ""}
-                {recordedSeconds > 0 ? ` · ${progressPct}%` : ""}
-              </span>
-            )}
-          </span>
-        </li>
-        <li className="flex items-start gap-2.5 text-sm">
-          <span
-            className={cn(
-              "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-bold",
+              "h-2 w-2 shrink-0 rounded-full",
               finding
-                ? "border border-[var(--color-accent)] text-[var(--color-accent)]"
-                : "border border-[var(--color-card-border)] text-[var(--color-muted)]"
+                ? "animate-pulse bg-[#f0b75a]"
+                : "animate-pulse bg-[#65d8c1]"
             )}
-          >
-            {finding ? (
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-accent)]" />
-            ) : (
-              "2"
-            )}
-          </span>
-          <span>
-            <span
-              className={cn(
-                "font-medium",
-                finding
-                  ? "text-[var(--color-foreground)]"
-                  : "text-[var(--color-muted)]"
-              )}
-            >
-              {finding ? "Finding top clips…" : "Find top clips"}
-            </span>
-            {finding && (
-              <span className="mt-0.5 block text-xs text-[var(--color-muted)]">
-                {FINDING_CLIP_TIPS[tipIndex]}
-                {findingElapsedSec > 0
-                  ? ` · ${findingElapsedSec}s elapsed`
-                  : ""}
-              </span>
-            )}
-          </span>
-        </li>
-      </ol>
+          />
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-white">
+              {finding ? "Finding the strongest moments" : "Preparing your video"}
+            </p>
+            <p className="mt-0.5 truncate text-xs text-[#90989a]">
+              {finding
+                ? FINDING_CLIP_TIPS[tipIndex]
+                : recordedSeconds > 0
+                  ? `${formatSeconds(transcribedSeconds)} of ${formatSeconds(recordedSeconds)} ready`
+                  : "Analyzing the available media"}
+            </p>
+          </div>
+        </div>
+        <span
+          className={cn(
+            "shrink-0 font-mono text-xs font-semibold tabular-nums",
+            finding ? "text-[#f0c879]" : "text-[#8ee9d5]"
+          )}
+        >
+          {finding ? `${findingElapsedSec}s` : `${progressPct}%`}
+        </span>
+      </div>
 
       <div
-        className="h-2.5 overflow-hidden rounded-full bg-[#141814]"
+        className="h-1.5 overflow-hidden bg-white/[0.08]"
         role="progressbar"
         aria-valuemin={0}
         aria-valuemax={100}
@@ -1609,12 +1380,12 @@ function TranscriptionProgressCard({
       >
         {finding ? (
           <div className="relative h-full w-full">
-            <div className="absolute inset-0 bg-[var(--color-accent)]/20" />
-            <div className="absolute inset-y-0 w-2/5 animate-[agent-indeterminate_1.35s_ease-in-out_infinite] rounded-full bg-[var(--color-accent)]" />
+            <div className="absolute inset-0 bg-[#f0b75a]/15" />
+            <div className="absolute inset-y-0 w-2/5 animate-[agent-indeterminate_1.35s_ease-in-out_infinite] bg-[#f0b75a]" />
           </div>
         ) : (
           <div
-            className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-500 ease-out"
+            className="h-full bg-[#65d8c1] transition-[width] duration-500 ease-out"
             style={{
               width: `${
                 recordedSeconds > 0
@@ -1625,18 +1396,6 @@ function TranscriptionProgressCard({
           />
         )}
       </div>
-
-      <p className="text-[11px] text-[var(--color-muted)]">
-        {finding
-          ? "Still working — this step has no percent. Hang tight, clips appear when scoring finishes."
-          : recordedSeconds > 0
-            ? isLive
-              ? "Live capture keeps growing; the bar is transcript vs captured so far."
-              : "Bar is transcribed time vs full stream length."
-            : isLive
-              ? "Waiting for capture…"
-              : "Measuring length…"}
-      </p>
 
       {transcriptionError && (
         <p className="text-[11px] text-[var(--color-warning,#e6b84d)]">

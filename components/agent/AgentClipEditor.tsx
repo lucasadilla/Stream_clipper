@@ -56,6 +56,7 @@ import type {
   CropInterpolation,
   ManualReframeKeyframe,
 } from "@/lib/professionalReframe";
+import { clipThumbnailApiUrl } from "@/lib/downloadUrls";
 
 interface TranscriptChunk {
   id: string;
@@ -86,6 +87,13 @@ interface AgentClipEditorProps {
   onAddCameraKeyframe?: (keyframe: ManualReframeKeyframe) => void;
   onDeleteCameraKeyframe?: (relativeTime: number) => void;
   onResetCameraKeyframes?: () => void;
+  showHeader?: boolean;
+  prefetchedTranscriptChunks?: TranscriptChunk[];
+  prefetchedCaptionEdits?: CaptionEditsMap;
+  prefetchedCaptionsLoading?: boolean;
+  onCaptionEditsChange?: (edits: CaptionEditsMap) => void;
+  active?: boolean;
+  onPreviewFaceRectChange?: (rect: BrowserFaceRect | null) => void;
 }
 
 export function AgentClipEditor({
@@ -107,6 +115,13 @@ export function AgentClipEditor({
   onAddCameraKeyframe,
   onDeleteCameraKeyframe,
   onResetCameraKeyframes,
+  showHeader = true,
+  prefetchedTranscriptChunks,
+  prefetchedCaptionEdits,
+  prefetchedCaptionsLoading,
+  onCaptionEditsChange,
+  active = true,
+  onPreviewFaceRectChange,
 }: AgentClipEditorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
@@ -158,6 +173,13 @@ export function AgentClipEditor({
   }, []);
 
   useEffect(() => {
+    if (prefetchedTranscriptChunks !== undefined) {
+      setChunks(prefetchedTranscriptChunks);
+      setEdits(prefetchedCaptionEdits ?? {});
+      setChunksLoading(prefetchedCaptionsLoading ?? false);
+      return;
+    }
+
     let cancelled = false;
     setChunksLoading(true);
     void (async () => {
@@ -191,6 +213,9 @@ export function AgentClipEditor({
     clip.id,
     clip.startTimeSeconds,
     clip.endTimeSeconds,
+    prefetchedTranscriptChunks,
+    prefetchedCaptionEdits,
+    prefetchedCaptionsLoading,
   ]);
 
   const cues = useMemo(() => {
@@ -278,6 +303,7 @@ export function AgentClipEditor({
         if (selected) {
           previousRect = smoothBrowserFaceRect(previousRect, selected);
           setBrowserFaceRect(previousRect);
+          onPreviewFaceRectChange?.(previousRect);
           setBrowserTrackingStatus("ready");
         }
       } catch {
@@ -308,7 +334,12 @@ export function AgentClipEditor({
     needsFaceTracking,
     hasServerTracking,
     faceRect,
+    onPreviewFaceRectChange,
   ]);
+
+  useEffect(() => {
+    if (!active) videoRef.current?.pause();
+  }, [active]);
 
   const effectiveFaceRect = faceRect ?? browserFaceRect;
   const effectiveFaceCenterX =
@@ -513,6 +544,7 @@ export function AgentClipEditor({
     if (!text) return;
     const nextEdits = mergeCaptionEdit(edits, cue.id, { text });
     setEdits(nextEdits);
+    onCaptionEditsChange?.(nextEdits);
     setEditingCueId(null);
     await fetchJson(`/api/sessions/${sessionId}/captions`, {
       method: "PATCH",
@@ -527,31 +559,43 @@ export function AgentClipEditor({
 
   return (
     <div className="space-y-4">
-      <div>
-        <h2 className="text-lg font-semibold">{clip.title}</h2>
-        <p className="text-xs text-[var(--color-muted)]">
-          One preview — look + captions update live. Drag the handles to trim.
-        </p>
-        <p className="mt-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--color-muted)]">
-          {getContentLookPreset(lookPreset).label} look
-        </p>
-      </div>
+      {showHeader && (
+        <div>
+          <h2 className="text-lg font-semibold">{clip.title}</h2>
+          <p className="text-xs text-[var(--color-muted)]">
+            One preview — look + captions update live. Drag the handles to trim.
+          </p>
+          <p className="mt-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--color-muted)]">
+            {getContentLookPreset(lookPreset).label} look
+          </p>
+        </div>
+      )}
 
-      <div className="overflow-hidden rounded-xl border border-[var(--color-card-border)] bg-black">
+      <div
+        className="grid items-start gap-5"
+        style={{
+          gridTemplateColumns:
+            "repeat(auto-fit, minmax(min(100%, 31rem), 1fr))",
+        }}
+      >
+        <div className="min-w-0 space-y-3">
+
+      <div className="overflow-hidden rounded-lg border border-white/10 bg-[#020302] shadow-[0_18px_50px_rgba(0,0,0,0.32)]">
         <div
           ref={previewRef}
-          className="relative mx-auto max-h-[56vh] w-full max-w-sm"
+          className="relative mx-auto max-h-[62vh] w-full max-w-sm"
         >
           <LookVideoStage
             presetId={lookPreset}
             playbackUrl={playbackUrl}
             videoRef={videoRef}
+            posterUrl={clipThumbnailApiUrl(clip.id)}
             faceRect={effectiveFaceRect}
             faceCenterX={effectiveFaceCenterX}
             faceCenterY={effectiveFaceCenterY}
             zoom={effectiveZoom}
             layoutOverride={lookPreset === "auto" ? autoResolvedLayout : null}
-            className="mx-auto max-h-[56vh] w-full rounded-none border-0"
+            className="mx-auto max-h-[62vh] w-full rounded-none border-0"
             onTimeUpdate={(e) => {
               const t = e.currentTarget.currentTime;
               setCurrentTime(t);
@@ -609,7 +653,7 @@ export function AgentClipEditor({
       </div>
 
       {usesVirtualCamera && hasServerTracking && onAddCameraKeyframe && (
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--color-card-border)] bg-[var(--color-card)] p-2">
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-white/[0.08] bg-[#080a08] p-2">
           <div
             className="flex h-8 items-center rounded-md border border-[var(--color-card-border)] bg-[var(--color-secondary)] p-0.5"
             role="group"
@@ -717,7 +761,11 @@ export function AgentClipEditor({
         </div>
       )}
 
-      <div className="space-y-2 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-3">
+        </div>
+
+        <div className="min-w-0 space-y-4">
+
+      <div className="space-y-3 rounded-lg border border-white/[0.08] bg-[#080a08] p-4">
         <div className="flex justify-between text-[11px] text-[var(--color-muted)]">
           <span>{formatSeconds(clip.startTimeSeconds)}</span>
           <span>
@@ -728,7 +776,7 @@ export function AgentClipEditor({
         <div
           ref={trackRef}
           data-testid="agent-clip-selector-timeline"
-          className="relative h-10 cursor-pointer rounded bg-[var(--color-secondary)]"
+          className="relative h-11 cursor-pointer overflow-hidden rounded-md border border-white/[0.06] bg-[#111511]"
           onPointerDown={(e) => {
             if ((e.target as HTMLElement).dataset.handle) return;
             setDragging("playhead");
@@ -774,7 +822,7 @@ export function AgentClipEditor({
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <div className="space-y-2 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-3">
+        <div className="space-y-3 rounded-lg border border-white/[0.08] bg-[#080a08] p-4">
           <label className="flex items-center gap-2 text-xs">
             <input
               type="checkbox"
@@ -791,7 +839,7 @@ export function AgentClipEditor({
           />
         </div>
 
-        <div className="space-y-2 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-3">
+        <div className="space-y-3 rounded-lg border border-white/[0.08] bg-[#080a08] p-4">
           <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">
             Captions in range
             {!chunksLoading && includeCaptions ? ` · ${cues.length}` : ""}
@@ -868,6 +916,8 @@ export function AgentClipEditor({
               ))}
             </ul>
           )}
+        </div>
+      </div>
         </div>
       </div>
     </div>
