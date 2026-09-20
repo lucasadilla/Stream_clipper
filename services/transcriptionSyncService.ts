@@ -16,9 +16,7 @@ import {
   hasAudioStream,
   probeMediaDurationBestEffort,
 } from "@/lib/ffmpeg";
-import {
-  EMBED_TRANSCRIPT_CHUNKS,
-} from "@/lib/aiCostConstants";
+import { EMBED_TRANSCRIPT_CHUNKS } from "@/lib/aiCostConstants";
 import { createEmbeddingsBatch } from "@/lib/embeddings";
 import { storeEmbedding } from "@/lib/rag";
 import {
@@ -29,12 +27,13 @@ import {
   listSourceCandidateFiles,
   toRelativeStoragePath,
 } from "@/lib/storage";
-import type { TranscriptSegmentWithMeta } from "@/services/whisperTranscription";
+import type { TranscriptSegmentWithMeta } from "@/lib/transcriptionTypes";
+import { isProviderUnavailableError } from "@/services/whisperTranscription";
 import {
-  isProviderUnavailableError,
-  isWhisperAvailable,
-  transcribeWhisperAudio,
-} from "@/services/whisperTranscription";
+  isTranscriptionAvailable,
+  transcribeAudioWithRouter,
+} from "@/services/transcriptionRouterService";
+import { buildTranscriptionContext } from "@/lib/transcriptionContext";
 import { ensureLocalSourceMedia } from "@/services/sourceMediaRepairService";
 import { resolveSourceRecordedSeconds, canAttemptTranscription } from "@/services/liveRecordingService";
 import {
@@ -186,7 +185,7 @@ async function getLastTranscribedEnd(streamSessionId: string): Promise<number> {
  * Live yt-dlp recordings are split into video-only (f299) and audio-only
  * (f140) files until merged, so the sourceMedia filePath (video) has no audio.
  */
-async function resolveSourceForTranscription(
+export async function resolveSourceForTranscription(
   streamSessionId: string,
   sourceMedia: { id: string; filePath: string },
   options?: { isLive?: boolean }
@@ -389,13 +388,7 @@ function buildGapRanges(
 
 export async function persistTranscriptSegments(
   streamSessionId: string,
-  segments: Array<{
-    startTimeSeconds: number;
-    endTimeSeconds: number;
-    text: string;
-    estimatedTiming?: boolean;
-    words?: Array<{ start: number; end: number; word: string }>;
-  }>,
+  segments: TranscriptSegmentWithMeta[],
   meta: { segmentStart: number; segmentEnd: number }
 ) {
   if (segments.length === 0) return [];
@@ -416,6 +409,14 @@ export async function persistTranscriptSegments(
             estimatedTiming: seg.estimatedTiming ?? false,
             segmentStart: meta.segmentStart,
             segmentEnd: meta.segmentEnd,
+            rawTranscript: seg.rawText ?? seg.text,
+            canonicalTranscript: seg.text,
+            ...(seg.provider ? { provider: seg.provider } : {}),
+            ...(seg.model ? { model: seg.model } : {}),
+            ...(seg.timingModel ? { timingModel: seg.timingModel } : {}),
+            ...(typeof seg.confidence === "number"
+              ? { confidence: seg.confidence }
+              : {}),
             ...(seg.words && seg.words.length > 0 ? { words: seg.words } : {}),
           }),
         },
@@ -447,14 +448,15 @@ async function transcribeAudioRange(
   audioPath: string,
   audioStartSeconds: number,
   startSeconds: number,
-  endSeconds: number
+  endSeconds: number,
+  isLive: boolean
 ) {
   let segments: TranscriptSegmentWithMeta[];
   try {
-    const [session, previous] = await Promise.all([
+    const [session, previous, chatMessages] = await Promise.all([
       prisma.streamSession.findUnique({
         where: { id: streamSessionId },
-        select: { title: true, channelTitle: true },
+        select: { title: true, description: true, channelTitle: true },
       }),
       prisma.transcriptChunk.findFirst({
         where: {
@@ -464,19 +466,35 @@ async function transcribeAudioRange(
         orderBy: { endTimeSeconds: "desc" },
         select: { text: true },
       }),
+      prisma.chatMessage.findMany({
+        where: {
+          streamSessionId,
+          videoTimeSeconds: {
+            gte: Math.max(0, startSeconds - 180),
+            lte: endSeconds,
+          },
+        },
+        orderBy: { publishedAt: "desc" },
+        take: 60,
+        select: { messageText: true },
+      }),
     ]);
-    const context = [
-      session?.title ? `Stream title: ${session.title}.` : "",
-      session?.channelTitle ? `Speaker/channel: ${session.channelTitle}.` : "",
-      previous?.text ? `Previous transcript: ${previous.text}` : "",
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .slice(-800);
-
-    const rawSegments = await transcribeWhisperAudio(audioPath, audioStartSeconds, {
-      prompt: context || undefined,
+    const context = buildTranscriptionContext({
+      title: session?.title,
+      description: session?.description,
+      channelTitle: session?.channelTitle,
+      previousTranscript: previous?.text,
+      chatMessages: chatMessages.map((message) => message.messageText),
     });
+
+    const rawSegments = await transcribeAudioWithRouter(
+      audioPath,
+      audioStartSeconds,
+      {
+        workload: isLive ? "live" : "vod",
+        context,
+      }
+    );
 
     // Boundary context prevents clipped words at each 45s seam. Persist only
     // words whose midpoint belongs to this core range so adjacent chunks never
@@ -538,10 +556,12 @@ async function transcribeAudioRange(
       segments = text
         ? [
             {
+              ...estimated[0],
               startTimeSeconds: startSeconds,
               endTimeSeconds: endSeconds,
               text,
               estimatedTiming: true,
+              words: undefined,
             },
           ]
         : [];
@@ -549,7 +569,7 @@ async function transcribeAudioRange(
       segments = clipped;
     }
   } catch (err) {
-    console.error("[transcribe] whisper failed:", err);
+    console.error("[transcribe] provider failed:", err);
     // Quota/network outages: leave the range uncovered so it retries cleanly
     // once the provider recovers, instead of consuming error attempts.
     if (isProviderUnavailableError(err)) {
@@ -738,8 +758,8 @@ export async function syncTranscription(
   streamSessionId: string,
   options: TranscriptionSyncOptions = {}
 ): Promise<TranscriptionSyncResult> {
-  if (!isWhisperAvailable()) {
-    return { skipped: true, reason: "no_openai_key" };
+  if (!isTranscriptionAvailable()) {
+    return { skipped: true, reason: "no_transcription_provider" };
   }
   if (activeSyncs.has(streamSessionId)) {
     return { skipped: true, reason: "sync_in_progress" };
@@ -893,7 +913,8 @@ async function runSyncTranscription(
             c.audioPath,
             c.audioStart,
             c.start,
-            c.end
+            c.end,
+            isLive
           )
         )
       );
@@ -902,7 +923,7 @@ async function runSyncTranscription(
         const chunk = wave[j]!;
         const result = results[j]!;
         if (result.skipped && result.reason === "provider_unavailable") {
-          providerError = result.error ?? "OpenAI is unreachable";
+          providerError = result.error ?? "The transcription provider is unreachable";
           for (const rest of chunks.slice(i)) {
             await fs.unlink(rest.audioPath).catch(() => {});
           }

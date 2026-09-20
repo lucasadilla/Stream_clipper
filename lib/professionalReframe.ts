@@ -1,5 +1,10 @@
 import { rectArea, rectCenter } from "@/lib/normalizedRect";
 import {
+  activeSpeakerDecisionAt,
+  buildAudioVisualActiveSpeakerTimeline,
+  type ActiveSpeakerTimeline,
+} from "@/lib/activeSpeaker";
+import {
   computeTrackMetrics,
   scoreEmbeddedFacecam,
   scoreSpeakingSubject,
@@ -23,6 +28,9 @@ export type SourceLayout =
   | "irl"
   | "gaming_facecam"
   | "multi_person"
+  | "group_panel"
+  | "intermittent"
+  | "obscured"
   | "desktop"
   | "already_vertical"
   | "unknown";
@@ -116,6 +124,8 @@ export type VirtualCameraPlan = {
   overallConfidence: number;
   warnings: string[];
   validation: CameraPlanValidation;
+  /** Audio/visual speaker decisions used to build multi-person shots. */
+  activeSpeaker?: ActiveSpeakerTimeline;
   version: string;
 };
 
@@ -165,8 +175,9 @@ type SelectedSample = {
   switchReason?: "speaker_change" | "scene_change";
 };
 
-const PLAN_VERSION = "professional-reframe-v1";
+const PLAN_VERSION = "professional-reframe-v4";
 const SAMPLE_STEP_SECONDS = 0.25;
+const SHOT_ENTRY_LOOKAHEAD_SECONDS = 1.1;
 
 const STYLE_PROFILES: Record<ReframeStyle, PlannerProfile> = {
   professional: {
@@ -241,8 +252,37 @@ function profileForSource(
       ...base,
       deadZoneRatio: Math.max(base.deadZoneRatio, 0.26),
       maxVelocity: base.maxVelocity * 0.82,
-      minimumShotSeconds: base.minimumShotSeconds * 1.2,
+      minimumShotSeconds: Math.max(1.8, base.minimumShotSeconds * 1.2),
       switchConfirmationSeconds: base.switchConfirmationSeconds * 1.1,
+    };
+  }
+  if (sourceLayout === "group_panel") {
+    return {
+      ...base,
+      deadZoneRatio: 0.8,
+      maxVelocity: Math.min(base.maxVelocity, 0.08),
+      maxAcceleration: Math.min(base.maxAcceleration, 0.18),
+      minimumShotSeconds: Math.max(base.minimumShotSeconds, 3),
+      switchConfirmationSeconds: Math.max(
+        base.switchConfirmationSeconds,
+        0.9
+      ),
+      zoom: 1,
+    };
+  }
+  if (sourceLayout === "intermittent" || sourceLayout === "obscured") {
+    return {
+      ...base,
+      deadZoneRatio: Math.max(base.deadZoneRatio, 0.38),
+      maxVelocity: Math.min(base.maxVelocity, 0.14),
+      maxAcceleration: Math.min(base.maxAcceleration, 0.28),
+      minimumShotSeconds: Math.max(base.minimumShotSeconds, 2),
+      switchConfirmationSeconds: Math.max(
+        base.switchConfirmationSeconds,
+        0.8
+      ),
+      lossHoldSeconds: Math.max(base.lossHoldSeconds, 2),
+      zoom: 1,
     };
   }
   if (sourceLayout === "irl") {
@@ -327,7 +367,10 @@ export function classifySourceLayout(
   if (sourceHeight > sourceWidth * 1.2) return "already_vertical";
   if (classification === "embedded_facecam") return "gaming_facecam";
   if (classification === "multiple_faces") return "multi_person";
-  if (classification === "no_face") {
+  if (classification === "group_panel") return "group_panel";
+  if (classification === "intermittent_face") return "intermittent";
+  if (classification === "obscured_face") return "obscured";
+  if (classification === "no_face" || classification === "gameplay_only") {
     return sourceWidth >= sourceHeight ? "desktop" : "unknown";
   }
   const primary = tracks
@@ -392,6 +435,20 @@ function localMouthActivity(
   timestampSeconds: number,
   windowSeconds = 0.7
 ): number {
+  const directValues = track.points
+    .filter(
+      (point) =>
+        Math.abs(point.timestampSeconds - timestampSeconds) <= windowSeconds &&
+        Number.isFinite(point.speakingActivity)
+    )
+    .map((point) => point.speakingActivity as number);
+  if (directValues.length > 0) {
+    const weighted = directValues
+      .map((value) => clamp(value, 0, 1))
+      .sort((a, b) => a - b);
+    const upper = weighted[Math.floor(weighted.length * 0.7)] ?? 0;
+    return clamp(average(weighted) * 0.45 + upper * 0.55, 0, 1);
+  }
   const values = track.points
     .filter(
       (point) =>
@@ -445,8 +502,25 @@ function selectSubjects(
   scenes: VideoScene[],
   input: ProfessionalReframeInput,
   profile: PlannerProfile,
-  sourceLayout: SourceLayout
+  sourceLayout: SourceLayout,
+  activeSpeaker?: ActiveSpeakerTimeline
 ): SelectedSample[] {
+  if (sourceLayout === "group_panel" || sourceLayout === "already_vertical") {
+    const stable: SelectedSample[] = [];
+    for (
+      let time = input.clipStartSeconds;
+      time <= input.clipEndSeconds + 1e-6;
+      time += SAMPLE_STEP_SECONDS
+    ) {
+      stable.push({
+        timestampSeconds: time,
+        sceneId: sceneAt(scenes, time).id,
+        role: "unknown",
+        confidence: sourceLayout === "already_vertical" ? 0.98 : 0.82,
+      });
+    }
+    return stable;
+  }
   const scores = globalTrackScores(
     tracks,
     input.sampledFrames,
@@ -463,6 +537,7 @@ function selectSubjects(
   let challengerId: string | undefined;
   let challengerSince = input.clipStartSeconds;
   let previousSceneId = scenes[0]!.id;
+  const lastGoodPointByTrack = new Map<string, FaceTrackPoint>();
   const samples: SelectedSample[] = [];
 
   for (
@@ -472,9 +547,16 @@ function selectSubjects(
   ) {
     const scene = sceneAt(scenes, time);
     const sceneChanged = scene.id !== previousSceneId;
-    const visible = sortedTracks.flatMap((track) => {
+    const speakerDecision = activeSpeakerDecisionAt(activeSpeaker, time);
+    let visible = sortedTracks.flatMap((track) => {
       const point = closestPoint(track, time);
-      if (!point) return [];
+      if (
+        !point ||
+        point.timestampSeconds < scene.startSeconds - 1e-6 ||
+        point.timestampSeconds > scene.endSeconds + 1e-6
+      ) {
+        return [];
+      }
       const mouth = localMouthActivity(track, time);
       const area = rectArea(point.rect);
       return [
@@ -483,21 +565,64 @@ function selectSubjects(
           point,
           activity: mouth,
           score:
-            (scores.get(track.id) ?? 0) * 0.38 +
-            mouth * (sourceLayout === "multi_person" ? 0.5 : 0.2) +
-            point.confidence * 0.08 +
-            Math.min(1, area * 8) * 0.04,
+            (scores.get(track.id) ?? 0) * 0.72 +
+            mouth * (sourceLayout === "multi_person" ? 0.2 : 0.1) +
+            (track.id === speakerDecision?.trackId
+              ? 0.38 * Math.max(0.35, speakerDecision.confidence)
+              : 0) +
+            point.confidence * 0.05 +
+            Math.min(1, area * 8) * 0.03,
         },
       ];
     });
+    const sceneEntry = samples.length === 0 || sceneChanged;
+    if (sceneEntry && visible.length === 0) {
+      // A detector may miss the first frame after an edit. Compose the shot
+      // from its first reliable face instead of briefly falling back to center
+      // and panning late once the next sampled detection arrives.
+      visible = sortedTracks.flatMap((track) => {
+        const point = track.points
+          .filter(
+            (candidate) =>
+              candidate.timestampSeconds >= time - 1e-6 &&
+              candidate.timestampSeconds <=
+                Math.min(
+                  scene.endSeconds,
+                  time + SHOT_ENTRY_LOOKAHEAD_SECONDS
+                )
+          )
+          .sort((a, b) => a.timestampSeconds - b.timestampSeconds)[0];
+        if (!point) return [];
+        const area = rectArea(point.rect);
+        return [
+          {
+            track,
+            point,
+            activity: localMouthActivity(track, point.timestampSeconds),
+            score:
+              (scores.get(track.id) ?? 0) * 0.78 +
+              point.confidence * 0.12 +
+              Math.min(1, area * 8) * 0.1,
+          },
+        ];
+      });
+    }
+    for (const item of visible) {
+      lastGoodPointByTrack.set(item.track.id, item.point);
+    }
 
     if (sceneChanged) {
       const preferred =
         visible.find((item) => item.track.id === input.lockedTrackId) ??
+        visible.find((item) => item.track.id === speakerDecision?.trackId) ??
         visible.find((item) => item.track.id === input.primaryTrackId) ??
         visible.sort((a, b) => b.score - a.score)[0];
-      activeId = preferred?.track.id ?? activeId;
+      activeId = preferred?.track.id;
       activeSince = time;
+      lastVisibleAt = preferred
+        ? time
+        : time - profile.lossHoldSeconds - SAMPLE_STEP_SECONDS;
+      if (!preferred) lastGoodPointByTrack.clear();
       challengerId = undefined;
       previousSceneId = scene.id;
     }
@@ -508,12 +633,28 @@ function selectSubjects(
     if (input.lockedTrackId) {
       const locked = visible.find((item) => item.track.id === input.lockedTrackId);
       if (locked) activeId = locked.track.id;
+    } else if (sourceLayout === "multi_person" && activeSpeaker) {
+      // The fused timeline already applies silence gating, hold time, and
+      // challenger confirmation. Consume it directly instead of adding a
+      // second delay in the camera planner.
+      const recommended = visible.find(
+        (item) => item.track.id === speakerDecision?.trackId
+      );
+      if (recommended && recommended.track.id !== activeId) {
+        activeId = recommended.track.id;
+        activeSince = time;
+        lastVisibleAt = time;
+      }
+      challengerId = undefined;
     } else if (visible.length > 0) {
       const best = visible.sort((a, b) => b.score - a.score)[0]!;
       const currentScore = current?.score ?? 0;
       const activeMissing = !current && time - lastVisibleAt > profile.lossHoldSeconds;
+      const speechAvailable = visible.some((item) => item.activity >= 0.06);
       const speakerEvidence =
-        sourceLayout !== "multi_person" || best.activity >= 0.035;
+        sourceLayout !== "multi_person" ||
+        !speechAvailable ||
+        best.activity >= 0.055;
       const canChallenge =
         best.track.id !== activeId &&
         speakerEvidence &&
@@ -525,8 +666,10 @@ function selectSubjects(
           challengerId = best.track.id;
           challengerSince = time;
         } else if (
-          activeMissing ||
-          time - challengerSince >= profile.switchConfirmationSeconds
+          time - challengerSince >=
+          (activeMissing
+            ? Math.min(0.4, profile.switchConfirmationSeconds)
+            : profile.switchConfirmationSeconds)
         ) {
           activeId = best.track.id;
           activeSince = time;
@@ -539,12 +682,21 @@ function selectSubjects(
     }
 
     const selected = visible.find((item) => item.track.id === activeId);
+    const lostFor = selected ? 0 : time - lastVisibleAt;
+    const heldPoint =
+      !selected && activeId && lostFor <= profile.lossHoldSeconds
+        ? lastGoodPointByTrack.get(activeId)
+        : undefined;
     const previous = samples[samples.length - 1];
-    const switched = previous?.trackId && selected?.track.id !== previous.trackId;
+    const switched = Boolean(
+      previous?.trackId &&
+        selected?.track.id &&
+        selected.track.id !== previous.trackId
+    );
     samples.push({
       timestampSeconds: time,
       sceneId: scene.id,
-      point: selected?.point,
+      point: selected?.point ?? heldPoint,
       trackId: selected?.track.id ?? activeId,
       role:
         sourceLayout === "gaming_facecam"
@@ -552,7 +704,18 @@ function selectSubjects(
           : sourceLayout === "multi_person"
             ? "active_speaker"
             : "primary_creator",
-      confidence: selected?.point.confidence ?? 0.25,
+      confidence:
+        selected
+          ? selected.point.confidence *
+              (sourceLayout === "multi_person" && speakerDecision ? 0.7 : 1) +
+            (sourceLayout === "multi_person" && speakerDecision
+              ? speakerDecision.confidence * 0.3
+              : 0)
+          :
+        (heldPoint
+          ? heldPoint.confidence *
+            Math.max(0.35, 1 - lostFor / (profile.lossHoldSeconds * 1.5))
+          : 0.25),
       switchReason: sceneChanged
         ? "scene_change"
         : switched
@@ -574,8 +737,18 @@ function smoothCompositionTargets(
     0.08,
     1
   );
+  const visibleAreas = samples.flatMap((sample) =>
+    sample.point ? [rectArea(sample.point.rect)] : []
+  );
+  const representativeArea = median(visibleAreas);
   const zoom =
-    sourceLayout === "already_vertical" || sourceLayout === "gaming_facecam"
+    sourceLayout === "already_vertical" ||
+    sourceLayout === "gaming_facecam" ||
+    sourceLayout === "group_panel" ||
+    sourceLayout === "intermittent" ||
+    sourceLayout === "obscured" ||
+    representativeArea < 0.006 ||
+    representativeArea > 0.22
       ? 1
       : profile.zoom;
   const cropWidth = clamp(baseCropWidth / zoom, 0.06, 1);
@@ -602,11 +775,32 @@ function smoothCompositionTargets(
     const futureX = futurePoints.length
       ? median(futurePoints.map((point) => rectCenter(point.rect).x))
       : stableX;
-    const predictedX = stableX * 0.78 + futureX * 0.22;
+    let predictedX = stableX * 0.78 + futureX * 0.22;
     const eyeY = sample.point
       ? sample.point.rect.y + sample.point.rect.height * 0.38
       : 0.35;
-    const centerY = eyeY + cropHeight * 0.15;
+    let centerY = eyeY + cropHeight * 0.1;
+    if (sample.point) {
+      const face = sample.point.rect;
+      const horizontalPadding = face.width * 0.18;
+      const verticalTopPadding = face.height * 0.16;
+      const verticalBottomPadding = face.height * 0.28;
+      const requiredWidth = face.width + horizontalPadding * 2;
+      if (requiredWidth <= cropWidth) {
+        const minCenterX =
+          face.x + face.width + horizontalPadding - cropWidth / 2;
+        const maxCenterX = face.x - horizontalPadding + cropWidth / 2;
+        predictedX = clamp(predictedX, minCenterX, maxCenterX);
+      }
+      const requiredHeight =
+        face.height + verticalTopPadding + verticalBottomPadding;
+      if (requiredHeight <= cropHeight) {
+        const minCenterY =
+          face.y + face.height + verticalBottomPadding - cropHeight / 2;
+        const maxCenterY = face.y - verticalTopPadding + cropHeight / 2;
+        centerY = clamp(centerY, minCenterY, maxCenterY);
+      }
+    }
     const previousSample = samples[sampleIndex - 1];
     const speakerDistance =
       sample.point && previousSample?.point
@@ -845,13 +1039,46 @@ export function validateAndRepairCameraPlan(
   let repaired = false;
   let maximumVelocity = 0;
   let maximumAcceleration = 0;
-  let previousVelocity = 0;
+  let previousVelocityX = 0;
+  let previousVelocityY = 0;
   const repairedFrames: CropKeyframe[] = [];
 
-  for (const original of [...keyframes].sort(
-    (a, b) => a.timestampSeconds - b.timestampSeconds
-  )) {
+  const ordered = [...keyframes]
+    .filter((frame) => Number.isFinite(frame.timestampSeconds))
+    .sort((a, b) => a.timestampSeconds - b.timestampSeconds);
+  if (ordered.length !== keyframes.length) {
+    repaired = true;
+    warnings.push("Invalid camera samples were removed before rendering.");
+  }
+
+  for (const original of ordered) {
     const frame = { ...original };
+    const previous = repairedFrames[repairedFrames.length - 1];
+    const fallbackX = previous?.centerX ?? 0.5;
+    const fallbackY = previous?.centerY ?? 0.5;
+    const safeWidth = clamp(
+      Number.isFinite(frame.cropWidth) ? frame.cropWidth : previous?.cropWidth ?? 1,
+      0.05,
+      1
+    );
+    const safeHeight = clamp(
+      Number.isFinite(frame.cropHeight) ? frame.cropHeight : previous?.cropHeight ?? 1,
+      0.05,
+      1
+    );
+    if (
+      safeWidth !== frame.cropWidth ||
+      safeHeight !== frame.cropHeight ||
+      !Number.isFinite(frame.centerX) ||
+      !Number.isFinite(frame.centerY)
+    ) {
+      repaired = true;
+      warnings.push("Invalid crop geometry was replaced with a safe composition.");
+    }
+    frame.cropWidth = safeWidth;
+    frame.cropHeight = safeHeight;
+    frame.centerX = Number.isFinite(frame.centerX) ? frame.centerX : fallbackX;
+    frame.centerY = Number.isFinite(frame.centerY) ? frame.centerY : fallbackY;
     const minX = frame.cropWidth / 2;
     const minY = frame.cropHeight / 2;
     const boundedX = clamp(frame.centerX, minX, 1 - minX);
@@ -863,32 +1090,56 @@ export function validateAndRepairCameraPlan(
       warnings.push("A crop position was repaired to stay inside the source frame.");
     }
 
-    const previous = repairedFrames[repairedFrames.length - 1];
     if (previous && frame.interpolation !== "cut") {
       const dt = Math.max(0.001, frame.timestampSeconds - previous.timestampSeconds);
       const dx = frame.centerX - previous.centerX;
-      const velocity = Math.abs(dx) / dt;
-      maximumVelocity = Math.max(maximumVelocity, velocity);
-      if (velocity > profile.maxVelocity * 1.08) {
+      const dy = frame.centerY - previous.centerY;
+      const velocityX = Math.abs(dx) / dt;
+      const velocityY = Math.abs(dy) / dt;
+      maximumVelocity = Math.max(maximumVelocity, Math.hypot(velocityX, velocityY));
+      if (velocityX > profile.maxVelocity * 1.08) {
         frame.centerX =
           previous.centerX + Math.sign(dx) * profile.maxVelocity * 1.08 * dt;
         repaired = true;
         warnings.push("An overly fast camera move was slowed before rendering.");
       }
-      const repairedVelocity = Math.abs(frame.centerX - previous.centerX) / dt;
-      const acceleration = Math.abs(repairedVelocity - previousVelocity) / dt;
+      const maxVerticalVelocity = profile.maxVelocity * 0.6 * 1.08;
+      if (velocityY > maxVerticalVelocity) {
+        frame.centerY =
+          previous.centerY + Math.sign(dy) * maxVerticalVelocity * dt;
+        repaired = true;
+        warnings.push("An overly fast vertical move was slowed before rendering.");
+      }
+      frame.centerX = clamp(frame.centerX, minX, 1 - minX);
+      frame.centerY = clamp(frame.centerY, minY, 1 - minY);
+      const repairedVelocityX = (frame.centerX - previous.centerX) / dt;
+      const repairedVelocityY = (frame.centerY - previous.centerY) / dt;
+      const acceleration = Math.hypot(
+        repairedVelocityX - previousVelocityX,
+        repairedVelocityY - previousVelocityY
+      ) / dt;
       maximumAcceleration = Math.max(maximumAcceleration, acceleration);
-      previousVelocity = repairedVelocity;
+      previousVelocityX = repairedVelocityX;
+      previousVelocityY = repairedVelocityY;
     } else {
-      previousVelocity = 0;
+      previousVelocityX = 0;
+      previousVelocityY = 0;
     }
-    repairedFrames.push(frame);
+    const duplicateTime =
+      previous && Math.abs(previous.timestampSeconds - frame.timestampSeconds) < 0.001;
+    if (duplicateTime) {
+      repairedFrames[repairedFrames.length - 1] = frame;
+      repaired = true;
+      warnings.push("Duplicate camera samples were consolidated before rendering.");
+    } else {
+      repairedFrames.push(frame);
+    }
   }
 
   return {
     keyframes: repairedFrames,
     validation: {
-      valid: true,
+      valid: repairedFrames.length > 0,
       repaired,
       sampledFrames: Math.max(1, Math.round((keyframes.at(-1)?.timestampSeconds ?? 0) * 10)),
       maximumVelocity,
@@ -972,7 +1223,24 @@ export function generateProfessionalReframePlan(
     warnings.push("The locked subject was unavailable, so the strongest persistent subject was used.");
   }
 
-  const selected = selectSubjects(tracks, scenes, input, profile, sourceLayout);
+  const activeSpeaker =
+    sourceLayout === "multi_person"
+      ? buildAudioVisualActiveSpeakerTimeline({
+          tracks,
+          clipStartSeconds: input.clipStartSeconds,
+          clipEndSeconds: input.clipEndSeconds,
+          primaryTrackId: input.primaryTrackId,
+          sceneChanges: input.sceneChanges,
+        })
+      : undefined;
+  const selected = selectSubjects(
+    tracks,
+    scenes,
+    input,
+    profile,
+    sourceLayout,
+    activeSpeaker
+  );
   const targets = smoothCompositionTargets(selected, input, sourceLayout, profile);
   const automatic = applyVirtualCameraDynamics(targets, profile);
   const manual = normalizeManualKeyframes(input.manualKeyframes ?? [], duration);
@@ -997,6 +1265,7 @@ export function generateProfessionalReframePlan(
     overallConfidence,
     warnings: [...new Set(warnings)],
     validation,
+    activeSpeaker,
     version: PLAN_VERSION,
   };
 }

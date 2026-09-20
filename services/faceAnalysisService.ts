@@ -4,7 +4,7 @@ import { existsSync } from "fs";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { toJsonValue } from "@/lib/utils";
-import { extractSoloTimelineFrame } from "@/lib/ffmpeg";
+import { extractSoloTimelineFrame, getFfmpegPath } from "@/lib/ffmpeg";
 import {
   ensureDir,
   getFramesDir,
@@ -20,8 +20,7 @@ import {
   classifySourceFromTracks,
   computeTrackMetrics,
   recommendVerticalLayout,
-  scoreEmbeddedFacecam,
-  scoreSpeakingSubject,
+  selectFaceAnalysisCandidates,
   type FaceDetection,
   type FaceTrack,
   type FacecamAnalysisResult,
@@ -33,7 +32,7 @@ import {
 } from "@/lib/professionalReframe";
 
 const FACE_ANALYSIS_WORKER_ID = `face-worker-${process.pid}`;
-const FACE_ANALYSIS_VERSION = 3;
+const FACE_ANALYSIS_VERSION = 6;
 
 /** Result JSON stored on the job row (adds source info to the shared shape). */
 export interface StoredFaceAnalysisResult extends FacecamAnalysisResult {
@@ -79,6 +78,7 @@ interface WorkerPayload {
   analysisWidth: number;
   minConfidence: number;
   maxFrames: number;
+  ffmpegPath: string;
 }
 
 interface WorkerResult {
@@ -90,6 +90,7 @@ interface WorkerResult {
   sampledFrames: number;
   detections: FaceDetection[];
   sceneChanges?: SceneChange[];
+  audioActivityAvailable?: boolean;
   modelName: string;
   modelVersion: string;
 }
@@ -196,7 +197,10 @@ export async function requestFaceAnalysis(options: {
 }): Promise<{ jobId: string; status: string }> {
   const start = Math.max(0, options.startSeconds);
   const end = Math.max(start + 0.5, options.endSeconds);
-  const sampleFps = Math.min(8, Math.max(1, options.sampleFps ?? 2.5));
+  const sampleFps = Math.min(
+    8,
+    Math.max(1, options.sampleFps ?? (options.priority ? 4 : 3))
+  );
 
   if (!options.force) {
     const existing = await prisma.faceAnalysisJob.findFirst({
@@ -341,7 +345,9 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
   const clipSource = await ensureClipSourceForRender(
     job.streamSessionId,
     job.startSeconds,
-    job.endSeconds
+    job.endSeconds,
+    undefined,
+    { purpose: "preview" }
   );
   const sourceMedia = await prisma.sourceMedia.findUnique({
     where: { id: clipSource.sourceMediaId },
@@ -368,6 +374,7 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
       ) || 640,
       minConfidence: FACE_ANALYSIS_CONFIG.minConfidence,
       maxFrames: 600,
+      ffmpegPath: getFfmpegPath(),
     },
     (percent) => {
       // Detection covers 10..70% of overall job progress.
@@ -404,6 +411,21 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
     ) {
       detection.mouthOpenRatio = d.mouthOpenRatio;
     }
+    if (
+      typeof d.speakingActivity === "number" &&
+      Number.isFinite(d.speakingActivity)
+    ) {
+      detection.speakingActivity = Math.min(
+        1,
+        Math.max(0, d.speakingActivity)
+      );
+    }
+    if (
+      typeof d.audioActivity === "number" &&
+      Number.isFinite(d.audioActivity)
+    ) {
+      detection.audioActivity = Math.min(1, Math.max(0, d.audioActivity));
+    }
     return [detection];
   });
   const sceneChanges = (worker.sceneChanges ?? []).flatMap((change) => {
@@ -429,30 +451,34 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
   const metricsById = new Map(
     tracks.map((track) => [track.id, computeTrackMetrics(track, sampledFrames)])
   );
-  const { classification, confidence } = classifySourceFromTracks(
-    tracks,
-    metricsById
-  );
-
   const sourceWidth = sourceMedia.width ?? worker.sourceWidth;
   const sourceHeight = sourceMedia.height ?? worker.sourceHeight;
+  const { classification, confidence } = classifySourceFromTracks(
+    tracks,
+    metricsById,
+    { width: sourceWidth, height: sourceHeight }
+  );
 
   // Embedded facecams: score by stability. Talking-head / multi-face: prefer
   // the face that looks like it is speaking so Follow speaker works out of the box.
   const preferSpeaker =
     classification === "moving_subject" || classification === "multiple_faces";
 
-  const scoredTracks = tracks
+  const eligibleTracks = tracks
     .map((track) => ({ track, metrics: metricsById.get(track.id)! }))
     .filter(
       ({ metrics }) =>
-        metrics.persistence >= 0.15 && metrics.averageConfidence >= 0.45
-    )
-    .sort((a, b) =>
-      preferSpeaker
-        ? scoreSpeakingSubject(b.metrics) - scoreSpeakingSubject(a.metrics)
-        : scoreEmbeddedFacecam(b.metrics) - scoreEmbeddedFacecam(a.metrics)
+        metrics.persistence >= 0.12 &&
+        metrics.averageConfidence >= 0.45 &&
+        metrics.oneFramePopPenalty < 0.9 &&
+        metrics.uiFalsePositivePenalty < 0.9
     );
+
+  const scoredTracks = selectFaceAnalysisCandidates(
+    eligibleTracks,
+    preferSpeaker,
+    4
+  );
 
   const candidates: FacecamCandidate[] = scoredTracks
     .slice(0, 4)
@@ -474,13 +500,36 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
       "Multiple faces were detected. Auto framing will follow the active speaker; manual face selection locks the crop to one person."
     );
   }
+  if (classification === "group_panel") {
+    warnings.push(
+      "Several persistent faces share the frame. Auto framing will stay wide instead of jumping around the panel."
+    );
+  }
+  if (classification === "intermittent_face") {
+    warnings.push(
+      "The main face is intermittent. Auto framing will hold the last reliable composition through brief losses."
+    );
+  }
+  if (classification === "obscured_face") {
+    warnings.push(
+      "The face is partially obscured or uncertain, so auto framing will use a conservative crop."
+    );
+  }
   if (worker.modelName === "opencv-haar") {
     warnings.push(
       "Face detection used a basic fallback model. Install MediaPipe for better results."
     );
   }
 
-  const recommendation = recommendVerticalLayout(classification, primaryCandidate);
+  const recommendation =
+    confidence < 0.45
+      ? {
+          layout: "center_crop" as const,
+          reason:
+            "Tracking confidence is low, so a stable centered crop is safer than guessing.",
+          warnings: [...(primaryCandidate?.warnings ?? [])],
+        }
+      : recommendVerticalLayout(classification, primaryCandidate);
 
   // Representative frame at the range midpoint for the manual-adjust UI.
   let frameStoragePath: string | undefined;

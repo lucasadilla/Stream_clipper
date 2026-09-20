@@ -68,6 +68,55 @@ export const DEFAULT_AGENT_WIZARD_STATE: AgentWizardState = {
   lastSuggestThroughSeconds: 0,
 };
 
+/** Keep Agent mode on a renderable panel when persisted workflow state is stale. */
+export function resolveAgentDisplayStep(options: {
+  step: AgentWizardStep;
+  hasVisibleClips: boolean;
+  hasActiveClip: boolean;
+}): AgentWizardStep {
+  const { step, hasVisibleClips, hasActiveClip } = options;
+
+  if (step === "transcribing" && hasVisibleClips) return "pick";
+  if (
+    (step === "look" || step === "edit" || step === "export") &&
+    !hasActiveClip
+  ) {
+    return hasVisibleClips ? "pick" : "transcribing";
+  }
+  return step;
+}
+
+/** Apply suggestion progress without overwriting choices made during AI work. */
+export function mergeSuggestionWizardState(
+  current: AgentWizardState,
+  options: {
+    hasClips: boolean;
+    isLiveAgent: boolean;
+    throughSeconds?: number;
+  }
+): AgentWizardState {
+  const isInteractiveStep =
+    current.step === "look" ||
+    current.step === "edit" ||
+    current.step === "export" ||
+    current.step === "done";
+
+  return {
+    ...current,
+    cadence: options.isLiveAgent ? "live_now" : current.cadence,
+    suggestRequested: options.hasClips,
+    lastSuggestThroughSeconds:
+      options.throughSeconds != null
+        ? Math.max(current.lastSuggestThroughSeconds, options.throughSeconds)
+        : current.lastSuggestThroughSeconds,
+    step: isInteractiveStep
+      ? current.step
+      : options.hasClips
+        ? "pick"
+        : "transcribing",
+  };
+}
+
 export function isAgentCadence(value: unknown): value is AgentCadence {
   return (
     typeof value === "string" &&

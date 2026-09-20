@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { getRenderJob } from "@/services/renderService";
 import { parseRenderJobLogs } from "@/lib/renderJobLogs";
+import { parsePostRenderQualityReview } from "@/lib/postRenderCritic";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 
 export async function GET(
@@ -11,6 +12,7 @@ export async function GET(
     const { renderJobId } = await params;
     const job = await getRenderJob(renderJobId);
     if (!job) return errorResponse("Render job not found", 404);
+    const logs = parseRenderJobLogs(job.logs);
     return jsonResponse({
       job: {
         id: job.id,
@@ -24,7 +26,9 @@ export async function GET(
         completedAt: job.completedAt,
         createdAt: job.createdAt,
         updatedAt: job.updatedAt,
-        logs: parseRenderJobLogs(job.logs),
+        logs,
+        stage: logs.at(-1)?.step ?? job.status,
+        qualityReview: parsePostRenderQualityReview(job.qualityReview),
       },
     });
   } catch (error) {

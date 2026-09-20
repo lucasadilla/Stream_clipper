@@ -103,6 +103,7 @@ model User {
   socialOAuthStates           SocialOAuthState[]
   socialPublishingPreferences SocialPublishingPreference[]
   socialPublishGroups         SocialPublishGroup[]
+  streamAutomation            StreamAutomation?
 }
 
 model Account {
@@ -294,6 +295,7 @@ model ClipSuggestion {
   suggestedLayout     String    @default("center_crop")
   status              String    @default("suggested")
   rawAiJson           Json?
+  captionDirection    Json?
   marketingApproved   Boolean   @default(false)
   marketingApprovedAt DateTime?
   createdAt           DateTime  @default(now())
@@ -408,6 +410,7 @@ model RenderJob {
   startedAt        DateTime?
   completedAt      DateTime?
   logs             Json?
+  qualityReview    Json?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
@@ -630,4 +633,57 @@ model SocialPublishEvent {
   publishJob SocialPublishJob @relation(fields: [publishJobId], references: [id], onDelete: Cascade)
 
   @@index([publishJobId, createdAt])
+}
+
+/// Hands-free live clipping configuration for one creator account.
+model StreamAutomation {
+  id                          String    @id @default(cuid())
+  userId                      String    @unique
+  platform                    String // youtube | twitch | kick
+  sourceUrl                   String
+  sourceKey                   String
+  displayName                 String?
+  enabled                     Boolean   @default(false)
+  autoPublishEnabled          Boolean   @default(false)
+  clipsPerBroadcast           Int       @default(3)
+  destinationAccountIds       Json      @default("[]")
+  activeBroadcastKey          String?
+  activeSessionId             String?
+  lastSuggestedThroughSeconds Float     @default(0)
+  lastCheckedAt               DateTime?
+  nextCheckAt                 DateTime?
+  lastLiveAt                  DateTime?
+  lastCompletedAt             DateTime?
+  lastError                   String?    @db.Text
+  lockedAt                    DateTime?
+  lockedBy                    String?
+  createdAt                   DateTime   @default(now())
+  updatedAt                   DateTime   @updatedAt
+
+  user  User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  clips StreamAutomationClip[]
+
+  @@index([enabled, nextCheckAt])
+  @@index([lockedAt])
+}
+
+/// Idempotency and progress record for clips created by Autopilot.
+model StreamAutomationClip {
+  id               String    @id @default(cuid())
+  automationId     String
+  broadcastKey     String
+  streamSessionId  String
+  clipSuggestionId String    @unique
+  renderJobId      String?
+  publishGroupId   String?
+  status           String    @default("preparing") // preparing | rendering | publishing | completed | failed
+  errorMessage     String?   @db.Text
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  automation StreamAutomation @relation(fields: [automationId], references: [id], onDelete: Cascade)
+
+  @@index([automationId, broadcastKey])
+  @@index([automationId, status])
+  @@index([status, updatedAt])
 }

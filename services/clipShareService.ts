@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { getLatestCompletedFinalRenderJob } from "@/services/renderSelectionService";
 
 export interface ClipSharePayload {
   id: string;
@@ -33,18 +34,13 @@ export async function getClipSharePayload(
           thumbnailUrl: true,
         },
       },
-      renderJobs: {
-        where: { status: "completed", outputPath: { not: null } },
-        orderBy: { createdAt: "desc" },
-        take: 1,
-        select: { outputPath: true },
-      },
     },
   });
 
   if (!clip) return null;
 
-  const hasVideo = Boolean(clip.renderJobs[0]?.outputPath);
+  const renderJob = await getLatestCompletedFinalRenderJob(clip.id);
+  const hasVideo = Boolean(renderJob?.outputPath);
 
   return {
     id: clip.id,
@@ -70,14 +66,6 @@ export async function getClipSharePayload(
 export async function getLatestRenderOutputPath(
   clipSuggestionId: string
 ): Promise<string | null> {
-  const job = await prisma.renderJob.findFirst({
-    where: {
-      clipSuggestionId,
-      status: "completed",
-      outputPath: { not: null },
-    },
-    orderBy: { createdAt: "desc" },
-    select: { outputPath: true },
-  });
+  const job = await getLatestCompletedFinalRenderJob(clipSuggestionId);
   return job?.outputPath ?? null;
 }

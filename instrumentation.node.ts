@@ -5,6 +5,38 @@
 let tokenProviderStarted = false;
 let runtimeLogged = false;
 
+async function waitForYouTubeTokenProvider(url: string): Promise<void> {
+  const deadline = Date.now() + 12_000;
+  let lastError = "provider did not answer";
+
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${url.replace(/\/$/, "")}/ping`, {
+        signal: AbortSignal.timeout(1_500),
+      });
+      if (response.ok) {
+        const data = (await response.json().catch(() => null)) as {
+          version?: unknown;
+        } | null;
+        console.info(
+          `[source] YouTube token provider ready${
+            typeof data?.version === "string" ? ` (v${data.version})` : ""
+          }`
+        );
+        return;
+      }
+      lastError = `HTTP ${response.status}`;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+
+  console.error(
+    `[source] YouTube token provider was not ready after 12s (${lastError}); fallback clients remain available`
+  );
+}
+
 async function logMediaRuntime(): Promise<void> {
   if (runtimeLogged) return;
   runtimeLogged = true;
@@ -31,7 +63,8 @@ async function logMediaRuntime(): Promise<void> {
 }
 
 async function startYouTubeTokenProvider(): Promise<void> {
-  if (tokenProviderStarted || !process.env.YT_DLP_POT_PROVIDER_URL?.trim()) {
+  const providerUrl = process.env.YT_DLP_POT_PROVIDER_URL?.trim();
+  if (tokenProviderStarted || !providerUrl) {
     return;
   }
 
@@ -48,6 +81,8 @@ async function startYouTubeTokenProvider(): Promise<void> {
   const provider = spawn(process.execPath, [providerPath], {
     stdio: "inherit",
     windowsHide: true,
+    cwd: "/opt/bgutil-ytdlp-pot-provider",
+    env: process.env,
   });
   provider.once("error", (error) => {
     tokenProviderStarted = false;
@@ -60,6 +95,7 @@ async function startYouTubeTokenProvider(): Promise<void> {
     );
   });
   provider.unref();
+  await waitForYouTubeTokenProvider(providerUrl);
 }
 
 export async function startBackgroundWorker(): Promise<void> {

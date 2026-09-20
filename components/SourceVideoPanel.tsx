@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { formatSeconds } from "@/lib/time";
 import { cn } from "@/lib/cn";
+import { OperationProgress } from "@/components/ui/operation-progress";
 
 interface SourceMedia {
   id: string;
@@ -54,7 +55,7 @@ export function SourceVideoPanel({
   const recordedSeconds =
     liveRecording?.recordedSeconds ?? sourceMedia?.durationSeconds ?? 0;
 
-  async function startCapture() {
+  const startCapture = useCallback(async () => {
     setError(null);
     setStarting(true);
     try {
@@ -70,7 +71,7 @@ export function SourceVideoPanel({
     } finally {
       setStarting(false);
     }
-  }
+  }, [onReady, sessionId]);
 
   // Auto-start recording (live) or download (VOD) when workspace opens
   useEffect(() => {
@@ -80,7 +81,13 @@ export function SourceVideoPanel({
 
     started.current = true;
     startCapture();
-  }, [sessionId, isLive, sourceMedia?.durationSeconds, liveRecording?.status]);
+  }, [
+    isLive,
+    liveRecording?.status,
+    sourceMedia,
+    startCapture,
+    starting,
+  ]);
 
   return (
     <div className="rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-4">
@@ -103,10 +110,24 @@ export function SourceVideoPanel({
       </p>
 
       {starting && !recordedSeconds && (
-        <div className="border border-[var(--color-card-border)] rounded-lg p-6 text-center mb-3">
-          <p className="text-sm text-[var(--color-muted)] animate-pulse">
-            {isLive ? "Starting live capture…" : "Downloading stream…"}
-          </p>
+        <div className="mb-3 border border-[var(--color-card-border)] p-4">
+          <OperationProgress
+            title={isLive ? "Starting live capture" : "Preparing source video"}
+            stages={
+              isLive
+                ? [
+                    "Connecting to the live stream…",
+                    "Waiting for the first media segment…",
+                    "Preparing rewindable playback…",
+                  ]
+                : [
+                    "Reading video information…",
+                    "Downloading the editing copy…",
+                    "Preparing video and audio tracks…",
+                  ]
+            }
+            resetKey={`${sessionId}:${isLive ? "live" : "vod"}`}
+          />
         </div>
       )}
 

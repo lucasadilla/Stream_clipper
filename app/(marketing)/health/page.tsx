@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { fetchJson } from "@/lib/apiClient";
 import { cn } from "@/lib/cn";
+import { OperationProgress } from "@/components/ui/operation-progress";
 
 interface RuntimeHealth {
   ok?: boolean;
@@ -16,6 +17,8 @@ interface RuntimeHealth {
   youtubeCookiesValid?: boolean;
   aiConfigured?: boolean;
   whisperConfigured?: boolean;
+  transcriptionConfigured?: boolean;
+  transcriptionProviders?: string[];
   storageRoot?: string;
   storageWritable?: boolean;
   storagePersistent?: boolean;
@@ -95,9 +98,15 @@ export default function HealthPage() {
 
         <div className="mt-8 border border-[var(--color-card-border)] bg-[#050805] p-6 sm:p-8">
           {loading && (
-            <p className="text-sm text-[var(--color-muted)] animate-pulse">
-              Checking server...
-            </p>
+            <OperationProgress
+              compact
+              title="Checking server"
+              stages={[
+                "Checking database and storage…",
+                "Checking FFmpeg and yt-dlp…",
+                "Checking workers and integrations…",
+              ]}
+            />
           )}
 
           {loadError && (
@@ -147,8 +156,14 @@ export default function HealthPage() {
                   label="AI API key"
                 />
                 <StatusPill
-                  ok={Boolean(health.whisperConfigured)}
-                  label="Whisper provider"
+                  ok={Boolean(
+                    health.transcriptionConfigured ?? health.whisperConfigured
+                  )}
+                  label={`Transcription provider${
+                    health.transcriptionProviders?.length
+                      ? ` (${health.transcriptionProviders.join(", ")})`
+                      : ""
+                  }`}
                 />
                 <StatusPill
                   ok={Boolean(health.storageWritable)}

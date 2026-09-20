@@ -13,6 +13,7 @@ import {
   normalizeCaptionAppearance,
   type CaptionAppearance,
 } from "@/lib/captionAppearance";
+import { CAPTION_NARRATIVE_ROLES } from "@/lib/captionDirector";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -26,6 +27,7 @@ const bodySchema = z.object({
   captionCues: z
     .array(
       z.object({
+        id: z.string().max(160).optional(),
         startTimeSeconds: z.number(),
         endTimeSeconds: z.number(),
         text: z.string().max(1000),
@@ -34,6 +36,20 @@ const bodySchema = z.object({
             z.object({ start: z.number(), end: z.number(), word: z.string().max(80) })
           )
           .max(200)
+          .optional(),
+        direction: z
+          .object({
+            role: z.enum(CAPTION_NARRATIVE_ROLES),
+            intensity: z.enum(["subtle", "standard", "strong"]),
+            emphasisWordIndexes: z.array(z.number().int().min(0)).max(2),
+            animation: z.enum([
+              "none",
+              "fade",
+              "wordReveal",
+              "rise",
+              "focus",
+            ]),
+          })
           .optional(),
       })
     )
@@ -97,7 +113,10 @@ export async function POST(
         captionAppearance: normalizeCaptionAppearance(
           body.captionAppearance as Partial<CaptionAppearance> | undefined
         ),
-        captionCues: body.captionCues,
+        captionCues: body.captionCues?.map((cue, index) => ({
+          ...cue,
+          id: cue.id ?? `preview-${index}-${cue.startTimeSeconds.toFixed(3)}`,
+        })),
         verticalLayout: body.verticalLayout,
         preview: true,
       },

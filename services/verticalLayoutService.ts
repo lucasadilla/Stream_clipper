@@ -3,8 +3,10 @@ import { prisma } from "@/lib/db";
 import { toJsonValue } from "@/lib/utils";
 import { normalizeRect, type NormalizedRect } from "@/lib/normalizedRect";
 import {
+  bestEmbeddedFacecamCandidate,
   buildActiveSpeakerCropPlan,
   buildSubjectCropPlan,
+  parseVerticalLayoutRequest,
   recommendVerticalLayout,
   resolveLayoutName,
   type FacecamCandidate,
@@ -29,7 +31,8 @@ export interface VerticalLayoutResolution {
 
 function candidateForSelection(
   analysis: StoredFaceAnalysisResult,
-  trackId?: string
+  trackId?: string,
+  preferEmbeddedFacecam = false
 ): FacecamCandidate | undefined {
   const all = [
     ...(analysis.primaryCandidate ? [analysis.primaryCandidate] : []),
@@ -38,6 +41,9 @@ function candidateForSelection(
   if (trackId) {
     const match = all.find((candidate) => candidate.trackId === trackId);
     if (match) return match;
+  }
+  if (preferEmbeddedFacecam) {
+    return bestEmbeddedFacecamCandidate(all);
   }
   return analysis.primaryCandidate;
 }
@@ -91,13 +97,20 @@ export async function resolveVerticalLayout(
   let layout = resolveLayoutName(request.layout);
   if (layout === "auto") {
     if (analysis) {
-      layout = resolveLayoutName(
-        analysis.recommendation?.layout ??
-          recommendVerticalLayout(
-            analysis.classification,
-            analysis.primaryCandidate
-          ).layout
-      );
+      if (analysis.confidence < 0.45) {
+        layout = "center_crop";
+        warnings.push(
+          "Tracking confidence was low, so a stable Center Crop was used."
+        );
+      } else {
+        layout = resolveLayoutName(
+          analysis.recommendation?.layout ??
+            recommendVerticalLayout(
+              analysis.classification,
+              analysis.primaryCandidate
+            ).layout
+        );
+      }
     } else {
       layout = "center_crop";
       warnings.push(
@@ -119,9 +132,13 @@ export async function resolveVerticalLayout(
     }
   }
   if (!facecamRect && analysis) {
+    const preferEmbeddedFacecam =
+      layout === "facecam_top_gameplay_bottom" ||
+      layout === "facecam_bottom_gameplay_top";
     const candidate = candidateForSelection(
       analysis,
-      request.faceSelection.trackId
+      request.faceSelection.trackId,
+      preferEmbeddedFacecam
     );
     if (candidate) {
       facecamRect = normalizeRect(candidate.rect) ?? undefined;
@@ -154,10 +171,10 @@ export async function resolveVerticalLayout(
     layout: layout as ResolvedVerticalLayout["layout"],
     facecamRect,
     faceRect,
-    // Blur/cover targets the region where the facecam sits in the original
-    // frame — same as the resolved crop unless a manual rect moved it.
-    originalFacecamRect:
-      analysis?.primaryCandidate?.rect ?? facecamRect,
+    // The gameplay branch must remove the same embedded webcam selected for
+    // the face panel. Using the generic primary candidate here could target an
+    // in-game character while leaving the real webcam visible.
+    originalFacecamRect: facecamRect,
     stacked: request.stacked
       ? {
           facecamPosition:
@@ -328,5 +345,33 @@ export async function saveVerticalLayoutConfiguration(options: {
 export async function getVerticalLayoutConfiguration(clipSuggestionId: string) {
   return prisma.verticalLayoutConfiguration.findUnique({
     where: { clipSuggestionId },
+  });
+}
+
+/** Rehydrate the persisted database fields into the request used by previews and renders. */
+export function requestFromVerticalLayoutConfiguration(config: {
+  layout: string;
+  faceAnalysisJobId: string | null;
+  faceSelectionMode: string;
+  selectedTrackId: string | null;
+  manualFaceRect: unknown;
+  settingsJson: unknown;
+}): VerticalLayoutRequest | null {
+  const settings =
+    config.settingsJson &&
+    typeof config.settingsJson === "object" &&
+    !Array.isArray(config.settingsJson)
+      ? config.settingsJson
+      : {};
+
+  return parseVerticalLayoutRequest({
+    ...settings,
+    layout: config.layout,
+    faceAnalysisJobId: config.faceAnalysisJobId ?? undefined,
+    faceSelection: {
+      mode: config.faceSelectionMode,
+      trackId: config.selectedTrackId ?? undefined,
+      manualRect: config.manualFaceRect ?? undefined,
+    },
   });
 }

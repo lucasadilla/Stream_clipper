@@ -92,12 +92,16 @@ export function contentTypeFromVisualClassification(
 ): ClipContentType {
   switch (classification) {
     case "multiple_faces":
+    case "group_panel":
       return "podcast";
     case "embedded_facecam":
       return "gaming";
     case "moving_subject":
+    case "obscured_face":
+    case "intermittent_face":
       return "talking";
     case "no_face":
+    case "gameplay_only":
       return "gameplay_only";
     default:
       return "general";

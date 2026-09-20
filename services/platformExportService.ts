@@ -28,6 +28,7 @@ import { generatePlatformCopy } from "@/services/platformCopyService";
 import { renderPlatformVideo } from "@/services/platformRenderService";
 import { validateCompletedPlatformExport } from "@/services/platformValidationService";
 import { getTranscriptChunksForRange } from "@/services/transcriptService";
+import { getLatestCompletedFinalRenderJob } from "@/services/renderSelectionService";
 
 const PLATFORM_WORKER_ID = `platform-${process.pid}-${randomUUID().slice(0, 8)}`;
 const STALE_EXPORT_MS = 15 * 60 * 1000;
@@ -167,16 +168,9 @@ export async function createPlatformExportPack(
 ) {
   const clip = await prisma.clipSuggestion.findUnique({
     where: { id: clipSuggestionId },
-    include: {
-      renderJobs: {
-        where: { status: "completed", outputPath: { not: null } },
-        orderBy: { createdAt: "desc" },
-        take: 1,
-      },
-    },
   });
   if (!clip) throw new Error("Clip not found");
-  const renderJob = clip.renderJobs[0];
+  const renderJob = await getLatestCompletedFinalRenderJob(clip.id);
   if (!renderJob?.outputPath || !fileExists(renderJob.outputPath)) {
     throw new Error("Render the clip before creating platform exports");
   }
@@ -463,6 +457,7 @@ export async function executePlatformExport(platformExportId: string) {
     settings,
     subtitlePath: settings.burnSubtitles ? subtitlePath : null,
     quoteText: copy.quoteText,
+    sourceIncludesCaptions: renderJob.includeCaptions,
   });
 
   const [probe, stat] = await Promise.all([probeMedia(outputPath), fs.stat(outputPath)]);

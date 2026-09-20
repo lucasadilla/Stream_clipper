@@ -1,4 +1,4 @@
-FROM brainicism/bgutil-ytdlp-pot-provider:1.3.1 AS pot-provider
+FROM brainicism/bgutil-ytdlp-pot-provider:2.0.0 AS pot-provider
 
 FROM node:22-bookworm-slim AS base
 
@@ -18,7 +18,7 @@ RUN apt-get update \
     libgomp1 \
   && pip3 install --break-system-packages --no-cache-dir --upgrade --pre \
     "yt-dlp[default,curl-cffi]" \
-    "bgutil-ytdlp-pot-provider==1.3.1" \
+    "bgutil-ytdlp-pot-provider==2.0.0" \
   && node --version \
   && yt-dlp --version \
   && ffmpeg -hide_banner -filters 2>&1 | grep -q subtitles \
@@ -35,6 +35,13 @@ COPY workers/facecam/requirements.docker.txt ./workers/facecam/requirements.dock
 RUN pip3 install --break-system-packages --no-cache-dir \
       -r workers/facecam/requirements.docker.txt \
   && python3 -c "import cv2, numpy; print(f'opencv={cv2.__version__}')"
+
+# Bake the tiny primary face model into the image. Railway workers can analyze
+# the first clip immediately instead of downloading into the persistent volume.
+RUN mkdir -p /opt/clipper-models \
+  && curl -fsSL \
+    -o /opt/clipper-models/face_detection_yunet_2023mar.onnx \
+    https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
 
 COPY package.json package-lock.json ./
 COPY prisma ./prisma/
@@ -62,16 +69,16 @@ ENV FFMPEG_PATH=ffmpeg
 ENV FFPROBE_PATH=ffprobe
 ENV YT_DLP_PATH=yt-dlp
 ENV YT_DLP_IMPERSONATE=chrome
-ENV YT_DLP_YOUTUBE_CLIENT=mweb
+ENV YT_DLP_YOUTUBE_CLIENT=default,mweb
 ENV YT_DLP_POT_PROVIDER_URL=http://127.0.0.1:4416
 ENV FFMPEG_LOW_MEMORY=1
 ENV FFMPEG_THREADS=1
 ENV WORKER_ENABLED=1
 ENV NODE_OPTIONS=--max-old-space-size=384
 ENV FACECAM_PYTHON=python3
-ENV FACECAM_MODEL_DIR=/app/storage/.cache/clipper
+ENV FACECAM_MODEL_DIR=/opt/clipper-models
 
-RUN mkdir -p /app/storage /app/storage/.cache/clipper
+RUN mkdir -p /app/storage
 
 EXPOSE 3000
 

@@ -409,34 +409,6 @@ export function CaptionAppearancePanel({
               />
             </label>
 
-            <div className="space-y-1">
-              <SectionLabel>Karaoke</SectionLabel>
-              <div className="flex items-center gap-2">
-                <PosBtn
-                  label={appearance.karaokeEnabled ? "On" : "Off"}
-                  active={appearance.karaokeEnabled}
-                  onClick={() =>
-                    patch({ karaokeEnabled: !appearance.karaokeEnabled })
-                  }
-                />
-                <input
-                  type="color"
-                  value={appearance.highlightColor}
-                  disabled={!appearance.karaokeEnabled}
-                  onChange={(e) =>
-                    patch({ highlightColor: e.target.value.toUpperCase() })
-                  }
-                  className="h-8 w-10 cursor-pointer rounded border border-[#21301f] bg-transparent disabled:opacity-40"
-                  title="Highlight color"
-                />
-              </div>
-              {!hasWordTimings && (
-                <p className="text-[10px] text-[var(--color-muted)]">
-                  Word timings needed for karaoke highlight
-                </p>
-              )}
-            </div>
-
             <div className="space-y-1.5">
               <SectionLabel>Animation</SectionLabel>
               <div className="flex flex-wrap gap-1">
@@ -445,6 +417,8 @@ export function CaptionAppearancePanel({
                     ["none", "None"],
                     ["fade", "Fade"],
                     ["wordReveal", "Word reveal"],
+                    ["rise", "Rise"],
+                    ["focus", "Focus"],
                   ] as Array<[CaptionAnimation, string]>
                 ).map(([value, label]) => (
                   <PosBtn
@@ -455,9 +429,32 @@ export function CaptionAppearancePanel({
                   />
                 ))}
               </div>
+              <div className="flex items-center justify-between gap-3 rounded-md border border-[#21301f] bg-[#070a07] px-2.5 py-2">
+                <label className="flex cursor-pointer items-center gap-2 text-[10px] font-semibold text-white">
+                  <input
+                    type="checkbox"
+                    checked={appearance.karaokeEnabled}
+                    onChange={(event) =>
+                      patch({ karaokeEnabled: event.target.checked })
+                    }
+                    className="h-3.5 w-3.5 accent-[var(--color-accent)]"
+                  />
+                  Active word color
+                </label>
+                <input
+                  type="color"
+                  value={appearance.highlightColor}
+                  disabled={!appearance.karaokeEnabled}
+                  onChange={(event) =>
+                    patch({ highlightColor: event.target.value.toUpperCase() })
+                  }
+                  className="h-7 w-9 cursor-pointer rounded border border-[#21301f] bg-transparent disabled:cursor-not-allowed disabled:opacity-35"
+                  aria-label="Active word color"
+                />
+              </div>
               {appearance.animation === "wordReveal" && !hasWordTimings && (
                 <p className="text-[10px] text-[var(--color-muted)]">
-                  Word reveal uses transcript word timings when available.
+                  Using estimated word timing for this clip.
                 </p>
               )}
             </div>

@@ -51,6 +51,21 @@ describe("browser face tracking", () => {
     expect(selected?.x).toBeCloseTo(205 / 1920);
   });
 
+  it("prefers a compact edge webcam over a central gameplay face", () => {
+    const selected = selectBrowserTrackedFace(
+      [
+        detection(780, 240, 420, 520, 0.98),
+        detection(52, 60, 180, 210, 0.84),
+      ],
+      1920,
+      1080,
+      null,
+      { preferEmbeddedFacecam: true }
+    );
+    expect(selected?.x).toBeCloseTo(52 / 1920);
+    expect(selected?.y).toBeCloseTo(60 / 1080);
+  });
+
   it("smooths crop movement instead of snapping", () => {
     const previous = { x: 0.1, y: 0.2, width: 0.2, height: 0.3 };
     const next = { x: 0.5, y: 0.4, width: 0.3, height: 0.4 };

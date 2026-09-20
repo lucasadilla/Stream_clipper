@@ -34,6 +34,7 @@ import type {
   VerticalLayout,
 } from "@/lib/verticalLayout";
 import type { ReframeStyle } from "@/lib/professionalReframe";
+import { OperationProgress } from "@/components/ui/operation-progress";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -485,19 +486,14 @@ export function VerticalLayoutPicker({
       </div>
 
       {analyzing && !failed && (
-        <div className="flex items-center gap-3 rounded-lg border border-[#21301f] bg-[#020302] px-3 py-2.5">
-          <div className="h-4 w-4 animate-spin rounded-full border-2 border-[#152015] border-t-[var(--color-accent)]" />
-          <div className="min-w-0 flex-1">
-            <p className="text-xs text-[#dfead8]">
-              {STATUS_LABELS[analysis?.status ?? "queued"] ?? "Analyzing clip…"}
-            </p>
-            <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-[#152015]">
-              <div
-                className="h-full rounded-full bg-[var(--color-accent)] transition-all duration-500"
-                style={{ width: `${Math.max(6, analysis?.progress ?? 0)}%` }}
-              />
-            </div>
-          </div>
+        <div className="rounded-lg border border-[#21301f] bg-[#020302] px-3 py-2.5">
+          <OperationProgress
+            compact
+            title="Preparing smart framing"
+            detail={STATUS_LABELS[analysis?.status ?? "queued"] ?? "Analyzing clip…"}
+            progress={(analysis?.progress ?? 0) > 0 ? analysis?.progress : null}
+            resetKey={`${sessionId}:${startSeconds}:${endSeconds}`}
+          />
         </div>
       )}
 

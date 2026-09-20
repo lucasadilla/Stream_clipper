@@ -3,6 +3,7 @@
 import { platformLabel, type StreamPlatform } from "@/lib/streamPlatform";
 import { formatSeconds } from "@/lib/time";
 import { PlatformBrandIcon } from "@/components/brand/PlatformBrandIcon";
+import { OperationProgress } from "@/components/ui/operation-progress";
 
 interface StreamCapturePlaceholderProps {
   platform: StreamPlatform;
@@ -25,13 +26,26 @@ export function StreamCapturePlaceholder({
         <PlatformBrandIcon brand={platform} size="lg" />
         <span className="absolute -inset-1 animate-pulse border border-[var(--color-accent)]/45" />
       </div>
-      <div className="space-y-1 max-w-md">
-        <p className="text-sm text-[#ddd] font-medium">
-          {recordedSeconds > 0
-            ? `Preparing playback (${formatSeconds(recordedSeconds)} captured)…`
-            : `Starting local capture…`}
-        </p>
-        <p className="text-xs text-[#888] leading-relaxed">
+      <div className="w-full max-w-md space-y-2">
+        <OperationProgress
+          compact
+          title={recordedSeconds > 0 ? "Preparing playback" : "Starting local capture"}
+          detail={
+            recordedSeconds > 0
+              ? `${formatSeconds(recordedSeconds)} captured and available for clipping`
+              : `Connecting to ${label} and waiting for media…`
+          }
+          stages={
+            recordedSeconds > 0
+              ? []
+              : [
+                  `Connecting to ${label}…`,
+                  "Waiting for the first media segment…",
+                  "Building rewindable playback…",
+                ]
+          }
+        />
+        <p className="text-xs leading-relaxed text-[#888]">
           {platform === "twitch"
             ? "Twitch live embeds can't rewind — we're recording from the start so you can scrub the timeline. Preview appears here in a few seconds."
             : `Recording ${label} locally for clipping — preview appears here in a few seconds.`}

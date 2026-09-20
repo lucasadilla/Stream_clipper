@@ -69,6 +69,20 @@ describe("buildStackedFacecamFilter", () => {
     expect(filter).toContain("overlay");
   });
 
+  it("crops gameplay to the side opposite the embedded facecam", () => {
+    const rightFacecam = buildStackedFacecamFilter(ctx, facecam, {
+      hideOriginalFacecam: "crop_out",
+    });
+    expect(rightFacecam).toContain("crop=1080:1190:x=0:y=(ih-oh)/2");
+
+    const leftFacecam = buildStackedFacecamFilter(
+      ctx,
+      { ...facecam, x: 0.04 },
+      { hideOriginalFacecam: "crop_out" }
+    );
+    expect(leftFacecam).toContain("crop=1080:1190:x=iw-ow:y=(ih-oh)/2");
+  });
+
   it("throws for an invalid facecam rect", () => {
     expect(() =>
       buildStackedFacecamFilter(ctx, { x: 2, y: 0, width: 0.5, height: 0.5 })
@@ -224,6 +238,15 @@ describe("subject-aware crop", () => {
 });
 
 describe("buildVerticalLayoutFilter", () => {
+  it("uses Lanczos scaling for final-quality layout renders", () => {
+    const filter = buildVerticalLayoutFilter(
+      { layout: "facecam_top_gameplay_bottom", facecamRect: facecam },
+      { ...ctx, scaleFlags: "lanczos" }
+    );
+    expect(filter).toContain("flags=lanczos");
+    expect(filter).not.toContain("flags=fast_bilinear");
+  });
+
   it("falls back to center crop when the facecam rect is missing", () => {
     const filter = buildVerticalLayoutFilter(
       { layout: "facecam_top_gameplay_bottom" },

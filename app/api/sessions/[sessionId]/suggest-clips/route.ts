@@ -15,12 +15,14 @@ import {
   DEFAULT_AGENT_WIZARD_STATE,
   LIVE_NOW_SUGGESTION_CAP,
   liveSuggestionWindow,
+  mergeSuggestionWizardState,
   readAgentWizardState,
   withAgentWizardState,
 } from "@/lib/agentWizard";
 import { ensureClipSuggestionThumbnails } from "@/services/clipThumbnailService";
 import { prepareSuggestedClips } from "@/services/clipAutoPrepareService";
 import { reclaimEphemeralStorage } from "@/services/storageReclaimService";
+import { prepareCaptionDirections } from "@/services/captionDirectorService";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -146,7 +148,14 @@ export async function POST(
         keepSessionId: sessionId,
         pruneSessionSegments: true,
       });
-      await ensureClipSuggestionThumbnails(sessionId, thumbIds);
+      await Promise.all([
+        ensureClipSuggestionThumbnails(sessionId, thumbIds),
+        prepareCaptionDirections(
+          (result.clips.length > 0 ? result.clips : clips.slice(0, 3)).map(
+            (clip) => clip.id
+          )
+        ),
+      ]);
 
     // Auto-compose vertical layouts (face detection → recommended crop).
     // Fire-and-forget so the pick grid isn't blocked.
@@ -163,41 +172,25 @@ export async function POST(
     });
 
     const hasClips = clips.length > 0;
-    const isLaterStep =
-      currentWizard.step === "look" ||
-      currentWizard.step === "edit" ||
-      currentWizard.step === "export" ||
-      currentWizard.step === "done";
-    const wizard = {
-      ...currentWizard,
-      suggestRequested: hasClips,
-      lastSuggestThroughSeconds:
-        body.throughSeconds != null
-          ? body.throughSeconds
-          : currentWizard.lastSuggestThroughSeconds,
-      step: hasClips
-        ? ("pick" as const)
-        : isLaterStep
-          ? currentWizard.step
-          : ("transcribing" as const),
-    };
-
-    // Don't yank the user out of look/edit/export when rolling live suggestions arrive.
-    if (
-      body.extra > 0 &&
-      (currentWizard.step === "look" ||
-        currentWizard.step === "edit" ||
-        currentWizard.step === "export" ||
-        currentWizard.step === "done")
-    ) {
-      wizard.step = currentWizard.step;
-    }
+    const latestSession = await prisma.streamSession.findUnique({
+      where: { id: sessionId },
+      select: { metadataJson: true },
+    });
+    if (!latestSession) return errorResponse("Session not found", 404);
+    const wizard = mergeSuggestionWizardState(
+      readAgentWizardState(latestSession.metadataJson),
+      {
+        hasClips,
+        isLiveAgent,
+        throughSeconds: body.throughSeconds,
+      }
+    );
 
     await prisma.streamSession.update({
       where: { id: sessionId },
       data: {
         metadataJson: toJsonValue(
-          withAgentWizardState(session.metadataJson, {
+          withAgentWizardState(latestSession.metadataJson, {
             ...DEFAULT_AGENT_WIZARD_STATE,
             ...wizard,
           })

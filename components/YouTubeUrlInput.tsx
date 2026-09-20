@@ -10,6 +10,10 @@ import type { BillingAccountSummary } from "@/services/billingService";
 import type { SessionMode } from "@/lib/sessionMode";
 import { ClippingModeModal } from "@/components/ClippingModeModal";
 import { PlatformBrandIcon } from "@/components/brand/PlatformBrandIcon";
+import {
+  writeSessionBootstrap,
+  type SessionBootstrap,
+} from "@/lib/sessionBootstrap";
 
 export function StreamUrlInput() {
   const [url, setUrl] = useState("");
@@ -69,7 +73,7 @@ export function StreamUrlInput() {
 
     try {
       const { ok, data } = await fetchJson<{
-        session?: { id: string };
+        session?: SessionBootstrap;
         error?: string;
       }>("/api/sessions", {
         method: "POST",
@@ -80,6 +84,7 @@ export function StreamUrlInput() {
       if (!ok) throw new Error(data.error ?? "Failed to create session");
       if (!data.session?.id) throw new Error("Failed to create session");
       posthog.capture("stream_url_submitted", { mode });
+      writeSessionBootstrap({ ...data.session, mode });
       window.location.assign(`/sessions/${data.session.id}`);
       return;
     } catch (err) {

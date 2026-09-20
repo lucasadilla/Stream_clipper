@@ -45,6 +45,8 @@ interface TwitchEmbedPlayerProps {
   videoId?: string;
   onTimeUpdate?: (time: number) => void;
   onDurationChange?: (duration: number) => void;
+  onFrameReady?: () => void;
+  initialTime?: number;
   fillContainer?: boolean;
 }
 
@@ -62,7 +64,15 @@ export const TwitchEmbedPlayer = forwardRef<
   StreamPlayerHandle,
   TwitchEmbedPlayerProps
 >(function TwitchEmbedPlayer(
-  { channel, videoId, onTimeUpdate, onDurationChange, fillContainer },
+  {
+    channel,
+    videoId,
+    onTimeUpdate,
+    onDurationChange,
+    onFrameReady,
+    initialTime = 0,
+    fillContainer,
+  },
   ref
 ) {
   const reactId = useId().replace(/\W/g, "");
@@ -70,6 +80,8 @@ export const TwitchEmbedPlayer = forwardRef<
   const playerRef = useRef<TwitchPlayerInstance | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const readyHandlerRef = useRef<(() => void) | null>(null);
+  const initialTimeRef = useRef(initialTime);
+  initialTimeRef.current = initialTime;
 
   const seekTo = useCallback(
     (seconds: number, options?: { play?: boolean }) => {
@@ -151,7 +163,14 @@ export const TwitchEmbedPlayer = forwardRef<
         if (d > 0) onDurationChange?.(d);
       };
 
-      const onReady = () => reportDuration();
+      const onReady = () => {
+        reportDuration();
+        if (initialTimeRef.current > 0) {
+          player.seek(initialTimeRef.current);
+          player.pause();
+        }
+        window.setTimeout(() => onFrameReady?.(), 100);
+      };
       readyHandlerRef.current = onReady;
       player.addEventListener("ready", onReady);
 
@@ -193,7 +212,14 @@ export const TwitchEmbedPlayer = forwardRef<
       cancelled = true;
       teardown();
     };
-  }, [channel, videoId, containerId, onTimeUpdate, onDurationChange]);
+  }, [
+    channel,
+    videoId,
+    containerId,
+    onTimeUpdate,
+    onDurationChange,
+    onFrameReady,
+  ]);
 
   if (!channel && !videoId) {
     return (

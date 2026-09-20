@@ -87,4 +87,33 @@ describe("buildFaceTracks", () => {
     const tracks = buildFaceTracks(detections);
     expect(tracks).toHaveLength(2);
   });
+
+  it("uses motion prediction to preserve identity during a fast pan", () => {
+    const detections = [
+      detection(0, 0.1, 0.3, 0.12),
+      detection(0.25, 0.16, 0.3, 0.12),
+      detection(0.5, 0.26, 0.3, 0.12),
+    ];
+    const tracks = buildFaceTracks(detections);
+    expect(tracks).toHaveLength(1);
+    expect(tracks[0]!.points).toHaveLength(3);
+  });
+
+  it("preserves worker speaking activity on the resulting track", () => {
+    const tracks = buildFaceTracks([
+      {
+        ...detection(0, 0.3, 0.3),
+        speakingActivity: 0.72,
+        audioActivity: 0.81,
+      },
+      {
+        ...detection(0.25, 0.3, 0.3),
+        speakingActivity: 0.64,
+        audioActivity: 0.7,
+      },
+    ]);
+    expect(tracks[0]!.points[0]!.speakingActivity).toBe(0.72);
+    expect(tracks[0]!.points[1]!.speakingActivity).toBe(0.64);
+    expect(tracks[0]!.points[0]!.audioActivity).toBe(0.81);
+  });
 });

@@ -16,11 +16,17 @@ import { formatSeconds, formatDuration } from "@/lib/time";
 import { LIVE_SEGMENT_SECONDS } from "@/lib/timelineConstants";
 import { sanitizeDurationSeconds } from "@/lib/timelineBounds";
 import { buildCaptionTrack, type TranscriptChunkInput, type CaptionCue } from "@/lib/captionTrack";
-import type { CaptionAppearance } from "@/lib/captionAppearance";
+import {
+  DEFAULT_CAPTION_APPEARANCE,
+  normalizeCaptionAppearance,
+  type CaptionAppearance,
+} from "@/lib/captionAppearance";
 import { applyCaptionEdits, clampCueRange, type CaptionEditsMap } from "@/lib/captionEdits";
 import { CaptionTimelineTrack, type CaptionDragMode } from "@/components/CaptionTimelineTrack";
 import { CaptionCueEditor } from "@/components/CaptionCueEditor";
-import { RenderClipModal } from "@/components/RenderClipModal";
+import { AgentClipStudioModal } from "@/components/agent/AgentClipStudioModal";
+import type { ClipSuggestionData } from "@/components/ClipSuggestionCard";
+import { saveClip } from "@/lib/clipActions";
 import { TimelineSequenceTools } from "@/components/TimelineSequenceTools";
 import { MIN_CLIP_SECONDS, MAX_CLIP_SECONDS } from "@/lib/clipConstants";
 import { cn } from "@/lib/cn";
@@ -62,6 +68,7 @@ interface LiveTimelineProps {
   onPause: () => void;
   onScrub: (seconds: number) => void;
   onClipCreated?: () => void;
+  playbackUrl?: string | null;
   includeCaptions?: boolean;
   captionChunks?: TranscriptChunkInput[];
   captionAppearance?: CaptionAppearance;
@@ -74,6 +81,8 @@ interface LiveTimelineProps {
       endTimeSeconds: number;
     }>
   ) => void;
+  onIncludeCaptionsChange?: (enabled: boolean) => void;
+  onCaptionAppearanceChange?: (appearance: CaptionAppearance) => void;
 }
 
 type CaptionPatch = Partial<{
@@ -198,11 +207,14 @@ export function LiveTimeline({
   onPause,
   onScrub,
   onClipCreated,
+  playbackUrl = null,
   includeCaptions = true,
   captionChunks = [],
   captionAppearance,
   captionEdits = {},
   onCaptionEdit,
+  onIncludeCaptionsChange,
+  onCaptionAppearanceChange,
 }: LiveTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const rulerRef = useRef<HTMLDivElement>(null);
@@ -213,6 +225,9 @@ export function LiveTimeline({
     null
   );
   const [renderModalOpen, setRenderModalOpen] = useState(false);
+  const [studioClip, setStudioClip] = useState<ClipSuggestionData | null>(null);
+  const [creatingStudioClip, setCreatingStudioClip] = useState(false);
+  const [studioError, setStudioError] = useState<string | null>(null);
   const [editorState, setEditorState] = useState<EditorState>(emptyEditorState);
   const [editorLoaded, setEditorLoaded] = useState(false);
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null);
@@ -430,6 +445,13 @@ export function LiveTimeline({
   const captionCues = useMemo(
     () => applyCaptionEdits(baseCaptionCues, captionEdits),
     [baseCaptionCues, captionEdits]
+  );
+  const studioCaptionAppearance = useMemo(
+    () =>
+      normalizeCaptionAppearance(
+        captionAppearance ?? DEFAULT_CAPTION_APPEARANCE
+      ),
+    [captionAppearance]
   );
 
   const selectedCaptionCue = useMemo(
@@ -1170,6 +1192,33 @@ export function LiveTimeline({
     return end > start ? [{ overlay, segment, start, end }] : [];
   });
 
+  async function openClipStudio() {
+    if (creatingStudioClip) return;
+    pauseTransport();
+    if (
+      studioClip &&
+      Math.abs(studioClip.startTimeSeconds - selection.start) < 0.01 &&
+      Math.abs(studioClip.endTimeSeconds - selection.end) < 0.01
+    ) {
+      setRenderModalOpen(true);
+      return;
+    }
+    setCreatingStudioClip(true);
+    setStudioError(null);
+    try {
+      const clip = await saveClip(sessionId, selection);
+      setStudioClip(clip);
+      setRenderModalOpen(true);
+      onClipCreated?.();
+    } catch (error) {
+      setStudioError(
+        error instanceof Error ? error.message : "Could not open clip studio"
+      );
+    } finally {
+      setCreatingStudioClip(false);
+    }
+  }
+
   return (
     <>
     <div
@@ -1271,8 +1320,9 @@ export function LiveTimeline({
         <div className="flex items-center gap-1.5 pl-1">
           <button
             type="button"
-            onClick={() => setRenderModalOpen(true)}
+            onClick={() => void openClipStudio()}
             disabled={
+              creatingStudioClip ||
               renderDuration < MIN_CLIP_SECONDS ||
               renderDuration > MAX_CLIP_SECONDS
             }
@@ -1289,8 +1339,13 @@ export function LiveTimeline({
               "disabled:opacity-40"
             )}
           >
-            Export
+            {creatingStudioClip ? "Opening…" : "Open studio"}
           </button>
+          {studioError && (
+            <span className="max-w-48 truncate text-[10px] text-[var(--color-danger)]" title={studioError}>
+              {studioError}
+            </span>
+          )}
         </div>
       </div>
 
@@ -1729,17 +1784,27 @@ export function LiveTimeline({
       </div>
     </div>
 
-    <RenderClipModal
-      open={renderModalOpen}
-      onClose={() => setRenderModalOpen(false)}
-      sessionId={sessionId}
-      selection={selection}
-      includeCaptions={includeCaptions}
-      captionAppearance={captionAppearance}
-      captionCues={captionCues}
-      editorState={editorState}
-      onClipCreated={onClipCreated}
-    />
+    {studioClip && (
+      <AgentClipStudioModal
+        open={renderModalOpen}
+        sessionId={sessionId}
+        clip={studioClip}
+        playbackUrl={playbackUrl}
+        sourceDuration={Math.max(durationSeconds, recordedSeconds)}
+        includeCaptions={includeCaptions}
+        captionAppearance={studioCaptionAppearance}
+        onIncludeCaptionsChange={(enabled) =>
+          onIncludeCaptionsChange?.(enabled)
+        }
+        onCaptionAppearanceChange={(appearance) =>
+          onCaptionAppearanceChange?.(appearance)
+        }
+        onClipChange={setStudioClip}
+        onClose={() => {
+          setRenderModalOpen(false);
+        }}
+      />
+    )}
     </>
   );
 }

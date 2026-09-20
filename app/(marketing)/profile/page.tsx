@@ -16,6 +16,7 @@ import type {
   StripeBillingDetails,
 } from "@/services/billingService";
 import type { UsageSnapshot } from "@/services/usageService";
+import { OperationProgress } from "@/components/ui/operation-progress";
 
 function formatLimit(used: string, limit: number | null): string {
   if (limit === null) return `${used} / Unlimited`;
@@ -183,7 +184,11 @@ export default function ProfilePage() {
         description="Update your details, manage your subscription, and review usage."
       >
         <div className="mt-10 border border-[var(--color-card-border)] bg-[#050805] p-8">
-          <p className="text-[var(--color-muted)] animate-pulse">Loading profile…</p>
+          <OperationProgress
+            compact
+            title="Loading profile"
+            stages={["Fetching account details…", "Loading plan and usage…"]}
+          />
         </div>
       </AccountSettingsShell>
     );

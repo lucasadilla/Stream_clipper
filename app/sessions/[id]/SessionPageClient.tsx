@@ -1,10 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { fetchJson } from "@/lib/apiClient";
 import { normalizeSessionMode, type SessionMode } from "@/lib/sessionMode";
+import type { SessionData } from "@/components/SessionWorkspace";
+import {
+  readSessionBootstrap,
+  writeSessionBootstrap,
+} from "@/lib/sessionBootstrap";
+import { OperationProgress } from "@/components/ui/operation-progress";
 
 const SessionWorkspace = dynamic(
   () =>
@@ -14,8 +20,12 @@ const SessionWorkspace = dynamic(
     loading: () => (
       <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
         <div className="h-12 border-b border-[var(--color-card-border)]" />
-        <div className="flex-1 flex items-center justify-center">
-          <p className="text-[var(--color-muted)] animate-pulse">Loading editor...</p>
+        <div className="flex flex-1 items-center justify-center px-6">
+          <OperationProgress
+            title="Opening timeline"
+            stages={["Loading editor code…", "Restoring timeline state…"]}
+            className="max-w-sm"
+          />
         </div>
       </div>
     ),
@@ -30,8 +40,12 @@ const AgentWorkspace = dynamic(
     loading: () => (
       <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
         <div className="h-12 border-b border-[var(--color-card-border)]" />
-        <div className="flex-1 flex items-center justify-center">
-          <p className="text-[var(--color-muted)] animate-pulse">Loading agent...</p>
+        <div className="flex flex-1 items-center justify-center px-6">
+          <OperationProgress
+            title="Opening Agent Mode"
+            stages={["Loading editor code…", "Restoring clip suggestions…"]}
+            className="max-w-sm"
+          />
         </div>
       </div>
     ),
@@ -39,12 +53,22 @@ const AgentWorkspace = dynamic(
 );
 
 export function SessionPageClient({ sessionId }: { sessionId: string }) {
-  const [mode, setMode] = useState<SessionMode | null>(null);
+  const [mode, setMode] = useState<SessionMode | null>(() =>
+    readSessionBootstrap(sessionId)?.mode ?? null
+  );
+  const [session, setSession] = useState<
+    (SessionData & { mode?: string }) | null
+  >(() => readSessionBootstrap(sessionId) as SessionData | null);
   const [error, setError] = useState<string | null>(null);
+  const [modeSwitching, setModeSwitching] = useState(false);
+  const [modeError, setModeError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    void fetchJson<{ session?: { mode?: string }; error?: string }>(
+    void fetchJson<{
+      session?: SessionData & { mode?: string };
+      error?: string;
+    }>(
       `/api/sessions/${sessionId}`
     )
       .then(({ ok, data }) => {
@@ -53,7 +77,19 @@ export function SessionPageClient({ sessionId }: { sessionId: string }) {
           setError(data.error ?? "Session not found");
           return;
         }
-        setMode(normalizeSessionMode(data.session.mode));
+        setSession(data.session);
+        const nextMode = normalizeSessionMode(data.session.mode);
+        setMode(nextMode);
+        writeSessionBootstrap({
+          id: data.session.id,
+          mode: nextMode,
+          platform: data.session.platform,
+          youtubeVideoId: data.session.youtubeVideoId,
+          youtubeUrl: data.session.youtubeUrl,
+          title: data.session.title,
+          thumbnailUrl: data.session.thumbnailUrl,
+          liveStatus: data.session.liveStatus,
+        });
       })
       .catch((err) => {
         if (cancelled) return;
@@ -63,6 +99,55 @@ export function SessionPageClient({ sessionId }: { sessionId: string }) {
       cancelled = true;
     };
   }, [sessionId]);
+
+  const handleModeChange = useCallback(
+    async (nextMode: SessionMode) => {
+      if (!mode || nextMode === mode || modeSwitching) return;
+
+      const previousMode = mode;
+      setModeSwitching(true);
+      setModeError(null);
+      setMode(nextMode);
+
+      try {
+        const { ok, data } = await fetchJson<{
+          mode?: SessionMode;
+          error?: string;
+        }>(`/api/sessions/${sessionId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: nextMode }),
+        });
+        if (!ok) {
+          throw new Error(data.error ?? "Could not switch editor mode");
+        }
+        const updatedSession = session
+          ? { ...session, mode: nextMode }
+          : null;
+        setSession(updatedSession);
+        if (updatedSession) {
+          writeSessionBootstrap({
+            id: updatedSession.id,
+            mode: nextMode,
+            platform: updatedSession.platform,
+            youtubeVideoId: updatedSession.youtubeVideoId,
+            youtubeUrl: updatedSession.youtubeUrl,
+            title: updatedSession.title,
+            thumbnailUrl: updatedSession.thumbnailUrl,
+            liveStatus: updatedSession.liveStatus,
+          });
+        }
+      } catch (err) {
+        setMode(previousMode);
+        setModeError(
+          err instanceof Error ? err.message : "Could not switch editor mode"
+        );
+      } finally {
+        setModeSwitching(false);
+      }
+    },
+    [mode, modeSwitching, session, sessionId]
+  );
 
   if (error) {
     return (
@@ -81,16 +166,41 @@ export function SessionPageClient({ sessionId }: { sessionId: string }) {
     return (
       <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
         <div className="h-12 border-b border-[var(--color-card-border)]" />
-        <div className="flex-1 flex items-center justify-center">
-          <p className="text-[var(--color-muted)] animate-pulse">Loading session…</p>
+        <div className="flex flex-1 items-center justify-center px-6">
+          <OperationProgress
+            title="Loading session"
+            stages={["Fetching session details…", "Checking media availability…"]}
+            className="max-w-sm"
+          />
         </div>
       </div>
     );
   }
 
-  if (mode === "agent") {
-    return <AgentWorkspace sessionId={sessionId} />;
-  }
-
-  return <SessionWorkspace sessionId={sessionId} />;
+  return (
+    <>
+      {mode === "agent" ? (
+        <AgentWorkspace
+          sessionId={sessionId}
+          modeSwitching={modeSwitching}
+          onModeChange={handleModeChange}
+        />
+      ) : (
+        <SessionWorkspace
+          sessionId={sessionId}
+          initialSession={session}
+          modeSwitching={modeSwitching}
+          onModeChange={handleModeChange}
+        />
+      )}
+      {modeError && (
+        <div
+          role="alert"
+          className="fixed bottom-4 left-1/2 z-[100] -translate-x-1/2 rounded-md border border-red-400/25 bg-[#1a0d0d] px-4 py-2.5 text-xs text-red-200 shadow-2xl"
+        >
+          {modeError}
+        </div>
+      )}
+    </>
+  );
 }

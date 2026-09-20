@@ -42,6 +42,14 @@ export function getOpenAiTranscriptionQualityModel(): string | null {
   return configured;
 }
 
+/** High-accuracy pass used only after a creator opens a suggested clip. */
+export function getClipTranscriptionRefinementModel(): string | null {
+  const configured = process.env.CLIP_TRANSCRIPT_REFINEMENT_MODEL?.trim();
+  if (configured && /^(off|none|false|0)$/i.test(configured)) return null;
+  if (configured) return configured;
+  return process.env.OPENAI_API_KEY?.trim() ? "gpt-transcribe" : null;
+}
+
 export function getTranscriptionLanguage(): string | undefined {
   const language = process.env.TRANSCRIPTION_LANGUAGE?.trim();
   if (language && /^(auto|detect)$/i.test(language)) return undefined;

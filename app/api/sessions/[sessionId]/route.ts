@@ -1,4 +1,6 @@
 import { NextRequest } from "next/server";
+import { z } from "zod";
+import { prisma } from "@/lib/db";
 import { getStreamSession, refreshSessionLiveMetadata } from "@/services/youtubeService";
 import {
   clearSessionStorage,
@@ -18,6 +20,16 @@ import {
 import { fileExists, resolveStoragePath } from "@/lib/storage";
 import { canDecodeVideoFrame } from "@/lib/ffmpeg";
 import { acquireSourceMedia } from "@/services/liveRecordingService";
+import { SESSION_MODES } from "@/lib/sessionMode";
+import { getBillingAccountIdFromRequest } from "@/services/billingService";
+import {
+  ensureSessionBillingAccess,
+  SessionAccessError,
+} from "@/services/sessionAccessService";
+
+const updateSessionSchema = z.object({
+  mode: z.enum(SESSION_MODES),
+});
 
 export async function GET(
   _request: NextRequest,
@@ -74,6 +86,7 @@ export async function GET(
         youtubeVideoId: session.youtubeVideoId,
         youtubeUrl: session.youtubeUrl,
         title: session.title,
+        thumbnailUrl: session.thumbnailUrl,
         liveStatus: session.liveStatus,
         activeLiveChatId: session.activeLiveChatId,
         actualStartTime: session.actualStartTime,
@@ -178,6 +191,39 @@ export async function DELETE(
     if (message === "Session not found") {
       return errorResponse(message, 404);
     }
+    return errorResponse(message, 500);
+  }
+}
+
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: Promise<{ sessionId: string }> }
+) {
+  try {
+    const { sessionId } = await params;
+    const billingAccountId = getBillingAccountIdFromRequest(request);
+    try {
+      await ensureSessionBillingAccess(sessionId, billingAccountId);
+    } catch (error) {
+      if (error instanceof SessionAccessError) {
+        return errorResponse(error.message, error.status);
+      }
+      throw error;
+    }
+
+    const { mode } = updateSessionSchema.parse(await request.json());
+    await prisma.streamSession.update({
+      where: { id: sessionId },
+      data: { mode },
+    });
+
+    return jsonResponse({ mode });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return errorResponse(error.errors[0]?.message ?? "Invalid mode", 400);
+    }
+    const message =
+      error instanceof Error ? error.message : "Failed to update session";
     return errorResponse(message, 500);
   }
 }

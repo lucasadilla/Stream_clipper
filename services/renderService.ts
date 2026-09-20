@@ -7,10 +7,15 @@ import {
   renderSequence as ffmpegRenderSequence,
   isFfmpegAvailable,
   formatFfmpegProcessError,
+  probeMedia,
 } from "@/lib/ffmpeg";
 import { formatCaptionTextForBurn } from "@/lib/captionStyles";
 import { generateAss } from "@/lib/captionAss";
-import { buildCaptionTrack, type CaptionWord } from "@/lib/captionTrack";
+import {
+  buildCaptionTrack,
+  type CaptionCue,
+  type CaptionWord,
+} from "@/lib/captionTrack";
 import { applyCaptionEdits } from "@/lib/captionEdits";
 import {
   getRendersDir,
@@ -53,9 +58,53 @@ import {
 } from "@/lib/verticalLayout";
 import { resolveVerticalLayout } from "@/services/verticalLayoutService";
 import { rangeCoversWholeSource } from "@/lib/renderRange";
+import { reviewRenderedOutput } from "@/services/postRenderCriticService";
+import type { PostRenderQualityReview } from "@/lib/postRenderCritic";
+import { directCaptionTrack } from "@/lib/captionDirector";
+import { getCachedCaptionDirectionForClip } from "@/services/captionDirectorService";
 
 const PREVIEW_MAX_SECONDS = 5;
 const PREVIEW_HEIGHT = 640;
+
+function evenDimension(value: number): number {
+  return Math.max(2, Math.round(value / 2) * 2);
+}
+
+function nativeOutputDimensions(source: {
+  width: number;
+  height: number;
+} | null): { width: number; height: number } {
+  if (!source || source.width <= 0 || source.height <= 0) {
+    return { width: 1920, height: 1080 };
+  }
+
+  const configuredMaxHeight = Number.parseInt(
+    process.env.RENDER_NATIVE_MAX_HEIGHT?.trim() ?? "",
+    10
+  );
+  const configuredMaxWidth = Number.parseInt(
+    process.env.RENDER_NATIVE_MAX_WIDTH?.trim() ?? "",
+    10
+  );
+  const maxHeight =
+    Number.isFinite(configuredMaxHeight) && configuredMaxHeight >= 720
+      ? configuredMaxHeight
+      : 2160;
+  const maxWidth =
+    Number.isFinite(configuredMaxWidth) && configuredMaxWidth >= 1280
+      ? configuredMaxWidth
+      : 3840;
+  const scale = Math.min(
+    1,
+    maxWidth / source.width,
+    maxHeight / source.height
+  );
+
+  return {
+    width: evenDimension(source.width * scale),
+    height: evenDimension(source.height * scale),
+  };
+}
 
 export interface RenderShortParams {
   streamSessionId: string;
@@ -67,12 +116,7 @@ export interface RenderShortParams {
   layout?: "center_crop" | "facecam_overlay" | "facecam_top_gameplay_bottom" | "gameplay_full";
   includeCaptions?: boolean;
   captionAppearance?: CaptionAppearance;
-  captionCues?: Array<{
-    startTimeSeconds: number;
-    endTimeSeconds: number;
-    text: string;
-    words?: CaptionWord[];
-  }>;
+  captionCues?: CaptionCue[];
   editorState?: EditorState;
   /** Facecam-aware vertical layout selection (validated client request). */
   verticalLayout?: VerticalLayoutRequest;
@@ -105,7 +149,7 @@ export function parseRenderJobParams(value: unknown): RenderShortParams | null {
       raw.layout === "gameplay_full"
         ? raw.layout
         : "center_crop",
-    includeCaptions: Boolean(raw.includeCaptions),
+    includeCaptions: raw.includeCaptions !== false,
     captionAppearance: normalizeCaptionAppearance(
       raw.captionAppearance as Partial<CaptionAppearance> | undefined
     ),
@@ -118,12 +162,46 @@ export function parseRenderJobParams(value: unknown): RenderShortParams | null {
   };
 }
 
-type BurnCaptionCue = {
-  startTimeSeconds: number;
-  endTimeSeconds: number;
-  text: string;
-  words?: CaptionWord[];
-};
+type BurnCaptionCue = CaptionCue;
+
+export function mergeRenderCaptionCoverage(
+  generatedCues: CaptionCue[],
+  clientCues: CaptionCue[]
+): CaptionCue[] {
+  const clientById = new Map(clientCues.map((cue) => [cue.id, cue]));
+  const matchedClientIds = new Set<string>();
+  const merged = generatedCues.map((generated) => {
+    let client = clientById.get(generated.id);
+    if (!client) {
+      client = clientCues.find((candidate) => {
+        if (matchedClientIds.has(candidate.id)) return false;
+        const overlap = Math.max(
+          0,
+          Math.min(generated.endTimeSeconds, candidate.endTimeSeconds) -
+            Math.max(generated.startTimeSeconds, candidate.startTimeSeconds)
+        );
+        const shortest = Math.max(
+          0.05,
+          Math.min(
+            generated.endTimeSeconds - generated.startTimeSeconds,
+            candidate.endTimeSeconds - candidate.startTimeSeconds
+          )
+        );
+        return overlap / shortest >= 0.75;
+      });
+    }
+    if (!client) return generated;
+    matchedClientIds.add(client.id);
+    return { ...client, words: client.words };
+  });
+
+  for (const client of clientCues) {
+    if (!matchedClientIds.has(client.id)) {
+      merged.push({ ...client, words: client.words });
+    }
+  }
+  return merged.sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
+}
 
 function mapCaptionsToSequence(
   cues: BurnCaptionCue[],
@@ -137,9 +215,11 @@ function mapCaptionsToSequence(
       const overlapStart = Math.max(cue.startTimeSeconds, segment.sourceStart);
       const overlapEnd = Math.min(cue.endTimeSeconds, segment.sourceEnd);
       if (overlapEnd <= overlapStart) continue;
-      const words = cue.words
-        ?.filter((word) => word.end > overlapStart && word.start < overlapEnd)
-        .map((word) => ({
+      const wordEntries = cue.words
+        ?.map((word, sourceIndex) => ({ word, sourceIndex }))
+        .filter(({ word }) => word.end > overlapStart && word.start < overlapEnd);
+      const words = wordEntries
+        ?.map(({ word }) => ({
           start: outputOffset + Math.max(0, word.start - segment.sourceStart),
           end:
             outputOffset +
@@ -147,13 +227,28 @@ function mapCaptionsToSequence(
           word: word.word,
         }))
         .filter((word) => word.end > word.start && word.word.trim().length > 0);
+      const remappedEmphasis = wordEntries
+        ?.flatMap(({ sourceIndex }, outputIndex) =>
+          cue.direction?.emphasisWordIndexes.includes(sourceIndex)
+            ? [outputIndex]
+            : []
+        );
       mapped.push({
+        id: `${cue.id}-segment-${segment.id}`,
         startTimeSeconds:
           outputOffset + Math.max(0, overlapStart - segment.sourceStart),
         endTimeSeconds:
           outputOffset + Math.min(segmentDuration(segment), overlapEnd - segment.sourceStart),
         text: formatCaptionTextForBurn(cue.text, format),
         ...(words?.length ? { words } : {}),
+        ...(cue.direction
+          ? {
+              direction: {
+                ...cue.direction,
+                emphasisWordIndexes: remappedEmphasis ?? [],
+              },
+            }
+          : {}),
       });
     }
     outputOffset += segmentDuration(segment);
@@ -168,6 +263,73 @@ async function updateJobProgress(jobId: string, progress: number, step?: string)
   });
   if (step) {
     await appendRenderJobLog(jobId, step, `Progress ${Math.round(progress)}%`);
+  }
+}
+
+async function completeRenderJob(input: {
+  jobId: string;
+  params: RenderShortParams;
+  outputPath: string;
+  relativeOutput: string;
+  completionMessage: string;
+  resolvedLayout?: string;
+}): Promise<void> {
+  let qualityReview: PostRenderQualityReview | null = null;
+  if (!input.params.preview) {
+    await updateJobProgress(input.jobId, 94, "quality_check");
+    try {
+      qualityReview = await reviewRenderedOutput({
+        outputPath: input.outputPath,
+        params: input.params,
+      });
+      await appendRenderJobLog(
+        input.jobId,
+        "quality_check",
+        `${qualityReview.reviewer === "ai_visual" ? "AI visual" : "Technical"} review: ${qualityReview.verdict} (${qualityReview.score}/100)`,
+        qualityReview.verdict === "pass" ? "info" : "warn"
+      );
+    } catch (error) {
+      await appendRenderJobLog(
+        input.jobId,
+        "quality_check",
+        `Quality review skipped: ${error instanceof Error ? error.message : String(error)}`,
+        "warn"
+      );
+    }
+  }
+
+  const existing = await prisma.renderJob.findUnique({
+    where: { id: input.jobId },
+    select: { logs: true },
+  });
+  const logs = [
+    ...parseRenderJobLogs(existing?.logs),
+    makeRenderJobLogEntry("completed", input.completionMessage),
+  ];
+
+  await prisma.renderJob.update({
+    where: { id: input.jobId },
+    data: {
+      status: "completed",
+      progress: 100,
+      outputPath: input.relativeOutput,
+      completedAt: new Date(),
+      lockedAt: null,
+      lockedBy: null,
+      errorMessage: null,
+      ...(input.resolvedLayout ? { layout: input.resolvedLayout } : {}),
+      ...(qualityReview
+        ? { qualityReview: qualityReview as unknown as Prisma.InputJsonValue }
+        : {}),
+      logs: logs as unknown as Prisma.InputJsonValue,
+    },
+  });
+
+  if (input.params.clipSuggestionId && !input.params.preview) {
+    await prisma.clipSuggestion.update({
+      where: { id: input.params.clipSuggestionId },
+      data: { status: "rendered" },
+    });
   }
 }
 
@@ -234,7 +396,11 @@ export async function executeRenderJob(
       streamSessionId,
       effectiveStart,
       effectiveEnd,
-      sourceMediaId
+      sourceMediaId,
+      {
+        purpose: preview ? "preview" : "final",
+        onStage: (progress, step) => updateJobProgress(jobId, progress, step),
+      }
     );
   } catch (error) {
     if (isNoSpaceError(error)) throw noSpaceLeftError();
@@ -262,18 +428,29 @@ export async function executeRenderJob(
   const relativeOutput = toRelativeStoragePath(outputPath);
 
   const inputPath = resolveStoragePath(renderSource.filePath);
+  const inputProbe = await probeMedia(inputPath).catch(() => null);
+  const nativeDimensions = nativeOutputDimensions(inputProbe);
   let subtitlePath: string | undefined;
   const outputHeight = preview
     ? PREVIEW_HEIGHT
     : format === "vertical"
       ? Math.max(720, Number.parseInt(process.env.RENDER_VERTICAL_HEIGHT || "1920", 10) || 1920)
-      : 1080;
+      : nativeDimensions.height;
   const outputWidth =
     format === "vertical"
       ? Math.round((outputHeight * 9) / 16)
       : preview
         ? Math.round((outputHeight * 16) / 9)
-        : 1920;
+        : nativeDimensions.width;
+
+  if (inputProbe) {
+    await appendRenderJobLog(
+      jobId,
+      "source_quality",
+      `Source ${inputProbe.width}x${inputProbe.height} at ${inputProbe.fps.toFixed(2)} fps; export ${outputWidth}x${outputHeight}`,
+      !preview && inputProbe.height < 720 ? "warn" : "info"
+    );
+  }
 
   // Resolve the facecam-aware vertical layout (auto recommendation, manual
   // rect, candidate selection). Falls back to center crop internally, so a
@@ -361,7 +538,7 @@ export async function executeRenderJob(
     // Some muxed segment-* files already equal the requested range. Only skip
     // ffmpeg when both in and out points cover the whole cached file.
     const alreadyCut =
-      path.basename(inputPath).toLowerCase().startsWith("segment-") &&
+      /^(?:segment|render-source)-/i.test(path.basename(inputPath)) &&
       rangeCoversWholeSource(
         cutStart,
         cutEnd,
@@ -382,34 +559,13 @@ export async function executeRenderJob(
     }
 
     await updateJobProgress(jobId, 90, "finalizing");
-
-    const existing = await prisma.renderJob.findUnique({
-      where: { id: jobId },
-      select: { logs: true },
+    await completeRenderJob({
+      jobId,
+      params,
+      outputPath,
+      relativeOutput,
+      completionMessage: "Stream copy finished",
     });
-    const logs = [
-      ...parseRenderJobLogs(existing?.logs),
-      makeRenderJobLogEntry("completed", "Stream copy finished"),
-    ];
-
-    await prisma.renderJob.update({
-      where: { id: jobId },
-      data: {
-        status: "completed",
-        progress: 100,
-        outputPath: relativeOutput,
-        logs: logs as unknown as Prisma.InputJsonValue,
-        completedAt: new Date(),
-        errorMessage: null,
-      },
-    });
-
-    if (clipSuggestionId) {
-      await prisma.clipSuggestion.update({
-        where: { id: clipSuggestionId },
-        data: { status: "rendered" },
-      });
-    }
 
     return { outputPath: relativeOutput };
   }
@@ -431,7 +587,10 @@ export async function executeRenderJob(
         );
       }
     );
-    const chunks = !includeCaptions || clientCues.length
+    // Always load the authoritative transcript for the full final range. The
+    // browser may have queued a render while a newly extended caption window
+    // was still loading; client cues should override edits, not define coverage.
+    const chunks = !includeCaptions
       ? []
       : await getTranscriptChunksForRange(
           streamSessionId,
@@ -440,13 +599,8 @@ export async function executeRenderJob(
         );
     if (!includeCaptions || clientCues.length > 0 || chunks.length > 0) {
       const captionEdits = await readCaptionEdits(streamSessionId);
-      const captionLines: BurnCaptionCue[] = !includeCaptions
+      const generatedCaptionLines: BurnCaptionCue[] = !includeCaptions
         ? []
-        : clientCues.length
-        ? clientCues.map((cue) => ({
-            ...cue,
-            words: cue.words,
-          }))
         : applyCaptionEdits(
             buildCaptionTrack(
               chunks
@@ -462,25 +616,72 @@ export async function executeRenderJob(
             ),
             captionEdits
           );
+      const baseCaptionLines: BurnCaptionCue[] = mergeRenderCaptionCoverage(
+        generatedCaptionLines,
+        clientCues
+      );
+      const cachedDirection =
+        clipSuggestionId && baseCaptionLines.length > 0
+          ? await getCachedCaptionDirectionForClip(
+              clipSuggestionId,
+              baseCaptionLines
+            )
+          : null;
+      const captionLines = directCaptionTrack(
+        baseCaptionLines,
+        cachedDirection
+      );
 
       const shiftedCues = sequenceSegments.length
         ? mapCaptionsToSequence(captionLines, sequenceSegments, format)
         : captionLines
-            .map((cue) => ({
-              startTimeSeconds: Math.max(0, cue.startTimeSeconds - effectiveStart),
-              endTimeSeconds: Math.min(
-                effectiveEnd - effectiveStart,
-                cue.endTimeSeconds - effectiveStart
-              ),
-              text: formatCaptionTextForBurn(cue.text, format),
-              words: cue.words
-                ?.map((word) => ({
+            .map((cue) => {
+              const wordEntries = cue.words
+                ?.map((word, sourceIndex) => ({ word, sourceIndex }))
+                .filter(
+                  ({ word }) =>
+                    word.end > effectiveStart && word.start < effectiveEnd
+                );
+              const words = wordEntries
+                ?.map(({ word }) => ({
                   start: Math.max(0, word.start - effectiveStart),
-                  end: Math.min(effectiveEnd - effectiveStart, word.end - effectiveStart),
+                  end: Math.min(
+                    effectiveEnd - effectiveStart,
+                    word.end - effectiveStart
+                  ),
                   word: word.word,
                 }))
-                .filter((word) => word.end > word.start && word.word.trim().length > 0),
-            }))
+                .filter(
+                  (word) => word.end > word.start && word.word.trim().length > 0
+                );
+              const emphasisWordIndexes = wordEntries
+                ?.flatMap(({ sourceIndex }, outputIndex) =>
+                  cue.direction?.emphasisWordIndexes.includes(sourceIndex)
+                    ? [outputIndex]
+                    : []
+                );
+              return {
+                id: cue.id,
+                startTimeSeconds: Math.max(
+                  0,
+                  cue.startTimeSeconds - effectiveStart
+                ),
+                endTimeSeconds: Math.min(
+                  effectiveEnd - effectiveStart,
+                  cue.endTimeSeconds - effectiveStart
+                ),
+                text: formatCaptionTextForBurn(cue.text, format),
+                ...(words?.length ? { words } : {}),
+                ...(cue.direction
+                  ? {
+                      direction: {
+                        ...cue.direction,
+                        emphasisWordIndexes: emphasisWordIndexes ?? [],
+                      },
+                    }
+                  : {}),
+              };
+            })
             .filter((cue) => cue.endTimeSeconds > cue.startTimeSeconds);
 
       if (includeCaptions && shiftedCues.length === 0 && !preview) {
@@ -627,38 +828,14 @@ export async function executeRenderJob(
     });
   }
 
-  const existing = await prisma.renderJob.findUnique({
-    where: { id: jobId },
-    select: { logs: true },
+  await completeRenderJob({
+    jobId,
+    params,
+    outputPath,
+    relativeOutput,
+    completionMessage: "Render finished",
+    resolvedLayout: resolvedVerticalLayout?.effectiveLayout,
   });
-  const logs = [
-    ...parseRenderJobLogs(existing?.logs),
-    makeRenderJobLogEntry("completed", "Render finished"),
-  ];
-
-  await prisma.renderJob.update({
-    where: { id: jobId },
-    data: {
-      status: "completed",
-      progress: 100,
-      outputPath: relativeOutput,
-      completedAt: new Date(),
-      lockedAt: null,
-      lockedBy: null,
-      errorMessage: null,
-      ...(resolvedVerticalLayout
-        ? { layout: resolvedVerticalLayout.effectiveLayout }
-        : {}),
-      logs: logs as unknown as Prisma.InputJsonValue,
-    },
-  });
-
-  if (clipSuggestionId && !preview) {
-    await prisma.clipSuggestion.update({
-      where: { id: clipSuggestionId },
-      data: { status: "rendered" },
-    });
-  }
 
   return { outputPath: relativeOutput };
 }
@@ -681,7 +858,7 @@ export async function createRenderJobRecord(params: {
       status: "queued",
       progress: 0,
       layout: params.layout ?? "center_crop",
-      includeCaptions: params.includeCaptions ?? false,
+      includeCaptions: params.includeCaptions ?? true,
       params: params.renderParams as unknown as Prisma.InputJsonValue,
       maxAttempts: params.maxAttempts ?? 3,
       logs: [

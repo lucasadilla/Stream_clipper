@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  bestEmbeddedFacecamCandidate,
   buildActiveSpeakerCropPlan,
   buildSubjectCropPlan,
   candidateFromTrack,
@@ -9,6 +10,7 @@ import {
   computeTrackMetrics,
   parseVerticalLayoutRequest,
   recommendVerticalLayout,
+  selectFaceAnalysisCandidates,
   scoreEmbeddedFacecam,
   type FaceTrack,
   type FacecamCandidate,
@@ -83,6 +85,22 @@ describe("computeTrackMetrics", () => {
       computeTrackMetrics(quiet, 20).speakingScore
     );
   });
+
+  it("prefers aligned mouth-region motion when the worker provides it", () => {
+    const talking = makeTrack({ count: 20, x: 0.3, y: 0.3, size: 0.25 });
+    talking.points = talking.points.map((point, index) => ({
+      ...point,
+      speakingActivity: index % 3 === 0 ? 0.8 : 0.35,
+    }));
+    const quiet = makeTrack({ count: 20, x: 0.6, y: 0.3, size: 0.25 });
+    quiet.points = quiet.points.map((point) => ({
+      ...point,
+      speakingActivity: 0.03,
+    }));
+    expect(computeTrackMetrics(talking, 20).speakingScore).toBeGreaterThan(
+      computeTrackMetrics(quiet, 20).speakingScore
+    );
+  });
 });
 
 describe("classifySourceFromTracks", () => {
@@ -121,6 +139,29 @@ describe("classifySourceFromTracks", () => {
     const result = classifySourceFromTracks([], new Map());
     expect(result.classification).toBe("no_face");
   });
+
+  it("classifies three persistent faces as a stable group panel", () => {
+    const tracks = [
+      makeTrack({ id: "a", count: 40, x: 0.05, y: 0.25, size: 0.14 }),
+      makeTrack({ id: "b", count: 40, x: 0.4, y: 0.25, size: 0.14 }),
+      makeTrack({ id: "c", count: 40, x: 0.75, y: 0.25, size: 0.14 }),
+    ];
+    const metrics = new Map(
+      tracks.map((item) => [item.id, computeTrackMetrics(item, 40)])
+    );
+    expect(classifySourceFromTracks(tracks, metrics).classification).toBe(
+      "group_panel"
+    );
+  });
+
+  it("recognizes an already-vertical source before choosing a face layout", () => {
+    const item = makeTrack({ count: 40, x: 0.3, y: 0.25, size: 0.2 });
+    const metrics = new Map([[item.id, computeTrackMetrics(item, 40)]]);
+    expect(
+      classifySourceFromTracks([item], metrics, { width: 1080, height: 1920 })
+        .classification
+    ).toBe("already_vertical");
+  });
 });
 
 describe("candidate scoring", () => {
@@ -152,6 +193,48 @@ describe("candidate scoring", () => {
   });
 });
 
+describe("selectFaceAnalysisCandidates", () => {
+  it("reserves a gaming webcam candidate when speaker faces fill the limit", () => {
+    const speakers = Array.from({ length: 4 }, (_, index) => {
+      const track = makeTrack({
+        id: `speaker-${index}`,
+        count: 40,
+        x: 0.18 + index * 0.14,
+        y: 0.24,
+        size: 0.16,
+      });
+      track.points = track.points.map((point) => ({
+        ...point,
+        speakingActivity: 0.95,
+      }));
+      return { track, metrics: computeTrackMetrics(track, 40) };
+    });
+    const webcam = makeTrack({
+      id: "corner-webcam",
+      count: 40,
+      x: 0.86,
+      y: 0.78,
+      size: 0.09,
+    });
+    webcam.points = webcam.points.map((point) => ({
+      ...point,
+      speakingActivity: 0.02,
+    }));
+
+    const selected = selectFaceAnalysisCandidates(
+      [
+        ...speakers,
+        { track: webcam, metrics: computeTrackMetrics(webcam, 40) },
+      ],
+      true,
+      4
+    );
+
+    expect(selected).toHaveLength(4);
+    expect(selected.some((entry) => entry.track.id === "corner-webcam")).toBe(true);
+  });
+});
+
 describe("classifyFacecamQuality", () => {
   it("classifies by source pixel size", () => {
     const bigRect = { x: 0, y: 0, width: 0.3, height: 0.3 };
@@ -171,6 +254,28 @@ describe("recommendVerticalLayout", () => {
     quality: "good",
     warnings: [],
   };
+
+  it("selects the stable embedded webcam for a gaming stack", () => {
+    const speakingGameCharacter: FacecamCandidate = {
+      ...goodCandidate,
+      trackId: "game-character",
+      confidence: 0.48,
+      rect: { x: 0.35, y: 0.2, width: 0.3, height: 0.5 },
+    };
+    const stableCornerWebcam: FacecamCandidate = {
+      ...goodCandidate,
+      trackId: "corner-webcam",
+      confidence: 0.91,
+      rect: { x: 0.76, y: 0.68, width: 0.2, height: 0.28 },
+    };
+
+    expect(
+      bestEmbeddedFacecamCandidate([
+        speakingGameCharacter,
+        stableCornerWebcam,
+      ])?.trackId
+    ).toBe("corner-webcam");
+  });
 
   it("recommends stacked for a good embedded facecam", () => {
     const rec = recommendVerticalLayout("embedded_facecam", goodCandidate);

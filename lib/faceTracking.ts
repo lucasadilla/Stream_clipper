@@ -45,6 +45,8 @@ interface MutableTrack {
   lastRect: NormalizedRect;
   lastSeenSeconds: number;
   confidenceSum: number;
+  velocityX: number;
+  velocityY: number;
 }
 
 function sizeRatioOk(
@@ -77,11 +79,46 @@ function matchScore(
   }
   if (!sizeRatioOk(rect, track.lastRect, config)) return null;
 
-  const distance = rectCenterDistance(rect, track.lastRect);
-  if (distance > config.centerMatchDistance) return null;
+  const elapsed = Math.max(0.001, timestampSeconds - track.lastSeenSeconds);
+  const lastCenter = {
+    x: track.lastRect.x + track.lastRect.width / 2,
+    y: track.lastRect.y + track.lastRect.height / 2,
+  };
+  const predictedRect = {
+    ...track.lastRect,
+    x: track.lastRect.x + track.velocityX * elapsed,
+    y: track.lastRect.y + track.velocityY * elapsed,
+  };
+  const predictedDistance = rectCenterDistance(rect, predictedRect);
+  const lastDistance = rectCenterDistance(rect, track.lastRect);
+  const allowedDistance =
+    config.centerMatchDistance * Math.min(1.75, 1 + elapsed * 0.35);
+  if (Math.min(predictedDistance, lastDistance) > allowedDistance) return null;
 
   const iou = rectIoU(rect, track.lastRect);
-  return iou * 2 + (1 - distance / config.centerMatchDistance);
+  const predictedAffinity =
+    1 - Math.min(1, predictedDistance / Math.max(0.001, allowedDistance));
+  const previousAffinity =
+    1 - Math.min(1, lastDistance / Math.max(0.001, allowedDistance));
+  const rectCenter = {
+    x: rect.x + rect.width / 2,
+    y: rect.y + rect.height / 2,
+  };
+  const displacementX = (rectCenter.x - lastCenter.x) / elapsed;
+  const displacementY = (rectCenter.y - lastCenter.y) / elapsed;
+  const directionPenalty = Math.min(
+    0.65,
+    Math.hypot(
+      displacementX - track.velocityX,
+      displacementY - track.velocityY
+    ) * 0.75
+  );
+  return (
+    iou * 1.45 +
+    predictedAffinity * 1.15 +
+    previousAffinity * 0.45 -
+    directionPenalty
+  );
 }
 
 /**
@@ -146,11 +183,31 @@ export function buildFaceTracks(
       }
       assigned.add(pair.detection);
       claimedTracks.add(pair.track.id);
+      const previousCenter = {
+        x: pair.track.lastRect.x + pair.track.lastRect.width / 2,
+        y: pair.track.lastRect.y + pair.track.lastRect.height / 2,
+      };
+      const nextCenter = {
+        x: pair.detection.rect.x + pair.detection.rect.width / 2,
+        y: pair.detection.rect.y + pair.detection.rect.height / 2,
+      };
+      const elapsed = Math.max(
+        0.001,
+        pair.detection.timestampSeconds - pair.track.lastSeenSeconds
+      );
+      const measuredVelocityX = (nextCenter.x - previousCenter.x) / elapsed;
+      const measuredVelocityY = (nextCenter.y - previousCenter.y) / elapsed;
+      pair.track.velocityX =
+        pair.track.velocityX * 0.55 + measuredVelocityX * 0.45;
+      pair.track.velocityY =
+        pair.track.velocityY * 0.55 + measuredVelocityY * 0.45;
       pair.track.points.push({
         timestampSeconds: pair.detection.timestampSeconds,
         rect: pair.detection.rect,
         confidence: pair.detection.confidence,
         mouthOpenRatio: pair.detection.mouthOpenRatio,
+        speakingActivity: pair.detection.speakingActivity,
+        audioActivity: pair.detection.audioActivity,
       });
       pair.track.lastRect = pair.detection.rect;
       pair.track.lastSeenSeconds = pair.detection.timestampSeconds;
@@ -167,11 +224,15 @@ export function buildFaceTracks(
             rect: detection.rect,
             confidence: detection.confidence,
             mouthOpenRatio: detection.mouthOpenRatio,
+            speakingActivity: detection.speakingActivity,
+            audioActivity: detection.audioActivity,
           },
         ],
         lastRect: detection.rect,
         lastSeenSeconds: detection.timestampSeconds,
         confidenceSum: detection.confidence,
+        velocityX: 0,
+        velocityY: 0,
       });
     }
   }

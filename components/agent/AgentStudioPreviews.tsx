@@ -53,6 +53,16 @@ import {
 import { CaptionCueText } from "@/components/CaptionCueText";
 import { PlatformBrandIcon } from "@/components/brand/PlatformBrandIcon";
 import type { VerticalLayout } from "@/lib/verticalLayout";
+import {
+  expandFaceToFacecamCrop,
+  type NormalizedRect,
+} from "@/lib/normalizedRect";
+import {
+  previewCameraFrameAt,
+  type PreviewCropKeyframe,
+} from "@/lib/reframePlayback";
+import { effectiveCaptionAnimation } from "@/lib/captionDirector";
+import { coverCropAroundFocus } from "@/lib/videoFrameCrop";
 
 export function LookPresetGlyph({
   presetId,
@@ -92,6 +102,7 @@ export function LookLayoutMock({
   const cover = (zoom = "cover", pos = "center"): CSSProperties =>
     frameUrl
       ? {
+          backgroundColor: "#111711",
           backgroundImage: `url(${frameUrl})`,
           backgroundSize: zoom,
           backgroundPosition: pos,
@@ -100,6 +111,7 @@ export function LookLayoutMock({
 
   const face: CSSProperties = frameUrl
     ? {
+        backgroundColor: "#172019",
         backgroundImage: `url(${frameUrl})`,
         backgroundSize: "180% 180%",
         backgroundPosition: "15% 20%",
@@ -117,7 +129,7 @@ export function LookLayoutMock({
     >
       {layout === "facecam_top_gameplay_bottom" && (
         <div className="absolute inset-0 flex flex-col">
-          <div className="relative h-[38%]" style={face} />
+          <div className="relative h-[34%]" style={face} />
           <div
             className="relative flex-1 border-t border-white/15"
             style={cover()}
@@ -129,7 +141,7 @@ export function LookLayoutMock({
         <div className="absolute inset-0 flex flex-col">
           <div className="relative flex-1" style={cover()} />
           <div
-            className="relative h-[38%] border-t border-white/15"
+            className="relative h-[34%] border-t border-white/15"
             style={face}
           />
         </div>
@@ -198,10 +210,14 @@ export function LookVideoStage({
   onPlay,
   onPause,
   faceRect,
+  facecamRect,
   faceCenterX,
   faceCenterY,
   zoom = 1,
   layoutOverride,
+  cameraKeyframes,
+  cameraStartSeconds = 0,
+  cameraBaseCropWidth,
 }: {
   presetId: ContentLookPresetId;
   playbackUrl: string | null;
@@ -215,6 +231,8 @@ export function LookVideoStage({
   onPause?: (event: SyntheticEvent<HTMLVideoElement>) => void;
   /** Normalized face box (0..1) — keeps the face centered in look crops. */
   faceRect?: { x: number; y: number; width: number; height: number } | null;
+  /** Expanded webcam region used to fill the dedicated gaming face panel. */
+  facecamRect?: NormalizedRect | null;
   /** Current tracked horizontal focus, normalized to 0..1. */
   faceCenterX?: number | null;
   /** Current planned vertical focus, normalized to 0..1. */
@@ -223,95 +241,264 @@ export function LookVideoStage({
   zoom?: number;
   /** Resolved server recommendation while the visible preset remains Auto. */
   layoutOverride?: VerticalLayout | null;
+  /** Shared camera plan, sampled against decoded video frames without CSS lag. */
+  cameraKeyframes?: PreviewCropKeyframe[];
+  /** Absolute source time corresponding to camera keyframe zero. */
+  cameraStartSeconds?: number;
+  /** Unzoomed 9:16 source crop width used to reproduce planned zoom. */
+  cameraBaseCropWidth?: number | null;
 }) {
   const layout = layoutOverride ?? getContentLookPreset(presetId).layout;
-  const mirrorRef = useRef<HTMLVideoElement>(null);
-  const needsMirror =
+  const faceCanvasRef = useRef<HTMLCanvasElement>(null);
+  const drawFacePanelRef = useRef<(() => void) | null>(null);
+  const isStacked =
     layout === "facecam_top_gameplay_bottom" ||
-    layout === "facecam_bottom_gameplay_top" ||
-    layout === "facecam_pip";
+    layout === "facecam_bottom_gameplay_top";
+  const showsFacePanel = isStacked || layout === "facecam_pip";
 
   const facePos = faceObjectPosition(faceRect, faceCenterX, faceCenterY);
+  const effectiveFacecamRect =
+    facecamRect ?? (faceRect ? expandFaceToFacecamCrop(faceRect) : null);
+  const facePanelCropRef = useRef<NormalizedRect | null>(effectiveFacecamRect);
+  const facePanelFocusRef = useRef<NormalizedRect | null>(faceRect ?? null);
+  facePanelCropRef.current = effectiveFacecamRect;
+  facePanelFocusRef.current = faceRect ?? null;
+  const stackedGameplayPosition = effectiveFacecamRect
+    ? effectiveFacecamRect.x + effectiveFacecamRect.width / 2 >= 0.5
+      ? "0% 50%"
+      : "100% 50%"
+    : "50% 50%";
   const safeZoom = Math.min(1.35, Math.max(1, zoom));
+  const orderedCameraKeyframes = useMemo(
+    () =>
+      [...(cameraKeyframes ?? [])].sort(
+        (a, b) => a.timestampSeconds - b.timestampSeconds
+      ),
+    [cameraKeyframes]
+  );
+  const frameSyncedCamera =
+    layout === "subject_aware_crop" && orderedCameraKeyframes.length > 0;
 
   useEffect(() => {
-    const main = videoRef.current;
-    const mirror = mirrorRef.current;
-    if (!main || !playbackUrl) return;
-    if (main.getAttribute("src") !== playbackUrl) {
-      main.setAttribute("src", playbackUrl);
-      main.load();
+    const video = videoRef.current;
+    if (!video || !frameSyncedCamera || orderedCameraKeyframes.length === 0) {
+      return;
     }
-    if (mirror && needsMirror && mirror.getAttribute("src") !== playbackUrl) {
-      mirror.setAttribute("src", playbackUrl);
-      mirror.load();
-    }
-  }, [playbackUrl, videoRef, needsMirror]);
 
-  useEffect(() => {
-    const main = videoRef.current;
-    const mirror = mirrorRef.current;
-    if (!main || !mirror || !needsMirror) return;
-
-    const sync = () => {
-      if (Math.abs(mirror.currentTime - main.currentTime) > 0.12) {
-        try {
-          mirror.currentTime = main.currentTime;
-        } catch {
-          // ignore seek race
-        }
+    let cancelled = false;
+    let frameRequestId: number | null = null;
+    const applyFrame = (sourceTime = video.currentTime) => {
+      if (cancelled) return;
+      const frame = previewCameraFrameAt(
+        orderedCameraKeyframes,
+        Math.max(0, sourceTime - cameraStartSeconds),
+        true
+      );
+      if (!frame) return;
+      const position = faceObjectPosition(
+        faceRect,
+        frame.centerX,
+        frame.centerY
+      );
+      const frameZoom =
+        cameraBaseCropWidth && frame.cropWidth
+          ? Math.min(
+              1.35,
+              Math.max(1, cameraBaseCropWidth / frame.cropWidth)
+            )
+          : safeZoom;
+      video.style.objectPosition = position;
+      video.style.transformOrigin = position;
+      video.style.transform = `scale(${frameZoom.toFixed(4)})`;
+    };
+    const onVideoFrame: VideoFrameRequestCallback = (_now, metadata) => {
+      applyFrame(metadata.mediaTime);
+      if (!cancelled) {
+        frameRequestId = video.requestVideoFrameCallback(onVideoFrame);
       }
     };
-    const onPlay = () => {
-      void mirror.play().catch(() => {});
-    };
-    const onPause = () => mirror.pause();
-    const onSeeked = () => {
-      try {
-        mirror.currentTime = main.currentTime;
-      } catch {
-        // ignore
-      }
-    };
+    const applyCurrentFrame = () => applyFrame();
 
-    main.addEventListener("timeupdate", sync);
-    main.addEventListener("play", onPlay);
-    main.addEventListener("pause", onPause);
-    main.addEventListener("seeked", onSeeked);
-    sync();
+    applyFrame();
+    video.addEventListener("loadeddata", applyCurrentFrame);
+    video.addEventListener("seeked", applyCurrentFrame);
+    if (typeof video.requestVideoFrameCallback === "function") {
+      frameRequestId = video.requestVideoFrameCallback(onVideoFrame);
+    } else {
+      video.addEventListener("timeupdate", applyCurrentFrame);
+    }
     return () => {
-      main.removeEventListener("timeupdate", sync);
-      main.removeEventListener("play", onPlay);
-      main.removeEventListener("pause", onPause);
-      main.removeEventListener("seeked", onSeeked);
+      cancelled = true;
+      if (frameRequestId != null) {
+        video.cancelVideoFrameCallback(frameRequestId);
+      }
+      video.removeEventListener("loadeddata", applyCurrentFrame);
+      video.removeEventListener("seeked", applyCurrentFrame);
+      video.removeEventListener("timeupdate", applyCurrentFrame);
     };
-  }, [videoRef, needsMirror, playbackUrl]);
+  }, [
+    cameraBaseCropWidth,
+    cameraStartSeconds,
+    faceRect,
+    frameSyncedCamera,
+    orderedCameraKeyframes,
+    safeZoom,
+    videoRef,
+  ]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    const canvas = faceCanvasRef.current;
+    if (!video || !canvas || !showsFacePanel) return;
+
+    let cancelled = false;
+    let frameRequestId: number | null = null;
+    let animationFrameId: number | null = null;
+    const targetAspect = layout === "facecam_pip" ? 1 : 9 / (16 * 0.34);
+
+    const draw = () => {
+      if (
+        cancelled ||
+        video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+        video.videoWidth <= 0 ||
+        video.videoHeight <= 0
+      ) {
+        return;
+      }
+      const bounds = canvas.getBoundingClientRect();
+      if (bounds.width <= 0 || bounds.height <= 0) return;
+
+      const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+      const width = Math.max(2, Math.round(bounds.width * pixelRatio));
+      const height = Math.max(2, Math.round(bounds.height * pixelRatio));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+
+      const crop = coverCropAroundFocus({
+        region: facePanelCropRef.current,
+        focus: facePanelFocusRef.current,
+        sourceAspect: video.videoWidth / video.videoHeight,
+        targetAspect,
+      });
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = "high";
+      try {
+        context.drawImage(
+          video,
+          crop.x * video.videoWidth,
+          crop.y * video.videoHeight,
+          crop.width * video.videoWidth,
+          crop.height * video.videoHeight,
+          0,
+          0,
+          width,
+          height
+        );
+      } catch {
+        // Keep the poster visible during a seek or decoder transition.
+      }
+    };
+    drawFacePanelRef.current = draw;
+
+    const schedule = () => {
+      if (cancelled || video.paused || video.ended) return;
+      if (typeof video.requestVideoFrameCallback === "function") {
+        if (frameRequestId != null) return;
+        frameRequestId = video.requestVideoFrameCallback(() => {
+          frameRequestId = null;
+          draw();
+          schedule();
+        });
+      } else if (animationFrameId == null) {
+        animationFrameId = window.requestAnimationFrame(() => {
+          animationFrameId = null;
+          draw();
+          schedule();
+        });
+      }
+    };
+    const drawAndSchedule = () => {
+      draw();
+      schedule();
+    };
+
+    const resizeObserver = new ResizeObserver(draw);
+    resizeObserver.observe(canvas);
+    video.addEventListener("loadedmetadata", drawAndSchedule);
+    video.addEventListener("loadeddata", drawAndSchedule);
+    video.addEventListener("canplay", drawAndSchedule);
+    video.addEventListener("seeked", drawAndSchedule);
+    video.addEventListener("timeupdate", draw);
+    video.addEventListener("play", drawAndSchedule);
+    video.addEventListener("pause", draw);
+    drawAndSchedule();
+
+    return () => {
+      cancelled = true;
+      if (drawFacePanelRef.current === draw) drawFacePanelRef.current = null;
+      if (frameRequestId != null) {
+        video.cancelVideoFrameCallback(frameRequestId);
+      }
+      if (animationFrameId != null) {
+        window.cancelAnimationFrame(animationFrameId);
+      }
+      resizeObserver.disconnect();
+      video.removeEventListener("loadedmetadata", drawAndSchedule);
+      video.removeEventListener("loadeddata", drawAndSchedule);
+      video.removeEventListener("canplay", drawAndSchedule);
+      video.removeEventListener("seeked", drawAndSchedule);
+      video.removeEventListener("timeupdate", draw);
+      video.removeEventListener("play", drawAndSchedule);
+      video.removeEventListener("pause", draw);
+    };
+  }, [layout, playbackUrl, showsFacePanel, videoRef]);
+
+  useEffect(() => {
+    drawFacePanelRef.current?.();
+  }, [effectiveFacecamRect, faceRect]);
 
   const primarySlot =
     layout === "facecam_top_gameplay_bottom"
-      ? "inset-x-0 bottom-0 top-[38%]"
+      ? ""
       : layout === "facecam_bottom_gameplay_top"
-        ? "inset-x-0 bottom-[38%] top-0"
+        ? ""
         : "inset-0";
+
+  const primarySlotStyle: CSSProperties | undefined =
+    layout === "facecam_top_gameplay_bottom"
+      ? { inset: "34% 0 0" }
+      : layout === "facecam_bottom_gameplay_top"
+        ? { inset: "0 0 34%" }
+        : undefined;
 
   const primaryVideoClass =
     layout === "gameplay_full"
-      ? "h-full w-full scale-[1.35] object-cover"
-      : "h-full w-full object-cover";
+      ? "block h-full w-full scale-[1.35] object-cover"
+      : "block h-full w-full object-cover";
 
   const mirrorSlot =
     layout === "facecam_top_gameplay_bottom"
-      ? "inset-x-0 top-0 h-[38%]"
+      ? ""
       : layout === "facecam_bottom_gameplay_top"
-        ? "inset-x-0 bottom-0 h-[38%]"
+        ? ""
         : layout === "facecam_pip"
           ? "right-[4%] top-[8%] w-[34%] rounded-md border-2 border-white/90 shadow-lg"
           : layout === "subject_aware_crop"
             ? "inset-0"
             : "hidden";
 
-  const mirrorVideoClass =
-    "h-full w-full scale-[1.85] object-cover transition-[object-position] duration-500 ease-out motion-reduce:transition-none";
+  const mirrorSlotStyle: CSSProperties | undefined =
+    layout === "facecam_top_gameplay_bottom"
+      ? { inset: "0 0 auto", height: "34%" }
+      : layout === "facecam_bottom_gameplay_top"
+        ? { inset: "auto 0 0", height: "34%" }
+        : layout === "facecam_pip"
+          ? { aspectRatio: "1 / 1" }
+          : undefined;
 
   return (
     <div
@@ -326,21 +513,25 @@ export function LookVideoStage({
 
       <div
         className={cn(
-          "pointer-events-none absolute overflow-hidden transition-all duration-150",
-          needsMirror ? mirrorSlot : "hidden"
+          "pointer-events-none absolute z-[2] overflow-hidden bg-[#111711] transition-all duration-150",
+          showsFacePanel ? mirrorSlot : "hidden"
         )}
-        style={
-          layout === "facecam_pip" ? { aspectRatio: "1 / 1" } : undefined
-        }
+        style={mirrorSlotStyle}
       >
-        <video
-          ref={mirrorRef}
-          src={needsMirror ? playbackUrl ?? undefined : undefined}
-          className={mirrorVideoClass}
-          style={{ objectPosition: facePos }}
-          muted
-          playsInline
-          preload={preload}
+        {posterUrl ? (
+          <div
+            className="absolute inset-0 bg-cover bg-center"
+            style={{
+              backgroundImage: `url(${posterUrl})`,
+              backgroundPosition: facePos,
+            }}
+            aria-hidden="true"
+          />
+        ) : null}
+        <canvas
+          ref={faceCanvasRef}
+          className="absolute inset-0 h-full w-full"
+          aria-hidden="true"
         />
       </div>
 
@@ -358,6 +549,7 @@ export function LookVideoStage({
             ? "z-[1] shadow-[0_0_0_999px_rgba(0,0,0,0.55)]"
             : "z-[1]"
         )}
+        style={primarySlotStyle}
       >
         {playbackUrl ? (
           <video
@@ -366,11 +558,16 @@ export function LookVideoStage({
             poster={posterUrl ?? undefined}
             className={cn(
               primaryVideoClass,
-              "transition-[object-position,transform] duration-500 ease-out motion-reduce:transition-none"
+              frameSyncedCamera
+                ? "transition-none"
+                : "transition-[object-position,transform] duration-150 ease-out motion-reduce:transition-none"
             )}
             style={{
               objectPosition:
-                layout === "subject_aware_crop" ||
+                layout === "facecam_top_gameplay_bottom" ||
+                layout === "facecam_bottom_gameplay_top"
+                  ? stackedGameplayPosition
+                  : layout === "subject_aware_crop" ||
                 layout === "center_crop" ||
                 layout === "auto" ||
                 layout === "gameplay_full"
@@ -542,11 +739,16 @@ function PreviewMedia({
         <div className="pointer-events-none absolute inset-0 z-10 overflow-hidden">
           <div style={captionStyles.container}>
             <p
-              key={captionCue.id}
+              key={`${captionCue.id}:${captionAppearance.animation}:${captionAppearance.karaokeEnabled}:${captionAppearance.highlightColor}`}
               style={captionStyles.text}
               className={cn(
                 "caption-preview-text whitespace-pre-line break-words",
-                captionAnimationClass(captionAppearance.animation)
+                captionAnimationClass(
+                  effectiveCaptionAnimation(
+                    captionCue,
+                    captionAppearance.animation
+                  )
+                )
               )}
             >
               <CaptionCueText

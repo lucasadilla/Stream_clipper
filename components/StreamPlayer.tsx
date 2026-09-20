@@ -18,8 +18,11 @@ interface StreamPlayerProps {
   streamPageUrl?: string | null;
   recordedSeconds?: number;
   preferLocalVideo?: boolean;
+  initialTime?: number;
+  posterUrl?: string | null;
   onTimeUpdate?: (time: number) => void;
   onDurationChange?: (duration: number) => void;
+  onFrameReady?: () => void;
   fillContainer?: boolean;
 }
 
@@ -33,8 +36,11 @@ export const StreamPlayer = forwardRef<StreamPlayerHandle, StreamPlayerProps>(
       streamPageUrl,
       recordedSeconds = 0,
       preferLocalVideo = false,
+      initialTime = 0,
+      posterUrl,
       onTimeUpdate,
       onDurationChange,
+      onFrameReady,
       fillContainer,
     },
     ref
@@ -51,8 +57,10 @@ export const StreamPlayer = forwardRef<StreamPlayerHandle, StreamPlayerProps>(
         <YouTubePlayer
           ref={ref}
           videoId={sourceId}
+          initialTime={initialTime}
           onTimeUpdate={onTimeUpdate}
           onDurationChange={onDurationChange}
+          onFrameReady={onFrameReady}
           fillContainer={fillContainer}
         />
       );
@@ -65,8 +73,11 @@ export const StreamPlayer = forwardRef<StreamPlayerHandle, StreamPlayerProps>(
         <LocalVideoPlayer
           ref={ref}
           src={playbackVideoUrl}
+          initialTime={initialTime}
+          posterUrl={posterUrl}
           onTimeUpdate={onTimeUpdate}
           onDurationChange={onDurationChange}
+          onFrameReady={onFrameReady}
           onError={() => setLocalFailed(true)}
           fillContainer={fillContainer}
         />
@@ -94,6 +105,7 @@ export const StreamPlayer = forwardRef<StreamPlayerHandle, StreamPlayerProps>(
           channel={resolvedEmbed.kickChannel}
           onTimeUpdate={onTimeUpdate}
           onDurationChange={onDurationChange}
+          onFrameReady={onFrameReady}
           fillContainer={fillContainer}
         />
       );
@@ -111,6 +123,8 @@ export const StreamPlayer = forwardRef<StreamPlayerHandle, StreamPlayerProps>(
           }
           onTimeUpdate={onTimeUpdate}
           onDurationChange={onDurationChange}
+          onFrameReady={onFrameReady}
+          initialTime={initialTime}
           fillContainer={fillContainer}
         />
       );

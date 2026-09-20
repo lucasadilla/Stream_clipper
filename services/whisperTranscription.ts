@@ -1,7 +1,11 @@
 import fs from "fs";
 import path from "path";
 import { toFile } from "openai";
-import type { TranscriptSegment } from "@/services/transcriptService";
+import type {
+  TranscriptSegment,
+  TranscriptSegmentWithMeta,
+  TranscriptWord,
+} from "@/lib/transcriptionTypes";
 import { TRANSCRIPT_MERGE_MAX_SECONDS } from "@/lib/aiCostConstants";
 import { distributeTextAcrossSpan } from "@/lib/transcriptTiming";
 import {
@@ -27,17 +31,17 @@ interface WhisperWord {
   start: number;
   end: number;
   word: string;
+  confidence?: number;
 }
 
 interface WhisperVerboseResponse {
   text?: string;
   segments?: Array<{ start: number; end: number; text: string }>;
   words?: WhisperWord[];
-}
-
-export interface TranscriptSegmentWithMeta extends TranscriptSegment {
-  estimatedTiming?: boolean;
-  words?: Array<{ start: number; end: number; word: string }>;
+  rawText?: string;
+  provider?: "openai" | "openrouter";
+  model?: string;
+  timingModel?: string;
 }
 
 interface OpenRouterSttResponse {
@@ -51,6 +55,12 @@ export interface WhisperTranscriptionOptions {
   prompt?: string;
   /** ISO-639-1 language. Supplying it improves accuracy and latency. */
   language?: string;
+  /** Exact names and terminology expected in this audio. */
+  keyterms?: string[];
+  /** Internal provider override used by selected-clip refinement. */
+  providerOrder?: WhisperProvider[];
+  /** Override the optional text-quality model; null explicitly disables it. */
+  qualityModel?: string | null;
 }
 
 const WHISPER_RETRIES = 3;
@@ -122,6 +132,10 @@ async function transcribeViaOpenRouter(
       text: data.text,
       segments: data.segments,
       words: data.words,
+      rawText: data.text,
+      provider: "openrouter",
+      model,
+      timingModel: model,
     };
   }
 
@@ -160,7 +174,13 @@ async function transcribeViaOpenRouter(
   }
 
   const data = (await plain.json()) as OpenRouterSttResponse;
-  return { text: data.text };
+  return {
+    text: data.text,
+    rawText: data.text,
+    provider: "openrouter",
+    model,
+    timingModel: model,
+  };
 }
 
 async function transcribeViaOpenAiDirect(
@@ -170,39 +190,66 @@ async function transcribeViaOpenAiDirect(
   const client = getOpenAiDirectClient();
   const audioBuffer = await fs.promises.readFile(audioPath);
   const language = options.language ?? getTranscriptionLanguage();
-  const prompt = options.prompt?.trim().slice(-800) || undefined;
+  const prompt = options.prompt?.trim().slice(-1_500) || undefined;
+  const timingModel = getOpenAiWhisperModel();
 
   const timingFile = await toFile(audioBuffer, path.basename(audioPath), {
     type: "audio/wav",
   });
   const timing = (await client.audio.transcriptions.create({
     file: timingFile,
-    model: getOpenAiWhisperModel(),
+    model: timingModel,
     response_format: "verbose_json",
     timestamp_granularities: ["word", "segment"],
     temperature: 0,
     ...(language ? { language } : {}),
     ...(prompt ? { prompt } : {}),
   })) as WhisperVerboseResponse;
+  timing.rawText = timing.text;
+  timing.provider = "openai";
+  timing.model = timingModel;
+  timing.timingModel = timingModel;
 
   // GPT-4o Transcribe can improve text accuracy. Run only after the timing pass
   // succeeds so a failed timing request does not leave a stray quality rejection.
-  const qualityModel = getOpenAiTranscriptionQualityModel();
+  const qualityModel =
+    options.qualityModel === undefined
+      ? getOpenAiTranscriptionQualityModel()
+      : options.qualityModel;
   if (!qualityModel) return timing;
 
   try {
     const qualityFile = await toFile(audioBuffer, path.basename(audioPath), {
       type: "audio/wav",
     });
-    const quality = (await client.audio.transcriptions.create({
+    const latestContextModel = /^gpt-transcribe(?:$|-)/i.test(qualityModel);
+    const keywords = (options.keyterms ?? [])
+      .map((term) => term.replace(/[<>\r\n]/g, " ").replace(/\s+/g, " ").trim())
+      .filter(Boolean)
+      .slice(0, 100);
+    const qualityParams = {
       file: qualityFile,
       model: qualityModel,
       response_format: "json",
       temperature: 0,
-      ...(language ? { language } : {}),
+      ...(language && !latestContextModel ? { language } : {}),
       ...(prompt ? { prompt } : {}),
-    })) as { text?: string };
-    return reconcileAccurateTextWithTimings(timing, quality.text);
+    };
+    const extraContext = latestContextModel
+      ? {
+          ...(language ? { languages: [language] } : {}),
+          ...(keywords.length > 0 ? { keywords } : {}),
+        }
+      : null;
+    const quality = (await client.audio.transcriptions.create(
+      qualityParams as Parameters<typeof client.audio.transcriptions.create>[0],
+      extraContext
+        ? ({
+            body: { ...qualityParams, ...extraContext },
+          } as Parameters<typeof client.audio.transcriptions.create>[1])
+        : undefined
+    )) as { text?: string };
+    return reconcileAccurateTextWithTimings(timing, quality.text, qualityModel);
   } catch (error) {
     console.warn(
       "[whisper] quality text pass failed; using timestamped Whisper output:",
@@ -349,7 +396,8 @@ function joinWordTokens(tokens: string[]): string {
 
 function reconcileAccurateTextWithTimings(
   timing: WhisperVerboseResponse,
-  accurateText: string | undefined
+  accurateText: string | undefined,
+  qualityModel: string
 ): WhisperVerboseResponse {
   const text = accurateText?.trim();
   const originalWords = timing.words ?? [];
@@ -382,6 +430,10 @@ function reconcileAccurateTextWithTimings(
     text,
     words: aligned.words,
     segments: segments.length > 0 ? segments : timing.segments,
+    rawText: timing.text,
+    provider: "openai",
+    model: qualityModel,
+    timingModel: timing.timingModel ?? getOpenAiWhisperModel(),
   };
 }
 
@@ -391,7 +443,7 @@ export async function transcribeWhisperAudio(
   timeOffsetSeconds: number,
   options: WhisperTranscriptionOptions = {}
 ): Promise<TranscriptSegmentWithMeta[]> {
-  const providers = getWhisperProviderOrder();
+  const providers = options.providerOrder ?? getWhisperProviderOrder();
   if (providers.length === 0) {
     throw new Error("Set OPENROUTER_API_KEY or OPENAI_API_KEY for Whisper");
   }
@@ -462,7 +514,8 @@ export async function transcribeWhisperAudio(
     return attachWordsToSegments(
       segments,
       rawWords.filter((word) => isValidCaptionText(word.word)),
-      timeOffsetSeconds
+      timeOffsetSeconds,
+      response
     );
   }
 
@@ -473,27 +526,45 @@ export async function transcribeWhisperAudio(
   const probe = await probeMedia(audioPath);
   const duration = Math.max(probe.durationSeconds, 1);
 
-  return distributePlaintextAcrossChunk(text, timeOffsetSeconds, duration);
+  return distributePlaintextAcrossChunk(
+    text,
+    timeOffsetSeconds,
+    duration,
+    response
+  );
 }
 
 function attachWordsToSegments(
   segments: TranscriptSegment[],
   words: WhisperWord[],
-  timeOffsetSeconds: number
+  timeOffsetSeconds: number,
+  response: WhisperVerboseResponse
 ): TranscriptSegmentWithMeta[] {
   if (words.length === 0) {
-    return segments.map((s) => ({ ...s, estimatedTiming: false }));
+    return segments.map((s) => ({
+      ...s,
+      estimatedTiming: false,
+      rawText: response.rawText,
+      provider: response.provider,
+      model: response.model,
+      timingModel: response.timingModel,
+    }));
   }
 
-  const absWords = words.map((w) => ({
+  const absWords: TranscriptWord[] = words.map((w) => ({
     start: timeOffsetSeconds + w.start,
     end: timeOffsetSeconds + w.end,
     word: w.word,
+    ...(typeof w.confidence === "number" ? { confidence: w.confidence } : {}),
   }));
 
   return segments.map((seg) => ({
     ...seg,
     estimatedTiming: false,
+    rawText: response.rawText,
+    provider: response.provider,
+    model: response.model,
+    timingModel: response.timingModel,
     words: absWords.filter(
       (w) => w.start >= seg.startTimeSeconds && w.start < seg.endTimeSeconds
     ),
@@ -503,7 +574,8 @@ function attachWordsToSegments(
 function distributePlaintextAcrossChunk(
   text: string,
   timeOffsetSeconds: number,
-  audioDurationSeconds: number
+  audioDurationSeconds: number,
+  response: WhisperVerboseResponse
 ): TranscriptSegmentWithMeta[] {
   return distributeTextAcrossSpan(
     text,
@@ -514,6 +586,10 @@ function distributePlaintextAcrossChunk(
     endTimeSeconds: slice.endTimeSeconds,
     text: slice.text,
     estimatedTiming: true,
+    rawText: response.rawText,
+    provider: response.provider,
+    model: response.model,
+    timingModel: response.timingModel,
   }));
 }
 

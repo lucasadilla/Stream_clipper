@@ -11,7 +11,7 @@ import { AgentClipEditor } from "@/components/agent/AgentClipEditor";
 import { AgentClipStudioModal } from "@/components/agent/AgentClipStudioModal";
 import { fetchJson } from "@/lib/apiClient";
 import { formatSeconds } from "@/lib/time";
-import { clipDownloadUrl, clipThumbnailApiUrl } from "@/lib/downloadUrls";
+import { clipThumbnailApiUrl } from "@/lib/downloadUrls";
 import {
   readCaptionAppearancePreference,
   writeCaptionAppearancePreference,
@@ -41,6 +41,7 @@ import {
   LIVE_NOW_ROLL_SECONDS,
   LIVE_NOW_SUGGESTION_CAP,
   readAgentWizardState,
+  resolveAgentDisplayStep,
   type AgentWizardState,
 } from "@/lib/agentWizard";
 import {
@@ -54,6 +55,9 @@ import {
 import { triggerFileDownload } from "@/lib/clientDownload";
 import { LIVE_TICK_MS } from "@/lib/timelineConstants";
 import { mergeClipSuggestions } from "@/lib/clipSuggestionMerge";
+import type { SessionMode } from "@/lib/sessionMode";
+import { OperationProgress } from "@/components/ui/operation-progress";
+import { renderClip } from "@/lib/clipActions";
 
 interface AgentSessionData {
   id: string;
@@ -88,6 +92,8 @@ const VOD_SUGGEST_ROLL_SECONDS = 180;
 
 interface AgentWorkspaceProps {
   sessionId: string;
+  modeSwitching?: boolean;
+  onModeChange?: (mode: SessionMode) => void;
 }
 
 function withThumbnails(
@@ -100,7 +106,11 @@ function withThumbnails(
   }));
 }
 
-export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
+export function AgentWorkspace({
+  sessionId,
+  modeSwitching,
+  onModeChange,
+}: AgentWorkspaceProps) {
   const router = useRouter();
   const [session, setSession] = useState<AgentSessionData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -112,15 +122,17 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   );
   const [suggestionError, setSuggestionError] = useState<string | null>(null);
   const [transcribedSeconds, setTranscribedSeconds] = useState(0);
+  const [recordedSecondsHint, setRecordedSecondsHint] = useState(0);
   const [searchableChunks, setSearchableChunks] = useState(0);
   const [clips, setClips] = useState<ClipSuggestionData[]>([]);
   const [wizard, setWizard] = useState<AgentWizardState>({
     ...DEFAULT_AGENT_WIZARD_STATE,
   });
   const [suggesting, setSuggesting] = useState(false);
-  const [findingElapsedSec, setFindingElapsedSec] = useState(0);
   const [getMoreLoading, setGetMoreLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
+  const [exportStage, setExportStage] = useState("queued");
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportDoneUrl, setExportDoneUrl] = useState<string | null>(null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
@@ -138,27 +150,42 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   const suggestStarted = useRef(false);
   const rollingInFlight = useRef(false);
   const liveTickInFlight = useRef(false);
+  const wizardHydrated = useRef(false);
+  const wizardMutationSequence = useRef(0);
+  const wizardMutationQueue = useRef<Promise<void>>(Promise.resolve());
   const visibleClips = useMemo(
     () => clips.filter((clip) => clip.status !== "rejected"),
     [clips]
   );
 
   const persistWizard = useCallback(
-    async (patch: Partial<AgentWizardState>) => {
-      const { ok, data } = await fetchJson<{
-        wizard?: AgentWizardState;
-        error?: string;
-      }>(`/api/sessions/${sessionId}/agent-wizard`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
+    (patch: Partial<AgentWizardState>) => {
+      const mutationSequence = ++wizardMutationSequence.current;
+      setWizard((current) => ({ ...current, ...patch }));
+      const request = wizardMutationQueue.current.then(async () => {
+        const { ok, data } = await fetchJson<{
+          wizard?: AgentWizardState;
+          error?: string;
+        }>(`/api/sessions/${sessionId}/agent-wizard`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patch),
+        });
+        if (
+          ok &&
+          data.wizard &&
+          mutationSequence === wizardMutationSequence.current
+        ) {
+          setWizard(data.wizard);
+          return data.wizard;
+        }
+        return null;
       });
-      if (ok && data.wizard) {
-        setWizard(data.wizard);
-        return data.wizard;
-      }
-      setWizard((prev) => ({ ...prev, ...patch }));
-      return null;
+      wizardMutationQueue.current = request.then(
+        () => undefined,
+        () => undefined
+      );
+      return request;
     },
     [sessionId]
   );
@@ -172,12 +199,22 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       throw new Error(data.error ?? "Session not found");
     }
     setSession(data.session);
+    setRecordedSecondsHint((current) =>
+      Math.max(
+        current,
+        data.session?.videoDurationSeconds ?? 0,
+        data.session?.liveRecording?.recordedSeconds ?? 0,
+        ...(data.session?.sourceMedia ?? []).map(
+          (media) => media.durationSeconds ?? 0
+        )
+      )
+    );
     setClips((current) =>
       mergeClipSuggestions(current, data.session?.clipSuggestions ?? [])
     );
-    const nextWizard = readAgentWizardState(data.session.metadataJson);
-    setWizard(nextWizard);
-    if (nextWizard.selectedClipIds.length) {
+    if (!wizardHydrated.current) {
+      wizardHydrated.current = true;
+      setWizard(readAgentWizardState(data.session.metadataJson));
     }
   }, [sessionId]);
 
@@ -192,7 +229,11 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   useEffect(() => {
     if (sourceStarted.current) return;
     sourceStarted.current = true;
-    void fetchJson<{ error?: string }>(
+    void fetchJson<{
+      error?: string;
+      recordedSeconds?: number;
+      sourceMedia?: { durationSeconds?: number | null } | null;
+    }>(
       `/api/sessions/${sessionId}/download-source`,
       { method: "POST" }
     )
@@ -206,6 +247,13 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
           return;
         }
         setSourceError(null);
+        setRecordedSecondsHint((current) =>
+          Math.max(
+            current,
+            data.recordedSeconds ?? 0,
+            data.sourceMedia?.durationSeconds ?? 0
+          )
+        );
         void loadSession().catch(() => {});
       })
       .catch((err) => {
@@ -234,8 +282,8 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     // A completed local VOD has been probed from the actual file and should
     // beat stale platform/live-span metadata. Active streams still grow.
     if (!isLive && localDuration > 0) return localDuration;
-    return Math.max(localDuration, captured, metadataDuration, 0);
-  }, [isLive, session]);
+    return Math.max(localDuration, captured, metadataDuration, recordedSecondsHint, 0);
+  }, [isLive, recordedSecondsHint, session]);
 
   const playbackUrl = useMemo(() => {
     const media = session?.sourceMedia?.[0];
@@ -322,7 +370,22 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
         if (!ok) throw new Error(data.error ?? "Suggest failed");
         const nextClips = data.clips ?? [];
         setClips((current) => mergeClipSuggestions(current, nextClips));
-        if (data.wizard) setWizard(data.wizard);
+        if (data.wizard) {
+          const incomingWizard = data.wizard;
+          setWizard((current) => ({
+            ...current,
+            cadence: current.cadence ?? incomingWizard.cadence,
+            suggestRequested: incomingWizard.suggestRequested,
+            lastSuggestThroughSeconds: Math.max(
+              current.lastSuggestThroughSeconds,
+              incomingWizard.lastSuggestThroughSeconds
+            ),
+            step:
+              current.step === "transcribing" && incomingWizard.step === "pick"
+                ? "pick"
+                : current.step,
+          }));
+        }
         else {
           await persistWizard({
             step: "pick",
@@ -365,19 +428,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
       isActivelyLive,
     ]
   );
-
-  useEffect(() => {
-    if (!findingClips) {
-      setFindingElapsedSec(0);
-      return;
-    }
-    const started = Date.now();
-    setFindingElapsedSec(0);
-    const id = window.setInterval(() => {
-      setFindingElapsedSec(Math.max(0, Math.floor((Date.now() - started) / 1000)));
-    }, 1000);
-    return () => window.clearInterval(id);
-  }, [findingClips]);
 
   // Active streams always receive rolling suggestions. VODs use one batch.
   useEffect(() => {
@@ -445,7 +495,14 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
 
         setTranscriptionError(null);
         if (typeof data.transcribedThrough === "number") {
-          setTranscribedSeconds(data.transcribedThrough);
+          setTranscribedSeconds((current) =>
+            Math.max(current, data.transcribedThrough ?? 0)
+          );
+        }
+        if (typeof data.recordedSeconds === "number") {
+          setRecordedSecondsHint((current) =>
+            Math.max(current, data.recordedSeconds ?? 0)
+          );
         }
 
         // Agent transcription returns its readiness aggregate in the same response.
@@ -474,6 +531,55 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     transcriptionBehind,
     transcribedSeconds,
   ]);
+
+  // Observe committed transcript chunks while the longer POST request is still
+  // transcribing. This keeps time and percentage moving instead of updating in bursts.
+  useEffect(() => {
+    if (!session?.id) return;
+    let cancelled = false;
+    let inFlight = false;
+    const poll = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const { ok, data } = await fetchJson<{
+          recordedSeconds?: number;
+          transcribedSeconds?: number;
+          searchableChunks?: number;
+        }>(`/api/sessions/${sessionId}/transcribe`);
+        if (!cancelled && ok) {
+          setRecordedSecondsHint((current) =>
+            Math.max(current, data.recordedSeconds ?? 0)
+          );
+          setTranscribedSeconds((current) =>
+            Math.max(current, data.transcribedSeconds ?? 0)
+          );
+          setSearchableChunks((current) =>
+            Math.max(current, data.searchableChunks ?? 0)
+          );
+        }
+      } catch {
+        // The POST worker remains authoritative; the next read will catch up.
+      } finally {
+        inFlight = false;
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [session?.id, sessionId]);
+
+  // Refresh source state while an upload/download is becoming playable.
+  useEffect(() => {
+    if (!session?.id || playbackUrl) return;
+    const timer = window.setInterval(() => {
+      void loadSession().catch(() => {});
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [loadSession, playbackUrl, session?.id]);
 
   useEffect(() => {
     if (!wizard.cadence) return;
@@ -618,6 +724,11 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   const activeClipId =
     wizard.selectedClipIds[wizard.queueIndex] ?? null;
   const activeClip = clips.find((c) => c.id === activeClipId) ?? null;
+  const displayStep = resolveAgentDisplayStep({
+    step: wizard.step,
+    hasVisibleClips: visibleClips.length > 0,
+    hasActiveClip: Boolean(activeClip),
+  });
   const studioClip = studioClipId
     ? clips.find((c) => c.id === studioClipId) ?? null
     : null;
@@ -662,6 +773,8 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
     setExporting(true);
     setExportError(null);
     setExportDoneUrl(null);
+    setExportProgress(5);
+    setExportStage("queued");
     posthog.capture("agent_clip_export", {
       session_id: sessionId,
       clip_id: activeClip.id,
@@ -705,20 +818,26 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
         );
       }
 
-      const res = await fetch(`/api/clips/${activeClip.id}/render`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          includeCaptions: wizard.includeCaptions,
-          captionAppearance,
-          format: "vertical",
-          verticalLayout: selection,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Render failed");
+      const result = await renderClip(
+        activeClip.id,
+        "vertical",
+        wizard.includeCaptions,
+        captionAppearance,
+        undefined,
+        (update) => {
+          setExportProgress((current) => Math.max(current, update.progress));
+          setExportStage(
+            update.progress >= 94 && update.status !== "completed"
+              ? "quality_check"
+              : update.status
+          );
+        },
+        undefined,
+        undefined,
+        selection
+      );
 
-      const url = data.downloadUrl ?? clipDownloadUrl(activeClip.id);
+      const url = result.downloadUrl;
       setExportDoneUrl(url);
       setClips((prev) =>
         prev.map((c) =>
@@ -848,9 +967,22 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   if (loading) {
     return (
       <div className="editor-shell agent-shell flex min-h-screen flex-col bg-[#07090b]">
-        <EditorHeader title="Agent" mode="agent" />
-        <div className="flex-1 flex items-center justify-center">
-          <p className="text-[var(--color-muted)] animate-pulse">Loading…</p>
+        <EditorHeader
+          title="Agent"
+          mode="agent"
+          modeSwitching={modeSwitching}
+          onModeChange={onModeChange}
+        />
+        <div className="flex flex-1 items-center justify-center px-6">
+          <OperationProgress
+            title="Opening Agent Mode"
+            stages={[
+              "Loading the session…",
+              "Checking source media…",
+              "Restoring your clip workspace…",
+            ]}
+            className="max-w-sm"
+          />
         </div>
       </div>
     );
@@ -859,7 +991,12 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
   if (error || !session) {
     return (
       <div className="editor-shell agent-shell flex min-h-screen flex-col bg-[#07090b]">
-        <EditorHeader title="Agent" mode="agent" />
+        <EditorHeader
+          title="Agent"
+          mode="agent"
+          modeSwitching={modeSwitching}
+          onModeChange={onModeChange}
+        />
         <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6">
           <p className="text-[var(--color-danger)]">{error ?? "Session not found"}</p>
           <Link href="/" className="text-[var(--color-accent)] text-sm hover:underline">
@@ -885,9 +1022,11 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
         recordedSeconds={recordedSeconds}
         deleting={deleting}
         onDelete={handleDeleteSession}
+        modeSwitching={modeSwitching}
+        onModeChange={onModeChange}
       />
 
-      {isActivelyLive && unseenLiveClips > 0 && wizard.step !== "pick" && (
+      {isActivelyLive && unseenLiveClips > 0 && displayStep !== "pick" && (
         <button
           type="button"
           onClick={() => {
@@ -918,13 +1057,14 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
 
           {!(wizard.cadence === "after_stream" && !streamEnded) &&
             visibleClips.length === 0 &&
-            (wizard.step === "transcribing" || wizard.step === "pick") &&
+            (displayStep === "transcribing" || displayStep === "pick") &&
             (findingClips ||
+              awaitingSuggestRetry ||
               !transcriptReady ||
               Boolean(transcriptionError) ||
               Boolean(suggestionError) ||
               suggesting) &&
-            !(awaitingSuggestRetry && !transcriptionError && !suggestionError) && (
+            (
             <div className="mx-auto flex w-full max-w-lg flex-col justify-center gap-4 py-16">
               <TranscriptionProgressCard
                 transcribedSeconds={transcribedSeconds}
@@ -932,9 +1072,10 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                 progressPct={progressPct}
                 transcriptionError={sourceError ?? transcriptionError ?? suggestionError}
                 phase={
-                  findingClips || suggesting ? "finding_clips" : "transcribing"
+                  findingClips || suggesting || awaitingSuggestRetry
+                    ? "finding_clips"
+                    : "transcribing"
                 }
-                findingElapsedSec={findingElapsedSec}
               />
               {!suggesting && (transcriptionError || suggestionError) && (
                 <Button
@@ -953,7 +1094,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
             </div>
           )}
 
-          {wizard.step === "pick" &&
+          {displayStep === "pick" &&
             !findingClips &&
             !suggesting &&
             (transcriptReady ||
@@ -989,7 +1130,6 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                 }
                 getMoreLoading={getMoreLoading}
                 suggesting={suggesting}
-                findingElapsedSec={findingElapsedSec}
                 isLive={Boolean(isLive)}
                 onOpenAssistant={() => setShowFindChat(true)}
                 sessionId={sessionId}
@@ -1008,7 +1148,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
             </div>
           )}
 
-          {wizard.step === "look" && activeClip && (
+          {displayStep === "look" && activeClip && (
             <div className="mx-auto flex w-full max-w-lg flex-col items-center gap-4 py-16 text-center">
               <p className="text-sm text-[var(--color-muted)]">
                 Looks are applied automatically from face detection. Open a clip
@@ -1037,7 +1177,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
             </div>
           )}
 
-          {wizard.step === "edit" && activeClip && (
+          {displayStep === "edit" && activeClip && (
             <div className="mx-auto w-full max-w-4xl space-y-4">
               <AgentClipEditor
                 sessionId={sessionId}
@@ -1074,7 +1214,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
             </div>
           )}
 
-          {wizard.step === "export" && activeClip && (
+          {displayStep === "export" && activeClip && (
             <div className="mx-auto w-full max-w-lg space-y-4 rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-6">
               <h2 className="text-lg font-semibold">Export</h2>
               <p className="text-sm text-[var(--color-muted)]">
@@ -1090,6 +1230,24 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                 <p className="text-sm text-[var(--color-accent)]">
                   Render ready — download started.
                 </p>
+              )}
+              {exporting && (
+                <OperationProgress
+                  title={
+                    exportStage === "quality_check"
+                      ? "Reviewing export"
+                      : "Rendering your video"
+                  }
+                  detail={
+                    exportStage === "queued"
+                      ? "Waiting for the render worker…"
+                      : exportStage === "quality_check"
+                        ? "Checking framing, captions, and output quality…"
+                        : "Encoding the final high-quality video…"
+                  }
+                  progress={exportProgress > 0 ? exportProgress : null}
+                  resetKey={`${activeClip.id}:agent-export`}
+                />
               )}
               <div className="flex flex-wrap gap-2">
                 <Button
@@ -1117,7 +1275,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
             </div>
           )}
 
-          {wizard.step === "done" && (
+          {displayStep === "done" && (
             <div className="mx-auto flex max-w-lg flex-col items-center gap-4 py-16 text-center">
               <h2 className="text-xl font-semibold">All set</h2>
               <p className="text-sm text-[var(--color-muted)]">
@@ -1140,9 +1298,9 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
             </div>
           )}
 
-          {(showFindChat || wizard.step === "pick") && showFindChat && (
-            <div className="fixed bottom-5 right-5 z-40 flex max-h-[min(620px,calc(100vh-2.5rem))] w-[min(410px,calc(100vw-2.5rem))] flex-col overflow-hidden rounded-lg border border-[#2b3034] bg-[#0d0f12] shadow-[0_24px_80px_rgba(0,0,0,0.6)]">
-              <div className="flex items-center justify-between border-b border-white/[0.08] px-4 py-3">
+          {(showFindChat || displayStep === "pick") && showFindChat && (
+            <div className="fixed bottom-5 right-5 z-40 isolate flex max-h-[min(620px,calc(100vh-2.5rem))] w-[min(410px,calc(100vw-2.5rem))] flex-col overflow-hidden rounded-lg border border-[#3b4248] bg-[#0a0d0f] shadow-[0_28px_90px_rgba(0,0,0,0.92),0_0_0_1px_rgba(255,255,255,0.04)]">
+              <div className="flex shrink-0 items-center justify-between border-b border-[#30363c] bg-[#111519] px-4 py-3">
                 <div className="flex items-center gap-3">
                   <span className="grid h-8 w-8 place-items-center rounded-md bg-[#f0b75a] text-[#1b1203]">
                     <Sparkles className="h-4 w-4" aria-hidden="true" />
@@ -1165,13 +1323,13 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                   <X className="h-4 w-4" aria-hidden="true" />
                 </button>
               </div>
-              <div className="relative min-h-[220px] flex-1 overflow-hidden">
-                <ChatContainerRoot className="h-full px-3">
+              <div className="relative min-h-[220px] flex-1 overflow-hidden bg-[#0a0d0f]">
+                <ChatContainerRoot className="h-full bg-[#0a0d0f] px-3">
                   <ChatContainerContent className="space-y-4 py-4">
                     {turns.length === 0 && (
                       <Message>
                         <MessageAvatar src="" alt="Clipper" fallback="C" />
-                        <MessageContent className="bg-secondary text-sm text-secondary-foreground">
+                        <MessageContent className="border border-[#30363c] bg-[#181d21] text-sm text-[#f4f2eb]">
                           Describe a moment to add another clip to your list.
                         </MessageContent>
                       </Message>
@@ -1179,7 +1337,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                     {turns.map((turn) =>
                       turn.role === "user" ? (
                         <Message key={turn.id} className="justify-end">
-                          <MessageContent className="bg-primary text-primary-foreground">
+                          <MessageContent className="bg-[#95ff00] text-[#071000]">
                             {turn.text}
                           </MessageContent>
                         </Message>
@@ -1191,7 +1349,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                               "text-sm",
                               turn.error
                                 ? "border border-destructive/40 bg-[#1a0808] text-[#ffb4b4]"
-                                : "bg-secondary text-secondary-foreground"
+                                : "border border-[#30363c] bg-[#181d21] text-[#f4f2eb]"
                             )}
                           >
                             {turn.text}
@@ -1203,7 +1361,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                   </ChatContainerContent>
                 </ChatContainerRoot>
               </div>
-              <div className="border-t border-[var(--color-card-border)] p-3">
+              <div className="shrink-0 border-t border-[#30363c] bg-[#111519] p-3">
                 {turns.length === 0 && (
                   <div className="mb-3 flex flex-wrap gap-1.5">
                     {[
@@ -1215,7 +1373,7 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                         key={example}
                         type="button"
                         onClick={() => setPrompt(example)}
-                        className="border border-[var(--color-card-border)] px-2.5 py-1.5 text-left text-[11px] text-[var(--color-muted)] transition-colors hover:border-[var(--color-accent)]/60 hover:text-[var(--color-foreground)]"
+                        className="border border-[#343b41] bg-[#0a0d0f] px-2.5 py-1.5 text-left text-[11px] text-[#abb2b7] transition-colors hover:border-[var(--color-accent)]/60 hover:text-white"
                       >
                         {example}
                       </button>
@@ -1227,9 +1385,12 @@ export function AgentWorkspace({ sessionId }: AgentWorkspaceProps) {
                   onValueChange={setPrompt}
                   isLoading={sending}
                   onSubmit={() => void handleSend()}
-                  className="border-border bg-card"
+                  className="border-[#3b4248] bg-[#080a0c] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
                 >
-                  <PromptInputTextarea placeholder="Describe the clip…" />
+                  <PromptInputTextarea
+                    placeholder="Describe the clip…"
+                    className="text-[#f4f2eb] placeholder:text-[#737c82]"
+                  />
                   <PromptInputActions className="justify-end pt-1">
                     <PromptInputAction tooltip="Send">
                       <Button
@@ -1294,7 +1455,8 @@ function buildVerticalSelection(
     stacked: {
       ...base.stacked,
       facecamPosition: "top",
-      hideOriginalFacecam: presetId === "gaming" ? "blur" : "none",
+      facecamHeightRatio: presetId === "gaming" ? 0.34 : base.stacked.facecamHeightRatio,
+      hideOriginalFacecam: presetId === "gaming" ? "crop_out" : "none",
     },
     pip: {
       ...base.pip,
@@ -1320,82 +1482,37 @@ function TranscriptionProgressCard({
   progressPct,
   transcriptionError,
   phase = "transcribing",
-  findingElapsedSec = 0,
 }: {
   transcribedSeconds: number;
   recordedSeconds: number;
   progressPct: number;
   transcriptionError: string | null;
   phase?: "transcribing" | "finding_clips";
-  findingElapsedSec?: number;
 }) {
   const finding = phase === "finding_clips";
-  const tipIndex =
-    findingElapsedSec > 0
-      ? Math.floor(findingElapsedSec / 4) % FINDING_CLIP_TIPS.length
-      : 0;
-
   return (
     <div className="w-full space-y-3 border-y border-white/[0.09] py-4 text-left">
-      <div className="flex items-center justify-between gap-4">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <span
-            className={cn(
-              "h-2 w-2 shrink-0 rounded-full",
-              finding
-                ? "animate-pulse bg-[#f0b75a]"
-                : "animate-pulse bg-[#65d8c1]"
-            )}
-          />
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-white">
-              {finding ? "Finding the strongest moments" : "Preparing your video"}
-            </p>
-            <p className="mt-0.5 truncate text-xs text-[#90989a]">
-              {finding
-                ? FINDING_CLIP_TIPS[tipIndex]
-                : recordedSeconds > 0
-                  ? `${formatSeconds(transcribedSeconds)} of ${formatSeconds(recordedSeconds)} ready`
-                  : "Analyzing the available media"}
-            </p>
-          </div>
-        </div>
-        <span
-          className={cn(
-            "shrink-0 font-mono text-xs font-semibold tabular-nums",
-            finding ? "text-[#f0c879]" : "text-[#8ee9d5]"
-          )}
-        >
-          {finding ? `${findingElapsedSec}s` : `${progressPct}%`}
-        </span>
-      </div>
-
-      <div
-        className="h-1.5 overflow-hidden bg-white/[0.08]"
-        role="progressbar"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={finding ? undefined : progressPct}
-        aria-label={finding ? "Finding top clips" : "Transcription progress"}
-      >
-        {finding ? (
-          <div className="relative h-full w-full">
-            <div className="absolute inset-0 bg-[#f0b75a]/15" />
-            <div className="absolute inset-y-0 w-2/5 animate-[agent-indeterminate_1.35s_ease-in-out_infinite] bg-[#f0b75a]" />
-          </div>
-        ) : (
-          <div
-            className="h-full bg-[#65d8c1] transition-[width] duration-500 ease-out"
-            style={{
-              width: `${
-                recordedSeconds > 0
-                  ? progressPct
-                  : Math.min(8, transcribedSeconds > 0 ? 4 : 2)
-              }%`,
-            }}
-          />
-        )}
-      </div>
+      <OperationProgress
+        title={finding ? "Finding the strongest moments" : "Preparing your video"}
+        detail={
+          recordedSeconds > 0
+            ? `${formatSeconds(transcribedSeconds)} of ${formatSeconds(recordedSeconds)} ready`
+            : "Reading source media and waiting for the first transcript chunk…"
+        }
+        progress={finding || recordedSeconds <= 0 ? null : progressPct}
+        stages={
+          finding
+            ? FINDING_CLIP_TIPS
+            : recordedSeconds > 0
+              ? []
+              : [
+                  "Reading source media…",
+                  "Extracting the first audio window…",
+                  "Starting transcription…",
+                ]
+        }
+        resetKey={phase}
+      />
 
       {transcriptionError && (
         <p className="text-[11px] text-[var(--color-warning,#e6b84d)]">

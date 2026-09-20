@@ -6,10 +6,13 @@ import type { ClipSelection } from "@/components/LiveTimeline";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
 import type { CaptionCue } from "@/lib/captionTrack";
 import type { EditorState } from "@/lib/editorState";
+import type { ClipSuggestionData } from "@/components/ClipSuggestionCard";
+import type { PostRenderQualityReview } from "@/lib/postRenderCritic";
 
 export interface RenderProgressUpdate {
   progress: number;
   status: string;
+  stage?: string;
   errorMessage?: string | null;
 }
 
@@ -29,7 +32,7 @@ export async function saveClip(
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error ?? "Failed to create clip");
-  return data.clip as { id: string; title: string };
+  return data.clip as ClipSuggestionData;
 }
 
 export class RenderAbortedError extends Error {
@@ -52,7 +55,10 @@ async function pollRenderJob(
   jobId: string,
   onProgress?: (update: RenderProgressUpdate) => void,
   signal?: AbortSignal
-): Promise<{ downloadUrl: string }> {
+): Promise<{
+  downloadUrl: string;
+  qualityReview: PostRenderQualityReview | null;
+}> {
   const started = Date.now();
   const timeoutMs = 10 * 60 * 1000;
   let consecutiveErrors = 0;
@@ -68,8 +74,10 @@ async function pollRenderJob(
         job?: {
           status: string;
           progress: number;
+          stage?: string;
           errorMessage?: string | null;
           outputPath?: string | null;
+          qualityReview?: PostRenderQualityReview | null;
         };
         error?: string;
       };
@@ -84,11 +92,15 @@ async function pollRenderJob(
       onProgress?.({
         progress,
         status,
+        stage: data.job.stage,
         errorMessage: data.job.errorMessage,
       });
 
       if (status === "completed") {
-        return { downloadUrl: renderJobDownloadUrl(jobId) };
+        return {
+          downloadUrl: renderJobDownloadUrl(jobId),
+          qualityReview: data.job.qualityReview ?? null,
+        };
       }
       if (status === "failed") {
         throw new Error(data.job.errorMessage ?? "Render failed");
@@ -128,7 +140,7 @@ async function pollRenderJob(
 export async function renderClip(
   clipId: string,
   format: RenderFormat = "native",
-  includeCaptions = false,
+  includeCaptions = true,
   captionAppearance?: CaptionAppearance,
   captionCues?: CaptionCue[],
   onProgress?: (update: RenderProgressUpdate) => void,
@@ -177,6 +189,7 @@ export async function renderClip(
   return {
     jobId,
     downloadUrl: polled.downloadUrl ?? data.downloadUrl ?? clipDownloadUrl(clipId),
+    qualityReview: polled.qualityReview ?? null,
   };
 }
 
@@ -185,7 +198,7 @@ export async function saveAndRenderClip(
   selection: ClipSelection,
   title?: string,
   format: RenderFormat = "native",
-  includeCaptions = false,
+  includeCaptions = true,
   captionAppearance?: CaptionAppearance,
   onProgress?: (update: RenderProgressUpdate) => void
 ) {

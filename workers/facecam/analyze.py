@@ -23,6 +23,8 @@ TypeScript backend.
 from __future__ import annotations
 
 import json
+import math
+import subprocess
 import sys
 from typing import Any
 
@@ -53,6 +55,193 @@ def report_progress(percent: float) -> None:
         sys.stderr.flush()
     except Exception:
         pass
+
+
+def _rect_center(rect: dict[str, float]) -> tuple[float, float]:
+    return (rect["x"] + rect["width"] * 0.5, rect["y"] + rect["height"] * 0.5)
+
+
+def _aligned_face_patch(
+    gray,
+    rect: dict[str, float],
+    left_ratio: float,
+    right_ratio: float,
+    top_ratio: float,
+    bottom_ratio: float,
+    output_size: tuple[int, int],
+):
+    """Return a normalized, face-relative patch for visual motion.
+
+    Face boxes move between samples, so comparing full-frame pixels produces
+    false speech whenever the subject or camera moves. Face-relative crops make
+    the signal substantially more stable.
+    """
+    import cv2
+
+    height, width = gray.shape[:2]
+    left = int((rect["x"] + rect["width"] * left_ratio) * width)
+    right = int((rect["x"] + rect["width"] * right_ratio) * width)
+    top = int((rect["y"] + rect["height"] * top_ratio) * height)
+    bottom = int((rect["y"] + rect["height"] * bottom_ratio) * height)
+    left = max(0, min(width - 1, left))
+    right = max(left + 1, min(width, right))
+    top = max(0, min(height - 1, top))
+    bottom = max(top + 1, min(height, bottom))
+    patch = gray[top:bottom, left:right]
+    if patch.size == 0:
+        return None
+    patch = cv2.resize(patch, output_size, interpolation=cv2.INTER_AREA)
+    return cv2.equalizeHist(patch)
+
+
+def _attach_speaking_activity(frame, faces: list[dict[str, Any]], previous_faces):
+    """Add conservative 0..1 mouth-region motion to each detected face."""
+    import cv2
+    import numpy as np
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    current = []
+    claimed_previous: set[int] = set()
+    for face in faces:
+        rect = face["rect"]
+        center_x, center_y = _rect_center(rect)
+        best_index = None
+        best_distance = 1.0
+        for index, previous in enumerate(previous_faces):
+            if index in claimed_previous:
+                continue
+            previous_rect = previous["rect"]
+            previous_x, previous_y = _rect_center(previous_rect)
+            distance = ((center_x - previous_x) ** 2 + (center_y - previous_y) ** 2) ** 0.5
+            size_ratio = rect["width"] / max(1e-6, previous_rect["width"])
+            if 0.55 <= size_ratio <= 1.8 and distance < best_distance:
+                best_index = index
+                best_distance = distance
+
+        mouth_patch = _aligned_face_patch(
+            gray, rect, 0.14, 0.86, 0.54, 0.92, (48, 24)
+        )
+        control_patch = _aligned_face_patch(
+            gray, rect, 0.18, 0.82, 0.16, 0.48, (48, 20)
+        )
+        activity = 0.0
+        if (
+            best_index is not None
+            and best_distance <= 0.14
+            and mouth_patch is not None
+        ):
+            previous_mouth = previous_faces[best_index].get("mouthPatch")
+            previous_control = previous_faces[best_index].get("controlPatch")
+            if previous_mouth is not None and previous_mouth.shape == mouth_patch.shape:
+                mouth_delta = float(
+                    np.mean(cv2.absdiff(mouth_patch, previous_mouth)) / 255.0
+                )
+                control_delta = 0.0
+                if (
+                    control_patch is not None
+                    and previous_control is not None
+                    and previous_control.shape == control_patch.shape
+                ):
+                    control_delta = float(
+                        np.mean(cv2.absdiff(control_patch, previous_control)) / 255.0
+                    )
+                # Subtract shared upper-face motion so nods, camera shake, and
+                # hard lighting changes do not look like speech.
+                speech_delta = max(0.0, mouth_delta - control_delta * 0.52)
+                activity = clamp01((speech_delta - 0.012) * 9.0)
+            claimed_previous.add(best_index)
+        face["speakingActivity"] = round(activity, 4)
+        current.append(
+            {
+                "rect": rect,
+                "mouthPatch": mouth_patch,
+                "controlPatch": control_patch,
+            }
+        )
+    return current
+
+
+def _extract_audio_activity(
+    video_path: str,
+    start: float,
+    end: float,
+    sample_times: list[float],
+    ffmpeg_path: str,
+) -> list[float] | None:
+    """Decode a low-rate mono envelope aligned to the sampled video frames.
+
+    This is deliberately energy-based rather than a second ML model: visual
+    mouth motion identifies the person, while audio decides whether the motion
+    is actually synchronized with speech. Any FFmpeg/audio failure simply
+    falls back to visual-only tracking.
+    """
+    import numpy as np
+
+    duration = max(0.0, end - start)
+    if duration <= 0 or duration > 15 * 60 or not sample_times:
+        return None
+    sample_rate = 8000
+    try:
+        process = subprocess.run(
+            [
+                ffmpeg_path or "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{start:.3f}",
+                "-t",
+                f"{duration:.3f}",
+                "-i",
+                video_path,
+                "-map",
+                "0:a:0?",
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                str(sample_rate),
+                "-f",
+                "s16le",
+                "pipe:1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=min(90.0, max(15.0, duration * 0.35)),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if process.returncode != 0 or len(process.stdout) < sample_rate // 2:
+        return None
+
+    pcm = np.frombuffer(process.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    half_window = int(sample_rate * 0.12)
+    db_values: list[float] = []
+    for timestamp in sample_times:
+        center = int(max(0.0, timestamp - start) * sample_rate)
+        left = max(0, center - half_window)
+        right = min(len(pcm), center + half_window)
+        window = pcm[left:right]
+        if window.size < 32:
+            db_values.append(-96.0)
+            continue
+        rms = float(np.sqrt(np.mean(np.square(window), dtype=np.float64)))
+        db_values.append(20.0 * math.log10(max(1e-6, rms)))
+
+    if not db_values:
+        return None
+    floor = float(np.percentile(db_values, 20))
+    active = float(np.percentile(db_values, 85))
+    if active < -75.0:
+        return [0.0 for _ in db_values]
+    spread = max(7.0, active - floor)
+    activities: list[float] = []
+    for db_value in db_values:
+        relative = clamp01((db_value - floor - 2.5) / max(4.0, spread - 2.5))
+        absolute = clamp01((db_value + 52.0) / 28.0)
+        activities.append(round(clamp01(max(relative, absolute * 0.42)), 4))
+    return activities
 
 
 def _model_cache_dir():
@@ -238,6 +427,7 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
     analysis_width = int(payload.get("analysisWidth", 640))
     min_confidence = float(payload.get("minConfidence", 0.55))
     max_frames = int(payload.get("maxFrames", 600))
+    ffmpeg_path = str(payload.get("ffmpegPath", "ffmpeg"))
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -267,6 +457,8 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
     sampled_frames = 0
     previous_scene_gray = None
     previous_scene_hist = None
+    previous_faces = []
+    sample_times: list[float] = []
     last_scene_change = start - 10.0
     t = start
     try:
@@ -291,6 +483,7 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
             scene_hsv = cv2.cvtColor(scene_frame, cv2.COLOR_BGR2HSV)
             scene_hist = cv2.calcHist([scene_hsv], [0, 1], None, [24, 16], [0, 180, 0, 256])
             cv2.normalize(scene_hist, scene_hist)
+            hard_scene_change = False
             if previous_scene_gray is not None and previous_scene_hist is not None:
                 pixel_delta = float(cv2.absdiff(scene_gray, previous_scene_gray).mean() / 255.0)
                 histogram_delta = float(
@@ -310,6 +503,7 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
                         }
                     )
                     last_scene_change = t
+                    hard_scene_change = True
             previous_scene_gray = scene_gray
             previous_scene_hist = scene_hist
 
@@ -323,6 +517,13 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
                 else:
                     faces = []
 
+            if hard_scene_change:
+                previous_faces = []
+            previous_faces = _attach_speaking_activity(
+                frame, faces, previous_faces
+            )
+            sample_times.append(t)
+
             for face in faces:
                 detections.append(
                     {
@@ -334,6 +535,7 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
                             if "mouthOpenRatio" in face
                             else {}
                         ),
+                        "speakingActivity": face.get("speakingActivity", 0.0),
                     }
                 )
 
@@ -344,6 +546,19 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
     finally:
         detector.close()
         cap.release()
+
+    audio_activity = _extract_audio_activity(
+        video_path, start, end, sample_times, ffmpeg_path
+    )
+    if audio_activity is not None:
+        activity_by_time = {
+            round(timestamp, 3): activity
+            for timestamp, activity in zip(sample_times, audio_activity)
+        }
+        for detection in detections:
+            detection["audioActivity"] = activity_by_time.get(
+                round(float(detection["timestampSeconds"]), 3), 0.0
+            )
 
     if sampled_frames < 2:
         raise RuntimeError(
@@ -358,6 +573,7 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
         "sampledFrames": sampled_frames,
         "detections": detections,
         "sceneChanges": scene_changes,
+        "audioActivityAvailable": audio_activity is not None,
         "modelName": detector.name,
         "modelVersion": detector.version,
     }

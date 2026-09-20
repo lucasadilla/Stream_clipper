@@ -8,6 +8,7 @@ import { cn } from "@/lib/cn";
 import { BillingPlanButton } from "@/components/BillingPlanButton";
 import { PRICING_PLANS } from "@/lib/pricing";
 import type { BillingAccountSummary } from "@/services/billingService";
+import { OperationProgress } from "@/components/ui/operation-progress";
 
 export default function WelcomePage() {
   const router = useRouter();
@@ -79,8 +80,12 @@ export default function WelcomePage() {
 
   if (loading) {
     return (
-      <div className="flex min-h-[50vh] items-center justify-center text-sm text-[var(--color-muted)]">
-        Loading account…
+      <div className="flex min-h-[50vh] items-center justify-center px-6">
+        <OperationProgress
+          title="Loading account"
+          stages={["Checking your access…", "Loading plan details…"]}
+          className="max-w-sm"
+        />
       </div>
     );
   }

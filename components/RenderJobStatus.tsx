@@ -5,6 +5,8 @@ import { cn } from "@/lib/cn";
 import { renderJobDownloadUrl } from "@/lib/downloadUrls";
 import { triggerFileDownload } from "@/lib/clientDownload";
 import type { RenderJobLogEntry } from "@/lib/renderJobLogs";
+import type { PostRenderQualityReview } from "@/lib/postRenderCritic";
+import { OperationProgress } from "@/components/ui/operation-progress";
 
 interface RenderJob {
   id: string;
@@ -17,6 +19,7 @@ interface RenderJob {
   startedAt?: string | null;
   completedAt?: string | null;
   logs?: RenderJobLogEntry[] | null;
+  qualityReview?: PostRenderQualityReview | null;
 }
 
 interface RenderJobStatusProps {
@@ -86,6 +89,23 @@ export function RenderJobStatus({
 
   const logs = Array.isArray(job.logs) ? job.logs : [];
   const inFlight = job.status === "queued" || job.status === "processing";
+  const latestStep = logs[logs.length - 1]?.step;
+  const renderStage =
+    latestStep === "prepare_source"
+      ? "Preparing source media…"
+      : latestStep === "source_ready"
+        ? "Source ready; assembling the edit…"
+        : latestStep === "captions"
+          ? "Compositing captions…"
+          : latestStep === "cutting"
+            ? "Encoding the final video…"
+            : latestStep === "quality_check"
+              ? "Reviewing export quality…"
+              : latestStep === "finalizing"
+                ? "Finalizing the download…"
+                : job.status === "queued"
+                  ? "Waiting for an available render worker…"
+                  : "Rendering frames…";
 
   async function handleDownload() {
     setDownloading(true);
@@ -100,35 +120,66 @@ export function RenderJobStatus({
 
   return (
     <div className="rounded-lg border border-[var(--color-card-border)] bg-[var(--color-background)] p-3 text-xs">
-      <div className="flex items-center justify-between mb-2">
-        <span className={cn("font-medium capitalize", statusColor)}>
-          {job.status}
-          {typeof job.attempts === "number" && job.attempts > 0 && (
-            <span className="ml-1.5 font-normal text-[var(--color-muted)]">
-              · attempt {job.attempts}
-              {job.maxAttempts ? `/${job.maxAttempts}` : ""}
-            </span>
-          )}
-        </span>
-        <span>{Math.round(job.progress)}%</span>
-      </div>
       {inFlight && (
-        <div className="h-1.5 rounded-full bg-[var(--color-card)]">
-          <div
-            className="h-full rounded-full bg-[var(--color-accent)] transition-all"
-            style={{ width: `${Math.max(job.progress, job.status === "queued" ? 4 : 0)}%` }}
-          />
+        <OperationProgress
+          compact
+          title={job.status === "queued" ? "Render queued" : "Rendering video"}
+          detail={renderStage}
+          progress={job.progress > 0 ? job.progress : null}
+          startedAt={job.startedAt}
+          resetKey={jobId}
+        />
+      )}
+      {!inFlight && (
+        <div className="mb-2 flex items-center justify-between">
+          <span className={cn("font-medium capitalize", statusColor)}>
+            {job.status}
+          </span>
+          <span>{Math.round(job.progress)}%</span>
         </div>
       )}
+      {inFlight && typeof job.attempts === "number" && job.attempts > 0 && (
+        <p className="mt-1.5 text-[10px] text-[var(--color-muted)]">
+          Attempt {job.attempts}{job.maxAttempts ? `/${job.maxAttempts}` : ""}
+        </p>
+      )}
       {job.status === "completed" && (
-        <button
-          type="button"
-          onClick={handleDownload}
-          disabled={downloading}
-          className="mt-2 w-full py-2 rounded-lg bg-[var(--color-success)] text-white font-semibold text-sm disabled:opacity-50"
-        >
-          {downloading ? "Downloading…" : "Download Short"}
-        </button>
+        <>
+          <button
+            type="button"
+            onClick={handleDownload}
+            disabled={downloading}
+            className="mt-2 w-full py-2 rounded-lg bg-[var(--color-success)] text-white font-semibold text-sm disabled:opacity-50"
+          >
+            {downloading ? "Downloading…" : "Download Short"}
+          </button>
+          {job.qualityReview && (
+            <div className="mt-3 border-t border-[var(--color-card-border)] pt-3">
+              <div className="flex items-center justify-between gap-3">
+                <span className="font-semibold text-white">
+                  {job.qualityReview.reviewer === "ai_visual"
+                    ? "AI export critic"
+                    : "Export quality check"}
+                </span>
+                <span
+                  className={cn(
+                    "font-semibold tabular-nums",
+                    job.qualityReview.verdict === "pass"
+                      ? "text-[var(--color-success)]"
+                      : job.qualityReview.verdict === "fail"
+                        ? "text-[var(--color-danger)]"
+                        : "text-[var(--color-warning)]"
+                  )}
+                >
+                  {job.qualityReview.score}/100
+                </span>
+              </div>
+              <p className="mt-1 leading-relaxed text-[var(--color-muted)]">
+                {job.qualityReview.summary}
+              </p>
+            </div>
+          )}
+        </>
       )}
       {job.status === "failed" && job.errorMessage && (
         <p className="mt-1 text-[var(--color-danger)]">{job.errorMessage}</p>

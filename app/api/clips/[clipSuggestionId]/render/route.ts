@@ -18,12 +18,19 @@ import {
 } from "@/lib/editorState";
 import { parseVerticalLayoutRequest } from "@/lib/verticalLayout";
 import { saveVerticalLayoutConfiguration } from "@/services/verticalLayoutService";
+import type { CaptionCue } from "@/lib/captionTrack";
+import {
+  normalizeCaptionCueDirection,
+  type CaptionCueDirection,
+} from "@/lib/captionDirector";
 
 interface ClientCaptionCue {
+  id: string;
   startTimeSeconds: number;
   endTimeSeconds: number;
   text: string;
   words?: Array<{ start: number; end: number; word: string }>;
+  direction?: CaptionCueDirection;
 }
 
 function parseCaptionWords(
@@ -57,7 +64,7 @@ function parseCaptionCues(value: unknown): ClientCaptionCue[] | undefined {
   if (!Array.isArray(value)) return undefined;
   return value
     .slice(0, 500)
-    .flatMap((cue) => {
+    .flatMap((cue, index) => {
       if (!cue || typeof cue !== "object") return [];
       const raw = cue as Record<string, unknown>;
       const start = raw.startTimeSeconds;
@@ -74,12 +81,26 @@ function parseCaptionCues(value: unknown): ClientCaptionCue[] | undefined {
         return [];
       }
       const words = parseCaptionWords(raw.words);
+      const id =
+        typeof raw.id === "string" && raw.id.trim()
+          ? raw.id.trim().slice(0, 160)
+          : `client-${index}-${start.toFixed(3)}`;
+      const parsedCue: CaptionCue = {
+        id,
+        startTimeSeconds: start,
+        endTimeSeconds: end,
+        text: text.slice(0, 1000),
+        ...(words ? { words } : {}),
+      };
+      const direction = normalizeCaptionCueDirection(
+        raw.direction,
+        parsedCue
+      );
       return [
         {
-          startTimeSeconds: start,
-          endTimeSeconds: end,
-          text: text.slice(0, 1000),
+          ...parsedCue,
           ...(words ? { words } : {}),
+          ...(direction ? { direction } : {}),
         },
       ];
     });
@@ -95,7 +116,7 @@ export async function POST(
   try {
     const { clipSuggestionId } = await params;
     const body = await request.json().catch(() => ({}));
-    const includeCaptions = (body as { includeCaptions?: boolean }).includeCaptions ?? false;
+    const includeCaptions = (body as { includeCaptions?: boolean }).includeCaptions ?? true;
     const captionCues = parseCaptionCues(
       (body as { captionCues?: unknown }).captionCues
     );

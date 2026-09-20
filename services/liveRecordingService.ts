@@ -17,9 +17,10 @@ import { syncPreviewMp4 } from "@/services/previewVideoService";
 import {
   baseYtDlpArgs,
   getYtDlpDeploymentArgs,
-  getYtDlpVisitorData,
+  getYoutubeCaptureStrategies,
   resolveYtDlpInvocation,
   formatYtDlpUserError,
+  isYoutubePoTokenError,
   resolveStreamCaptureUrl,
   detectDownloadPlatform,
   isLiveFromStartUnavailable,
@@ -33,15 +34,13 @@ const liveFromStartBySession = new Map<string, boolean>();
 
 function liveFormat(): string {
   const configured = Number.parseInt(
-    process.env.SOURCE_MAX_HEIGHT?.trim() ?? "",
+    process.env.LIVE_CAPTURE_MAX_HEIGHT?.trim() ?? "",
     10
   );
   const height =
     Number.isFinite(configured) && configured >= 240
       ? configured
-      : process.env.NODE_ENV === "production"
-        ? 480
-        : 1080;
+      : 1080;
   // Prefer an explicit video+audio merge. Putting `best[ext=mp4]` first often
   // selects YouTube DASH video-only (e.g. f299) and leaves Whisper with no audio.
   return (
@@ -256,6 +255,7 @@ async function startLiveRecordingAttempt(
   streamSessionId: string,
   options?: {
     youtubeExtractorArgs?: string | null;
+    includeYoutubeCookies?: boolean;
     liveFromStart?: boolean;
     /** Override resolveStreamCaptureUrl (e.g. Kick channel edge fallback). */
     captureUrlOverride?: string;
@@ -293,7 +293,9 @@ async function startLiveRecordingAttempt(
 
   const args = [
     ...invocation.prefixArgs,
-    ...(await getYtDlpDeploymentArgs(platform)),
+    ...(await getYtDlpDeploymentArgs(platform, {
+      includeCookies: options?.includeYoutubeCookies,
+    })),
     ...(youtubeExtractorArgs === undefined
       ? baseYtDlpArgs({ platform, url: captureUrl })
       : baseYtDlpArgs({ platform, url: captureUrl, youtubeExtractorArgs })),
@@ -336,6 +338,8 @@ async function startLiveRecordingAttempt(
     startCompanionAudioForSession(streamSessionId, captureUrl, {
       isLive: true,
       liveFromStart,
+      youtubeExtractorArgs,
+      includeYoutubeCookies: options?.includeYoutubeCookies,
     });
   } catch {
     // non-fatal — transcription path will retry
@@ -398,6 +402,7 @@ async function startLiveRecordingAttempt(
         try {
           await startLiveRecordingAttempt(streamSessionId, {
             youtubeExtractorArgs,
+            includeYoutubeCookies: options?.includeYoutubeCookies,
             liveFromStart: false,
           });
           return;
@@ -477,8 +482,11 @@ async function startLiveRecordingAttempt(
 
 function isYouTubeAccessBlock(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /HTTP Error 429|Too Many Requests|confirm you(?:'|’)re not a bot|LOGIN_REQUIRED|sign in to confirm/i.test(
-    message
+  return (
+    isYoutubePoTokenError(message) ||
+    /HTTP Error 40[239]|Too Many Requests|confirm you(?:'|’)re not a bot|LOGIN_REQUIRED|sign in to confirm/i.test(
+      message
+    )
   );
 }
 
@@ -580,20 +588,26 @@ export async function startLiveRecording(streamSessionId: string) {
 
     if (!isYouTubeAccessBlock(initialError)) throw initialError;
 
-    const visitorData = await getYtDlpVisitorData();
-    if (!visitorData) throw initialError;
-
-    const strategies = [
-      `player_client=android_vr;player_skip=webpage,configs;visitor_data=${visitorData}`,
-      `player_client=mweb;player_skip=webpage,configs;visitor_data=${visitorData}`,
-      `player_client=default;player_skip=webpage,configs;visitor_data=${visitorData}`,
-    ];
+    const strategies = getYoutubeCaptureStrategies().slice(1);
     let lastError = initialError;
 
-    for (const extractorArgs of strategies) {
+    for (const strategy of strategies) {
+      const extractorArgs = strategy.extractorArgs;
       try {
+        try {
+          const { clearCompanionAudioState } = await import(
+            "@/services/companionAudioService"
+          );
+          clearCompanionAudioState(streamSessionId);
+        } catch {
+          // ignore
+        }
+        console.warn(
+          `[source] YouTube capture retry ${strategy.id} for ${streamSessionId}`
+        );
         return await startLiveRecordingAttempt(streamSessionId, {
           youtubeExtractorArgs: extractorArgs,
+          includeYoutubeCookies: strategy.includeCookies,
           liveFromStart,
         });
       } catch (error) {
@@ -609,6 +623,7 @@ export async function startLiveRecording(streamSessionId: string) {
           }
           return await startLiveRecordingAttempt(streamSessionId, {
             youtubeExtractorArgs: extractorArgs,
+            includeYoutubeCookies: strategy.includeCookies,
             liveFromStart: false,
           });
         }

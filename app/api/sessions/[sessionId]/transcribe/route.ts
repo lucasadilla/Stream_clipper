@@ -17,9 +17,30 @@ import {
   SessionAccessError,
 } from "@/services/sessionAccessService";
 import { getPostHogClient } from "@/lib/posthog-server";
+import { getTranscriptionProgress } from "@/services/transcriptService";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
+
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ sessionId: string }> }
+) {
+  try {
+    const { sessionId } = await params;
+    const billingAccountId = getBillingAccountIdFromRequest(request);
+    await ensureSessionBillingAccess(sessionId, billingAccountId);
+    return jsonResponse(await getTranscriptionProgress(sessionId));
+  } catch (error) {
+    if (error instanceof SessionAccessError) {
+      return errorResponse(error.message, error.status);
+    }
+    return errorResponse(
+      error instanceof Error ? error.message : "Could not read transcription progress",
+      500
+    );
+  }
+}
 
 export async function POST(
   request: NextRequest,

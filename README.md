@@ -6,7 +6,7 @@ AI-powered YouTube livestream clip generator. Paste a stream URL, detect hype mo
 
 - **Next.js 15** (App Router) + TypeScript + Tailwind CSS
 - **PostgreSQL** + **Prisma** + **pgvector** for embeddings
-- **OpenAI** for embeddings and AI chat
+- **Deepgram + OpenAI/OpenRouter** for live transcription, precise captions, embeddings, and AI editing
 - **YouTube Data API** for metadata and live chat
 - **FFmpeg** for video processing and Short rendering
 - Local file storage (designed for S3/R2 migration)
@@ -20,7 +20,7 @@ AI-powered YouTube livestream clip generator. Paste a stream URL, detect hype mo
 - FFmpeg and FFprobe on your PATH (or set `FFMPEG_PATH` / `FFPROBE_PATH`)
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) on your PATH (or set `YT_DLP_PATH`) — downloads video from the YouTube URL
 - YouTube Data API key
-- OpenAI API key
+- OpenAI or OpenRouter API key; Deepgram is recommended for low-latency live transcription
 
 ### 2. Setup
 
@@ -98,11 +98,18 @@ storage/          # Local uploads, frames, renders
 | `DATABASE_URL` | PostgreSQL connection string |
 | `OPENAI_API_KEY` | OpenAI API key (optional if using OpenRouter) |
 | `OPENROUTER_API_KEY` | OpenRouter key — routes chat/embeddings/Whisper through cheaper models |
+| `DEEPGRAM_API_KEY` | Deepgram key — enables fast Nova-3 transcription for live streams |
+| `TRANSCRIPTION_LIVE_PROVIDER` | `auto` (default), `deepgram`, or `whisper` |
+| `CLIP_TRANSCRIPT_REFINEMENT_MODEL` | High-accuracy model used when a clip is opened (default: `gpt-transcribe`; set `off` to disable) |
 | `OPENROUTER_CHAT_MODEL` | Chat model slug (default: `google/gemini-2.0-flash-001`) |
 | `YOUTUBE_API_KEY` | YouTube Data API v3 key |
 | `STORAGE_ROOT` | Local storage path (default: `./storage`) |
 | `FFMPEG_PATH` | FFmpeg binary (default: `ffmpeg`) |
 | `FFPROBE_PATH` | FFprobe binary (default: `ffprobe`) |
+| `SOURCE_MAX_HEIGHT` | Lightweight VOD analysis copy height (default: 480 in production) |
+| `LIVE_CAPTURE_MAX_HEIGHT` | Live recording height used as the export fallback (default: 1080) |
+| `RENDER_SOURCE_MAX_HEIGHT` | Maximum final-range source quality fetched from stream platforms (default: 2160) |
+| `RENDER_VERTICAL_HEIGHT` | Vertical master export height (default: 1920) |
 | `STRIPE_SECRET_KEY` | Stripe secret key — get from [Dashboard → API keys](https://dashboard.stripe.com/apikeys) |
 | `STRIPE_PUBLISHABLE_KEY` | Stripe publishable key (optional client-side use) |
 | `STRIPE_WEBHOOK_SECRET` | Webhook signing secret for `/api/stripe/webhook` |
@@ -187,7 +194,7 @@ the Netscape format and decodes it at runtime to `/tmp/youtube-cookies.txt` with
 owner-only permissions. Export fresh cookies when validation starts failing.
 Only process videos the signed-in account and creator are authorized to use.
 
-**Reliability notes:** Render jobs are queued in Postgres and processed by the same Next.js worker (survives request timeouts). Stale `processing` jobs are reclaimed after `WORKER_STALE_MS`. Plan `storageRetentionDays` is enforced by the worker; storage byte caps block new sessions when full. Live yt-dlp capture is still in-process and may need a re-attach after a deploy restart.
+**Reliability notes:** Render jobs are queued in Postgres and processed by the same Next.js worker (survives request timeouts). Stale `processing` jobs are reclaimed after `WORKER_STALE_MS`. Plan `storageRetentionDays` is enforced by the worker; storage byte caps block new sessions when full. Live yt-dlp capture is still in-process and may need a re-attach after a deploy restart. Autopilot uses that worker to check enabled YouTube, Twitch, and Kick channels every `STREAM_AUTOMATION_POLL_MS` (60 seconds by default), then captures, transcribes, renders, and publishes only to destinations explicitly enabled in account settings.
 
 If Railway can load the page but transcription/rendering do nothing, check `/health` first. Missing Stripe config blocks the paid app gates; missing FFmpeg/yt-dlp blocks media download, audio extraction, thumbnails, and renders.
 
@@ -196,7 +203,7 @@ If Railway can load the page but transcription/rendering do nothing, check `/hea
 - **YouTube player** is for preview and timestamp sync
 - **yt-dlp** downloads the video from your pasted URL for processing and rendering
 - **Rendering** requires the download to finish first
-- **Transcription** uses a stub provider by default — swap via `setTranscriptionProvider()` in `services/transcriptService.ts`
+- **Transcription** routes live chunks to Deepgram Nova-3 when configured, falls back to Whisper, and optionally refines selected clips with OpenAI while retaining word-level timing
 - **Facecam/visual** detection uses stub interfaces ready for real CV models
 - **Chat polling** is endpoint-based; migrate to a background worker for production
 

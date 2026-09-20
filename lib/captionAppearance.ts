@@ -9,7 +9,12 @@ export type CaptionCapitalization =
   | "uppercase"
   | "lowercase"
   | "title";
-export type CaptionAnimation = "none" | "fade" | "wordReveal";
+export type CaptionAnimation =
+  | "none"
+  | "fade"
+  | "wordReveal"
+  | "rise"
+  | "focus";
 
 export interface CaptionAppearance {
   fontFamily: string;
@@ -31,8 +36,8 @@ export interface CaptionAppearance {
   fontWeight: CaptionFontWeight;
   italic: boolean;
   capitalization: CaptionCapitalization;
+  /** Legacy fields retained so older saved presets continue to load. */
   karaokeEnabled: boolean;
-  /** Active karaoke word color. */
   highlightColor: string;
   /** Layout-stable motion only; never scales caption text. */
   animation: CaptionAnimation;
@@ -182,14 +187,27 @@ export function normalizeCaptionAppearance(
       normalizeHexColor(input?.highlightColor) ??
       DEFAULT_CAPTION_APPEARANCE.highlightColor,
     animation:
-      animation === "fade" || animation === "wordReveal"
+      animation === "none" ||
+      animation === "fade" ||
+      animation === "wordReveal" ||
+      animation === "rise" ||
+      animation === "focus"
         ? animation
-        : "none",
+        : DEFAULT_CAPTION_APPEARANCE.animation,
   };
 }
 
 export function captionAnimationClass(animation: CaptionAnimation): string {
-  return animation === "fade" ? "caption-anim-fade" : "";
+  switch (animation) {
+    case "fade":
+      return "caption-anim-fade";
+    case "rise":
+      return "caption-anim-rise";
+    case "focus":
+      return "caption-anim-focus";
+    default:
+      return "";
+  }
 }
 
 export function applyCaptionCapitalization(

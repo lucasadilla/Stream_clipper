@@ -10,6 +10,7 @@ import {
 import { PlatformExportResult } from "@/components/platform-export/PlatformExportResult";
 import type { ClipPayload, ExportPackPayload } from "@/components/platform-export/types";
 import type { PlatformKey, XQuoteLayout } from "@/lib/platforms/types";
+import { OperationProgress } from "@/components/ui/operation-progress";
 
 const PLATFORMS: PlatformCardDefinition[] = [
   { key: "youtube_shorts", short: "YT:S", name: "YouTube Shorts", detail: "Vertical cut, searchable title, description and pinned-comment hook.", outputs: [{ id: "vertical", label: "9:16" }] },
@@ -159,7 +160,12 @@ export function PlatformExportWorkspace({ clipId }: { clipId: string }) {
               {clip?.videoUrl ? (
                 <video controls preload="metadata" src={clip.videoUrl} className="max-h-[500px] w-full bg-black object-contain" />
               ) : (
-                <p className="font-mono text-[10px] uppercase text-[#5f695a]">Loading finished clip...</p>
+                <OperationProgress
+                  compact
+                  title="Loading finished clip"
+                  stages={["Fetching clip details…", "Preparing video playback…"]}
+                  className="max-w-xs px-4"
+                />
               )}
             </div>
           </div>

@@ -77,7 +77,8 @@ export function selectBrowserTrackedFace(
   detections: Detection[],
   videoWidth: number,
   videoHeight: number,
-  previous: BrowserFaceRect | null
+  previous: BrowserFaceRect | null,
+  options: { preferEmbeddedFacecam?: boolean } = {}
 ): BrowserFaceRect | null {
   if (videoWidth <= 0 || videoHeight <= 0) return null;
 
@@ -103,7 +104,20 @@ export function selectBrowserTrackedFace(
       const distance = Math.hypot(centerX - previousX, centerY - previousY);
       continuity = Math.max(0, 1 - distance / 0.35);
     }
-    return [{ rect, score: confidence * 0.35 + Math.sqrt(area) * 0.3 + continuity }];
+    let score = confidence * 0.35 + Math.sqrt(area) * 0.3 + continuity;
+    if (options.preferEmbeddedFacecam) {
+      // Gameplay often contains large character faces near the middle. A real
+      // embedded webcam is usually compact and anchored near an outer edge.
+      const edgeAffinity = Math.max(
+        Math.abs(centerX - 0.5) * 2,
+        Math.abs(centerY - 0.5) * 2
+      );
+      const compactness = clamp01(
+        (0.3 - Math.max(rect.width, rect.height)) / 0.25
+      );
+      score += edgeAffinity * 0.9 + compactness * 0.2;
+    }
+    return [{ rect, score }];
   });
 
   candidates.sort((a, b) => b.score - a.score);

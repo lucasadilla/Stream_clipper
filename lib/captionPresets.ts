@@ -23,7 +23,7 @@ export const CAPTION_PRESET_ID_STORAGE_KEY = "stream-clipper-caption-preset-id";
 export const BUILT_IN_CAPTION_PRESETS: CaptionPreset[] = [
   {
     id: "karaoke-yellow",
-    name: "Karaoke yellow",
+    name: "Editorial reveal",
     builtIn: true,
     appearance: normalizeCaptionAppearance({
       fontFamily: "Arial",
@@ -145,7 +145,7 @@ export const BUILT_IN_CAPTION_PRESETS: CaptionPreset[] = [
   },
   {
     id: "karaoke-pink",
-    name: "Karaoke pink",
+    name: "Studio bold",
     builtIn: true,
     appearance: normalizeCaptionAppearance({
       fontFamily: "Impact",

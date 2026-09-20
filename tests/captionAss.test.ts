@@ -12,14 +12,15 @@ import {
   sanitizeCaptionText,
 } from "@/lib/captionStyles";
 
-describe("generateAss karaoke", () => {
-  it("highlights only the active word without scaling caption text", () => {
+describe("generateAss captions", () => {
+  it("highlights the active karaoke word without scaling caption text", () => {
     const ass = generateAss({
       width: 1080,
       height: 1920,
       appearance: {
         ...DEFAULT_CAPTION_APPEARANCE,
         karaokeEnabled: true,
+        animation: "none",
         color: "#FFFFFF",
         highlightColor: "#FFE600",
       },
@@ -42,12 +43,39 @@ describe("generateAss karaoke", () => {
     expect(dialogues).toHaveLength(1);
     expect(dialogues[0]).not.toContain("{\\k");
     expect(dialogues[0]).toContain("\\t(");
-    expect(dialogues[0]).toContain("\\c&H");
+    expect(dialogues[0]).toContain("{\\c&H");
     expect(dialogues[0]).toContain("hello");
     expect(dialogues[0]).toContain("world");
     expect(dialogues[0]).not.toContain("\\fscx");
     expect(dialogues[0]).not.toContain("\\fscy");
-    expect(dialogues[0]).toContain("\\alpha&HFF&");
+    expect(dialogues[0]).not.toContain("\\alpha&HFF&");
+  });
+
+  it("exports word reveal with estimated timing when word timestamps are absent", () => {
+    const ass = generateAss({
+      width: 1080,
+      height: 1920,
+      appearance: {
+        ...DEFAULT_CAPTION_APPEARANCE,
+        karaokeEnabled: true,
+        animation: "wordReveal",
+      },
+      cues: [
+        {
+          startTimeSeconds: 2,
+          endTimeSeconds: 4,
+          text: "timing still works",
+        },
+      ],
+    });
+
+    expect(ass).toContain("timing");
+    expect(ass).toContain("still");
+    expect(ass).toContain("works");
+    expect(ass).toContain("\\alpha&HFF&");
+    expect(ass).toContain("\\t(");
+    expect(ass).not.toContain("\\fscx");
+    expect(ass).not.toContain("\\fscy");
   });
 
   it("exports a fade without scaling or moving the text", () => {
@@ -61,9 +89,43 @@ describe("generateAss karaoke", () => {
       },
       cues: [{ startTimeSeconds: 0, endTimeSeconds: 1, text: "hi" }],
     });
-    expect(ass).toContain("\\fad(200,0)");
+    expect(ass).toContain("\\fad(260,0)");
     expect(ass).not.toContain("\\move(");
     expect(ass).not.toContain("\\fscx");
+  });
+
+  it("exports a smooth rise without scaling text", () => {
+    const ass = generateAss({
+      width: 1080,
+      height: 1920,
+      appearance: {
+        ...DEFAULT_CAPTION_APPEARANCE,
+        karaokeEnabled: false,
+        animation: "rise",
+      },
+      cues: [{ startTimeSeconds: 0, endTimeSeconds: 1, text: "smooth rise" }],
+    });
+    expect(ass).toContain("\\move(");
+    expect(ass).toContain("\\fad(120,0)");
+    expect(ass).not.toContain("\\fscx");
+    expect(ass).not.toContain("\\fscy");
+  });
+
+  it("exports a soft focus reveal without scaling text", () => {
+    const ass = generateAss({
+      width: 1080,
+      height: 1920,
+      appearance: {
+        ...DEFAULT_CAPTION_APPEARANCE,
+        karaokeEnabled: false,
+        animation: "focus",
+      },
+      cues: [{ startTimeSeconds: 0, endTimeSeconds: 1, text: "soft focus" }],
+    });
+    expect(ass).toContain("\\blur4");
+    expect(ass).toContain("\\t(0,300,");
+    expect(ass).not.toContain("\\fscx");
+    expect(ass).not.toContain("\\fscy");
   });
 
   it("de-overlaps cues so only one Dialogue is active at a time", () => {
@@ -140,7 +202,8 @@ describe("generateAss karaoke", () => {
       .split("\n")
       .filter((line) => line.startsWith("Dialogue: 0,"));
     expect(dialogues).toHaveLength(1);
-    expect(dialogues[0]).toContain("Real words");
+    expect(dialogues[0]).toContain("Real");
+    expect(dialogues[0]).toContain("words");
     expect(dialogues[0]).not.toContain("...");
   });
 });

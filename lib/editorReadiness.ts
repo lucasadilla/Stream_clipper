@@ -76,6 +76,7 @@ export interface EditorReadiness {
   thumbCoveredSeconds: number;
   expectedThumbCount: number;
   thumbCount: number;
+  prepareElapsedMs: number;
   statusMessage: string;
   detailMessage: string;
   /** Soft-open: filmstrip met, transcript still catching up. */
@@ -229,6 +230,7 @@ export function computeEditorReadiness(
     thumbCoveredSeconds,
     expectedThumbCount,
     thumbCount,
+    prepareElapsedMs: Math.max(0, input.prepareElapsedMs),
     statusMessage,
     detailMessage,
     openingWithoutFullTranscript,

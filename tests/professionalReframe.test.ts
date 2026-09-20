@@ -85,6 +85,41 @@ describe("professional reframe planning", () => {
     expect(cut?.interpolation).toBe("cut");
   });
 
+  it("pre-composes a shot from the first nearby face detection", () => {
+    const creator = track("creator", () => 0.08);
+    creator.points = creator.points.filter(
+      (point) => point.timestampSeconds >= 0.75
+    );
+    creator.firstSeenSeconds = creator.points[0]!.timestampSeconds;
+    const plan = planFor([creator]);
+    const opening = previewCameraFrameAt(plan.cropKeyframes, 0);
+
+    expect(opening?.centerX).toBeLessThan(0.4);
+    expect(opening?.centerX).not.toBeCloseTo(0.5, 2);
+  });
+
+  it("locks onto a new scene's face at the cut instead of panning late", () => {
+    const first = track("first", () => 0.06);
+    first.points = first.points.filter(
+      (point) => point.timestampSeconds < 6
+    );
+    const second = track("second", () => 0.72);
+    second.points = second.points.filter(
+      (point) => point.timestampSeconds >= 6.75
+    );
+    const plan = planFor([first, second], {
+      primaryTrackId: "first",
+      sceneChanges: [{ timestampSeconds: 6, score: 0.95 }],
+    });
+    const cut = plan.cropKeyframes.find(
+      (frame) => Math.abs(frame.timestampSeconds - 6) < 0.01
+    );
+    const afterCut = previewCameraFrameAt(plan.cropKeyframes, 6.01);
+
+    expect(cut?.interpolation).toBe("cut");
+    expect(afterCut?.centerX).toBeGreaterThan(0.6);
+  });
+
   it("keeps a locked creator even when another face has stronger mouth motion", () => {
     const creator = track("creator", () => 0.12, {
       mouthAt: () => 0.4,
@@ -97,6 +132,48 @@ describe("professional reframe planning", () => {
       primaryTrackId: "creator",
     });
     expect(plan.primarySubjectTrackIds).toEqual(["creator"]);
+  });
+
+  it("holds the last good composition through a brief face occlusion", () => {
+    const creator = track("creator", () => 0.1);
+    creator.points = creator.points.filter(
+      (point) => point.timestampSeconds < 4 || point.timestampSeconds > 5
+    );
+    const plan = planFor([creator], { style: "professional" });
+    const duringOcclusion = previewCameraFrameAt(plan.cropKeyframes, 4.5);
+    const beforeOcclusion = previewCameraFrameAt(plan.cropKeyframes, 3.75);
+    expect(duringOcclusion?.centerX).toBeCloseTo(
+      beforeOcclusion?.centerX ?? 0,
+      3
+    );
+  });
+
+  it("keeps a group panel centered instead of hunting individual faces", () => {
+    const plan = planFor(
+      [
+        track("left", () => 0.05),
+        track("middle", () => 0.41),
+        track("right", () => 0.76),
+      ],
+      { classification: "group_panel" }
+    );
+    expect(plan.sourceLayout).toBe("group_panel");
+    expect(plan.cropKeyframes.every((frame) => frame.centerX === 0.5)).toBe(
+      true
+    );
+    expect(plan.shots).toHaveLength(1);
+  });
+
+  it("resets to a safe composition when a new scene has no subject", () => {
+    const creator = track("creator", () => 0.08);
+    creator.points = creator.points.filter(
+      (point) => point.timestampSeconds < 6
+    );
+    const plan = planFor([creator], {
+      sceneChanges: [{ timestampSeconds: 6, score: 0.95 }],
+    });
+    const afterCut = previewCameraFrameAt(plan.cropKeyframes, 6.1);
+    expect(afterCut?.centerX).toBeCloseTo(0.5, 3);
   });
 
   it("uses manual crop keyframes as authoritative edits", () => {
@@ -187,4 +264,3 @@ describe("preview camera interpolation", () => {
     expect(after?.centerX).toBe(0.8);
   });
 });
-

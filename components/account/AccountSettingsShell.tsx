@@ -6,6 +6,7 @@ import { cn } from "@/lib/cn";
 
 export const ACCOUNT_SETTINGS_TABS = [
   { href: "/settings/connected-accounts", label: "Connected accounts" },
+  { href: "/settings/autopilot", label: "Autopilot" },
   { href: "/settings/publishing", label: "Publishing" },
   { href: "/profile", label: "Profile" },
 ] as const;

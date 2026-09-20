@@ -4,6 +4,11 @@ import {
   type CaptionAppearance,
 } from "@/lib/captionAppearance";
 import type { CaptionCue } from "@/lib/captionTrack";
+import {
+  captionCueTokens,
+  effectiveCaptionAnimation,
+} from "@/lib/captionDirector";
+import { captionWordsForAnimation } from "@/lib/captionTrack";
 
 export function CaptionCueText({
   cue,
@@ -14,10 +19,17 @@ export function CaptionCueText({
   currentTime: number;
   appearance: CaptionAppearance;
 }) {
-  const words = cue.words ?? [];
+  const timedWords = useMemo(() => captionWordsForAnimation(cue), [cue]);
+  const tokens = useMemo(
+    () =>
+      timedWords.length > 0
+        ? timedWords.map((word) => word.word)
+        : captionCueTokens(cue),
+    [cue, timedWords]
+  );
   const lineBreaks = useMemo(() => {
     const breaks = new Set<number>();
-    if (words.length === 0 || !cue.text.includes("\n")) return breaks;
+    if (tokens.length === 0 || !cue.text.includes("\n")) return breaks;
     let wordCount = 0;
     const lines = cue.text.split("\n");
     for (let lineIndex = 0; lineIndex < lines.length - 1; lineIndex++) {
@@ -25,37 +37,52 @@ export function CaptionCueText({
       if (wordCount > 0) breaks.add(wordCount - 1);
     }
     return breaks;
-  }, [cue.text, words.length]);
+  }, [cue.text, tokens.length]);
 
-  const wordReveal = appearance.animation === "wordReveal";
+  const animation = effectiveCaptionAnimation(cue, appearance.animation);
+  const wordReveal = animation === "wordReveal" && timedWords.length > 0;
   const renderTimedWords =
-    words.length > 0 && (appearance.karaokeEnabled || wordReveal);
+    timedWords.length > 0 && (wordReveal || appearance.karaokeEnabled);
 
   if (renderTimedWords) {
-    return words.map((word, index) => {
-      const active = currentTime >= word.start && currentTime < word.end;
-      const revealed = !wordReveal || currentTime >= word.start - 0.02;
+    return tokens.map((token, index) => {
+      const timedWord = timedWords[index];
+      const active = Boolean(
+        timedWord &&
+          currentTime >= timedWord.start &&
+          currentTime < timedWord.end
+      );
+      const revealed =
+        !wordReveal || !timedWord || currentTime >= timedWord.start - 0.02;
       const label = applyCaptionCapitalization(
-        word.word,
+        token,
         appearance.capitalization
       );
-      const color = appearance.karaokeEnabled
-        ? active
-          ? appearance.highlightColor
-          : appearance.color
-        : appearance.color;
       return (
         <Fragment key={`${cue.id}-${index}`}>
           <span
             className={wordReveal ? "caption-word-reveal" : undefined}
             style={{
-              color,
+              color:
+                appearance.karaokeEnabled && active
+                  ? appearance.highlightColor
+                  : appearance.color,
               opacity: revealed ? 1 : 0,
+              transform: wordReveal
+                ? revealed
+                  ? "translateY(0)"
+                  : "translateY(4px)"
+                : undefined,
+              filter: wordReveal
+                ? revealed
+                  ? "blur(0)"
+                  : "blur(2px)"
+                : undefined,
             }}
           >
             {label}
           </span>
-          {index < words.length - 1 ? (
+          {index < tokens.length - 1 ? (
             lineBreaks.has(index) ? (
               <br />
             ) : (

@@ -12,7 +12,13 @@ import {
 import type { StreamEmbedInfo, StreamPlatform } from "@/lib/streamPlatform";
 import { platformLabel } from "@/lib/streamPlatform";
 import { cn } from "@/lib/cn";
-import { useMemo, type RefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type RefObject,
+} from "react";
 import { PlatformBrandIcon } from "@/components/brand/PlatformBrandIcon";
 
 interface VideoPreviewProps {
@@ -23,6 +29,9 @@ interface VideoPreviewProps {
   streamPageUrl?: string | null;
   recordedSeconds?: number;
   preferLocalVideo?: boolean;
+  currentTime?: number;
+  posterUrl?: string | null;
+  showPoster?: boolean;
   playerRef: RefObject<StreamPlayerHandle | null>;
   transcripts: TranscriptChunkInput[];
   captionsEnabled: boolean;
@@ -32,6 +41,7 @@ interface VideoPreviewProps {
   onCaptionAppearanceChange: (appearance: CaptionAppearance) => void;
   onTimeUpdate: (time: number) => void;
   onDurationChange: (duration: number) => void;
+  onFrameReady?: () => void;
 }
 
 export function VideoPreview({
@@ -42,6 +52,9 @@ export function VideoPreview({
   streamPageUrl,
   recordedSeconds = 0,
   preferLocalVideo,
+  currentTime = 0,
+  posterUrl,
+  showPoster = false,
   playerRef,
   transcripts,
   captionsEnabled,
@@ -51,11 +64,22 @@ export function VideoPreview({
   onCaptionAppearanceChange,
   onTimeUpdate,
   onDurationChange,
+  onFrameReady,
 }: VideoPreviewProps) {
+  const [playerFrameReady, setPlayerFrameReady] = useState(false);
   const hasWordTimings = useMemo(
     () => transcriptHasWordTimings(transcripts),
     [transcripts]
   );
+
+  useEffect(() => {
+    setPlayerFrameReady(false);
+  }, [platform, sourceId, playbackVideoUrl]);
+
+  const handleFrameReady = useCallback(() => {
+    setPlayerFrameReady(true);
+    onFrameReady?.();
+  }, [onFrameReady]);
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col bg-[#050705]">
@@ -129,11 +153,23 @@ export function VideoPreview({
                 streamPageUrl={streamPageUrl}
                 recordedSeconds={recordedSeconds}
                 preferLocalVideo={preferLocalVideo}
+                initialTime={currentTime}
+                posterUrl={posterUrl}
                 onTimeUpdate={onTimeUpdate}
                 onDurationChange={onDurationChange}
+                onFrameReady={handleFrameReady}
                 fillContainer
               />
             </div>
+            {posterUrl && (!playerFrameReady || showPoster) && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={posterUrl}
+                alt=""
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 z-[1] h-full w-full bg-black object-contain"
+              />
+            )}
             <CaptionTrackLayer
               enabled={captionsEnabled}
               playerRef={playerRef}

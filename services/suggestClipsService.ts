@@ -17,10 +17,18 @@ import {
   isSpecificClickableTitle,
   rankClipCandidatesWithAI,
   sanitizeRankedClipTitle,
+  type RankedCandidate,
 } from "@/services/clipRankingService";
 import { refineClipToCompleteSpeech } from "@/lib/clipBoundaries";
+import {
+  narrativePlanQualityBonus,
+  narrativePlanSummary,
+  planNarrativeClip,
+  type NarrativeBeat,
+  type NarrativePlan,
+} from "@/lib/narrativeBeats";
 
-export const CLIP_SUGGESTION_VERSION = 4;
+export const CLIP_SUGGESTION_VERSION = 6;
 
 const MIN_SCORE = 6;
 const OVERLAP_RATIO = 0.45;
@@ -41,6 +49,8 @@ type ClipCandidate = {
   clickabilityScore?: number;
   boundaryAdjusted?: boolean;
   endingComplete?: boolean;
+  narrativePlan?: NarrativePlan;
+  narrativeSource?: "deterministic" | "ai";
 };
 
 function rankingCandidateId(candidate: ClipCandidate, index: number): string {
@@ -54,6 +64,7 @@ function rankingCandidateId(candidate: ClipCandidate, index: number): string {
 }
 
 type TranscriptSnippetChunk = {
+  id: string;
   startTimeSeconds: number;
   endTimeSeconds: number;
   text: string;
@@ -125,6 +136,117 @@ function evidenceTimeFromChunks(
   return null;
 }
 
+function rankedBeatStrength(
+  role: NarrativeBeat["role"],
+  scores: NonNullable<RankedCandidate["narrativeScores"]>
+): number {
+  switch (role) {
+    case "hook":
+      return scores.hook / 100;
+    case "payoff":
+    case "reaction":
+      return scores.payoff / 100;
+    case "resolution":
+      return scores.completeness / 100;
+    case "setup":
+    case "escalation":
+      return scores.coherence / 100;
+  }
+}
+
+function mergeRankedNarrativePlan(
+  base: NarrativePlan | undefined,
+  ranked: RankedCandidate
+): NarrativePlan | undefined {
+  if (
+    !base ||
+    ranked.startTimeSeconds == null ||
+    ranked.endTimeSeconds == null ||
+    ranked.focusTimeSeconds == null ||
+    !ranked.narrativeArcType ||
+    !ranked.narrativeScores
+  ) {
+    return base;
+  }
+  const rankedStart = ranked.startTimeSeconds;
+  const rankedEnd = ranked.endTimeSeconds;
+  const rankedFocus = ranked.focusTimeSeconds;
+  const selectedChunks = base.contextChunks.filter(
+    (chunk) =>
+      chunk.endTimeSeconds >= rankedStart - 0.5 &&
+      chunk.startTimeSeconds <= rankedEnd + 0.5
+  );
+  const chunkById = new Map(
+    base.contextChunks.map((chunk) => [chunk.id, chunk])
+  );
+  const beats = (ranked.narrativeBeats ?? []).flatMap((beat) => {
+    const chunk = chunkById.get(beat.chunkId);
+    if (!chunk) return [];
+    return [
+      {
+        ...beat,
+        startTimeSeconds: chunk.startTimeSeconds,
+        endTimeSeconds: chunk.endTimeSeconds,
+        strength: rankedBeatStrength(beat.role, ranked.narrativeScores!),
+      },
+    ];
+  });
+  const first = selectedChunks[0];
+  const last = selectedChunks.at(-1);
+  const focusChunk = selectedChunks.reduce<TranscriptSnippetChunk | null>(
+    (closest, chunk) => {
+      if (!closest) return chunk;
+      const chunkDistance = Math.abs(
+        (chunk.startTimeSeconds + chunk.endTimeSeconds) / 2 -
+          rankedFocus
+      );
+      const closestDistance = Math.abs(
+        (closest.startTimeSeconds + closest.endTimeSeconds) / 2 -
+          rankedFocus
+      );
+      return chunkDistance < closestDistance ? chunk : closest;
+    },
+    null
+  );
+  const blendScore = (deterministic: number, ai: number) =>
+    Math.round(deterministic * 0.35 + ai * 0.65);
+  const blendedScores = {
+    hook: blendScore(base.scores.hook, ranked.narrativeScores.hook),
+    payoff: blendScore(base.scores.payoff, ranked.narrativeScores.payoff),
+    completeness: blendScore(
+      base.scores.completeness,
+      ranked.narrativeScores.completeness
+    ),
+    standalone: blendScore(
+      base.scores.standalone,
+      ranked.narrativeScores.standalone
+    ),
+    coherence: blendScore(
+      base.scores.coherence,
+      ranked.narrativeScores.coherence
+    ),
+    pacing: blendScore(base.scores.pacing, ranked.narrativeScores.pacing),
+    total: blendScore(base.scores.total, ranked.narrativeScores.total),
+  };
+
+  return {
+    ...base,
+    startTimeSeconds: rankedStart,
+    endTimeSeconds: rankedEnd,
+    focusTimeSeconds: rankedFocus,
+    startChunkId: first?.id ?? null,
+    endChunkId: last?.id ?? null,
+    focusChunkId: focusChunk?.id ?? null,
+    arcType: ranked.narrativeArcType,
+    beats,
+    scores: blendedScores,
+    selectedText: selectedChunks.map((chunk) => chunk.text).join(" "),
+    endingComplete: true,
+    accepted: true,
+    rejectionReason: undefined,
+  };
+}
+
 function chatInRange(
   messages: CandidateChatMessage[],
   start: number,
@@ -163,7 +285,7 @@ function clampClipRange(
   end: number,
   profile: ClipContentProfile
 ): { start: number; end: number } {
-  let s = Math.max(0, start);
+  const s = Math.max(0, start);
   let e = Math.max(s + MIN_CLIP_SECONDS, end);
   const duration = e - s;
   if (duration < profile.targetMinSeconds) {
@@ -257,11 +379,13 @@ export async function autoSuggestClips(
         },
         orderBy: { startTimeSeconds: "asc" },
         take: 2500,
-        select: {
-          startTimeSeconds: true,
-          endTimeSeconds: true,
-          text: true,
-        },
+          select: {
+            id: true,
+            startTimeSeconds: true,
+            endTimeSeconds: true,
+            text: true,
+            rawJson: true,
+          },
       }),
       prisma.streamSession.findUnique({
         where: { id: streamSessionId },
@@ -547,6 +671,34 @@ export async function autoSuggestClips(
     }
   }
 
+  // Target lengths guide candidate discovery, but a complete ending outranks a
+  // shorter duration. Give the completion pass the full product clip budget.
+  const narrativeMaximumSeconds = MAX_CLIP_SECONDS;
+  for (const candidate of candidates) {
+    const plan = planNarrativeClip({
+      startTimeSeconds: candidate.start,
+      endTimeSeconds: candidate.end,
+      focusTimeSeconds: candidate.focusTimeSeconds,
+      transcriptChunks: usableTranscriptChunks,
+      contentType,
+      source: candidate.source,
+      targetMinSeconds: Math.min(profile.targetMinSeconds, 18),
+      maximumDurationSeconds: narrativeMaximumSeconds,
+    });
+    candidate.narrativePlan = plan;
+    candidate.narrativeSource = "deterministic";
+    candidate.worth += narrativePlanQualityBonus(plan);
+    if (plan.accepted && plan.selectedText) {
+      candidate.start = plan.startTimeSeconds;
+      candidate.end = plan.endTimeSeconds;
+      candidate.focusTimeSeconds = plan.focusTimeSeconds;
+      candidate.context = [plan.selectedText, candidate.context]
+        .filter(Boolean)
+        .join(" | ");
+      candidate.reason = `${candidate.reason} ${narrativePlanSummary(plan)}`.trim();
+    }
+  }
+
   candidates.sort((a, b) => b.worth - a.worth || b.confidence - a.confidence);
 
   const aiPoolSize = Math.min(20, Math.max(10, targetCount * 2));
@@ -571,12 +723,20 @@ export async function autoSuggestClips(
       currentTitle: candidate.title,
       context: candidate.context,
       signalScore: candidate.worth,
+      focusTimeSeconds: candidate.focusTimeSeconds,
+      targetMinSeconds: Math.min(profile.targetMinSeconds, 18),
+      maximumDurationSeconds: narrativeMaximumSeconds,
+      transcriptChunks: candidate.narrativePlan?.contextChunks,
     })),
   });
   if (aiRanking?.length) {
     const rankedCandidates = aiRanking.flatMap((ranked) => {
       const candidate = aiCandidatesById.get(ranked.id);
       if (!candidate) return [];
+      const narrativePlan = mergeRankedNarrativePlan(
+        candidate.narrativePlan,
+        ranked
+      );
       return [
         {
           ...candidate,
@@ -587,14 +747,23 @@ export async function autoSuggestClips(
           rankingEvidence: ranked.evidence,
           titleAccuracyScore: ranked.titleAccuracyScore,
           clickabilityScore: ranked.clickabilityScore,
+          start: ranked.startTimeSeconds ?? candidate.start,
+          end: ranked.endTimeSeconds ?? candidate.end,
           focusTimeSeconds:
+            ranked.focusTimeSeconds ??
             evidenceTimeFromChunks(
               transcriptChunks,
-              candidate.start,
-              candidate.end,
+              ranked.startTimeSeconds ?? candidate.start,
+              ranked.endTimeSeconds ?? candidate.end,
               ranked.evidence
-            ) ?? candidate.focusTimeSeconds,
-          worth: candidate.worth * 0.35 + ranked.interestScore,
+            ) ??
+            candidate.focusTimeSeconds,
+          narrativePlan,
+          narrativeSource: "ai" as const,
+          worth:
+            candidate.worth * 0.25 +
+            ranked.interestScore * 0.55 +
+            (narrativePlan?.scores.total ?? 0) * 0.2,
           confidence: Math.max(
             candidate.confidence,
             Math.min(0.98, ranked.interestScore / 100)
@@ -603,21 +772,17 @@ export async function autoSuggestClips(
       ];
     });
     rankedCandidates.sort((a, b) => b.worth - a.worth);
-    const rankedRanges = new Set(
-      rankedCandidates.map(
-        (candidate) => `${candidate.start.toFixed(3)}:${candidate.end.toFixed(3)}`
-      )
+    const rankedOriginals = new Set(
+      aiRanking.flatMap((ranked) => {
+        const original = aiCandidatesById.get(ranked.id);
+        return original ? [original] : [];
+      })
     );
     candidates.splice(
       0,
       candidates.length,
       ...rankedCandidates,
-      ...candidates.filter(
-        (candidate) =>
-          !rankedRanges.has(
-            `${candidate.start.toFixed(3)}:${candidate.end.toFixed(3)}`
-          )
-      )
+      ...candidates.filter((candidate) => !rankedOriginals.has(candidate))
     );
   }
 
@@ -633,23 +798,40 @@ export async function autoSuggestClips(
       c.end = Math.min(c.end, throughSeconds);
       if (c.end - c.start < MIN_CLIP_SECONDS) continue;
     }
+    const visualSignal =
+      (contentType === "gaming" || contentType === "gameplay_only") &&
+      (c.source === "event_window" || c.source === "audio_event");
+    if (c.narrativePlan?.rejectionReason === "housekeeping_only") continue;
+    if (c.narrativePlan?.rejectionReason && !visualSignal) continue;
+    if (
+      c.source === "even_sample" &&
+      c.narrativePlan &&
+      !c.narrativePlan.accepted
+    ) {
+      continue;
+    }
     const boundary = refineClipToCompleteSpeech({
       start: c.start,
       end: c.end,
       transcriptChunks: usableTranscriptChunks,
-      maximumDurationSeconds: Math.min(
-        90,
-        profile.targetMaxSeconds +
-          (contentType === "podcast" || contentType === "talking" ? 20 : 12)
-      ),
+      maximumDurationSeconds: narrativeMaximumSeconds,
       postRollSeconds:
-        contentType === "gaming" || contentType === "gameplay_only" ? 1.25 : 0.4,
+        contentType === "gaming" || contentType === "gameplay_only" ? 1.35 : 0.7,
+      requireSettledEnding: options?.throughSeconds != null,
     });
     if (!boundary.endingComplete) continue;
     c.start = boundary.start;
     c.end = boundary.end;
     c.boundaryAdjusted = boundary.adjusted;
     c.endingComplete = boundary.endingComplete;
+    if (c.narrativePlan) {
+      c.narrativePlan = {
+        ...c.narrativePlan,
+        startTimeSeconds: c.start,
+        endTimeSeconds: c.end,
+        endingComplete: boundary.endingComplete,
+      };
+    }
     if (isTooSimilar(c, accepted)) continue;
     const cleanTitle = sanitizeRankedClipTitle(c.title);
     if (!isSpecificClickableTitle(cleanTitle)) continue;
@@ -692,6 +874,23 @@ export async function autoSuggestClips(
             clickabilityScore: candidate.clickabilityScore,
             boundaryAdjusted: candidate.boundaryAdjusted,
             endingComplete: candidate.endingComplete,
+            narrativeEngineVersion: 2,
+            narrativeSource: candidate.narrativeSource,
+            narrative: candidate.narrativePlan
+              ? {
+                  startTimeSeconds: candidate.narrativePlan.startTimeSeconds,
+                  endTimeSeconds: candidate.narrativePlan.endTimeSeconds,
+                  focusTimeSeconds: candidate.narrativePlan.focusTimeSeconds,
+                  startChunkId: candidate.narrativePlan.startChunkId,
+                  endChunkId: candidate.narrativePlan.endChunkId,
+                  focusChunkId: candidate.narrativePlan.focusChunkId,
+                  arcType: candidate.narrativePlan.arcType,
+                  beats: candidate.narrativePlan.beats,
+                  scores: candidate.narrativePlan.scores,
+                  endingComplete: candidate.narrativePlan.endingComplete,
+                  accepted: candidate.narrativePlan.accepted,
+                }
+              : undefined,
           }),
         },
       })

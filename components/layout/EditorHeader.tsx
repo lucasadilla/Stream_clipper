@@ -1,7 +1,8 @@
 import Link from "next/link";
-import { HardDrive, Home, Trash2 } from "lucide-react";
+import { Clapperboard, HardDrive, Home, Sparkles, Trash2 } from "lucide-react";
 import { SiteLogo } from "@/components/layout/SiteLogo";
 import { cn } from "@/lib/cn";
+import type { SessionMode } from "@/lib/sessionMode";
 
 interface EditorHeaderProps {
   title?: string | null;
@@ -12,6 +13,8 @@ interface EditorHeaderProps {
   onDelete?: () => void;
   compact?: boolean;
   mode?: "agent" | "timeline" | "editor";
+  modeSwitching?: boolean;
+  onModeChange?: (mode: SessionMode) => void;
 }
 
 function formatLiveClock(seconds: number): string {
@@ -33,7 +36,11 @@ export function EditorHeader({
   deleting,
   onDelete,
   mode = "editor",
+  modeSwitching = false,
+  onModeChange,
 }: EditorHeaderProps) {
+  const canSwitchModes = mode !== "editor" && Boolean(onModeChange);
+
   return (
     <header
       className={cn(
@@ -52,10 +59,49 @@ export function EditorHeader({
           />
         </div>
 
-        <div className="min-w-0 px-1 sm:px-4">
-          <h1 className="truncate text-xs font-medium text-[#F1EFE7] sm:text-sm">
+        <div className="flex min-w-0 items-center gap-3 px-1 sm:px-4">
+          <h1
+            className={cn(
+              "min-w-0 flex-1 truncate text-xs font-medium text-[#F1EFE7] sm:text-sm",
+              canSwitchModes && "hidden lg:block"
+            )}
+          >
             {title ?? "Untitled session"}
           </h1>
+
+          {canSwitchModes && (
+            <div
+              className="mx-auto grid h-9 shrink-0 grid-cols-2 rounded-md border border-white/10 bg-black/35 p-1 shadow-inner shadow-black/30"
+              aria-label="Editor mode"
+            >
+              {([
+                { id: "agent" as const, label: "Agent", Icon: Sparkles },
+                { id: "timeline" as const, label: "Timeline", Icon: Clapperboard },
+              ]).map(({ id, label, Icon }) => {
+                const active = mode === id;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => onModeChange?.(id)}
+                    disabled={active || modeSwitching}
+                    aria-pressed={active}
+                    className={cn(
+                      "flex h-7 min-w-[2.25rem] items-center justify-center gap-1.5 rounded-sm px-2 text-[10px] font-semibold transition-[background-color,color,box-shadow,transform] duration-200 sm:min-w-[5.25rem] sm:px-3 sm:text-[11px]",
+                      active
+                        ? "bg-[#95ff00] text-[#0b0d0c] shadow-[0_3px_12px_rgba(149,255,0,0.18)]"
+                        : "text-white/50 hover:bg-white/[0.06] hover:text-white",
+                      modeSwitching && "cursor-wait opacity-70"
+                    )}
+                    title={`${label} mode`}
+                  >
+                    <Icon className={cn("h-3.5 w-3.5", modeSwitching && active && "animate-pulse")} />
+                    <span className="hidden sm:inline">{label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         <div className="flex shrink-0 items-center justify-end gap-1.5 sm:gap-2">

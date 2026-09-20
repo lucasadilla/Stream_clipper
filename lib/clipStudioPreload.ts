@@ -8,9 +8,13 @@ import { loadBrowserFaceDetector } from "@/lib/browserFaceTracking";
 export interface ClipStudioCaptionBundle {
   chunks: TranscriptChunkInput[];
   edits: CaptionEditsMap;
+  coverageStartSeconds: number;
+  coverageEndSeconds: number;
 }
 
 const CACHE_TTL_MS = 2 * 60 * 1000;
+const CAPTION_WINDOW_SECONDS = 120;
+const CAPTION_PADDING_SECONDS = 120;
 const captionCache = new Map<
   string,
   { expiresAt: number; bundle: ClipStudioCaptionBundle }
@@ -18,8 +22,23 @@ const captionCache = new Map<
 const captionRequests = new Map<string, Promise<ClipStudioCaptionBundle>>();
 const warmedPlaybackUrls = new Set<string>();
 
+export function getClipStudioCaptionWindow(
+  startSeconds: number,
+  endSeconds: number
+) {
+  const paddedStart = Math.max(0, startSeconds - CAPTION_PADDING_SECONDS);
+  const paddedEnd = Math.max(endSeconds, startSeconds) + CAPTION_PADDING_SECONDS;
+  return {
+    startSeconds:
+      Math.floor(paddedStart / CAPTION_WINDOW_SECONDS) * CAPTION_WINDOW_SECONDS,
+    endSeconds:
+      Math.ceil(paddedEnd / CAPTION_WINDOW_SECONDS) * CAPTION_WINDOW_SECONDS,
+  };
+}
+
 function captionKey(sessionId: string, startSeconds: number, endSeconds: number) {
-  return `${sessionId}:${startSeconds.toFixed(2)}:${endSeconds.toFixed(2)}`;
+  const window = getClipStudioCaptionWindow(startSeconds, endSeconds);
+  return `${sessionId}:${window.startSeconds}:${window.endSeconds}`;
 }
 
 export function loadClipStudioCaptions(
@@ -27,6 +46,7 @@ export function loadClipStudioCaptions(
   startSeconds: number,
   endSeconds: number
 ): Promise<ClipStudioCaptionBundle> {
+  const window = getClipStudioCaptionWindow(startSeconds, endSeconds);
   const key = captionKey(sessionId, startSeconds, endSeconds);
   const cached = captionCache.get(key);
   if (cached && cached.expiresAt > Date.now()) {
@@ -39,8 +59,8 @@ export function loadClipStudioCaptions(
   const request = Promise.all([
     fetchJson<{ transcriptChunks?: TranscriptChunkInput[] }>(
       `/api/sessions/${sessionId}/events?start=${encodeURIComponent(
-        Math.max(0, startSeconds - 120)
-      )}&end=${encodeURIComponent(endSeconds + 120)}`
+        window.startSeconds
+      )}&end=${encodeURIComponent(window.endSeconds)}`
     ),
     fetchJson<{ edits?: CaptionEditsMap }>(
       `/api/sessions/${sessionId}/captions`
@@ -50,6 +70,8 @@ export function loadClipStudioCaptions(
       const bundle = {
         chunks: events.ok ? events.data.transcriptChunks ?? [] : [],
         edits: captions.ok ? captions.data.edits ?? {} : {},
+        coverageStartSeconds: window.startSeconds,
+        coverageEndSeconds: window.endSeconds,
       } satisfies ClipStudioCaptionBundle;
       captionCache.set(key, {
         expiresAt: Date.now() + CACHE_TTL_MS,
@@ -61,6 +83,13 @@ export function loadClipStudioCaptions(
 
   captionRequests.set(key, request);
   return request;
+}
+
+export function invalidateClipStudioCaptionCache(sessionId: string) {
+  const prefix = `${sessionId}:`;
+  for (const key of captionCache.keys()) {
+    if (key.startsWith(prefix)) captionCache.delete(key);
+  }
 }
 
 export function updateClipStudioCaptionCache(

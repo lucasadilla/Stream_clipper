@@ -52,11 +52,24 @@ import {
   type PreviewCropKeyframe,
 } from "@/lib/reframePlayback";
 import type { VerticalLayout } from "@/lib/verticalLayout";
+import { expandFaceToFacecamCrop } from "@/lib/normalizedRect";
 import type {
   CropInterpolation,
   ManualReframeKeyframe,
 } from "@/lib/professionalReframe";
 import { clipThumbnailApiUrl } from "@/lib/downloadUrls";
+import { OperationProgress } from "@/components/ui/operation-progress";
+import {
+  mediaCoversTimelineRange,
+  mediaTimeForTimeline,
+  timelineTimeForMedia,
+} from "@/lib/clipPlaybackTime";
+import {
+  captionDirectionLabel,
+  directCaptionTrack,
+  effectiveCaptionAnimation,
+  type CaptionDirectionPlan,
+} from "@/lib/captionDirector";
 
 interface TranscriptChunk {
   id: string;
@@ -70,6 +83,8 @@ interface AgentClipEditorProps {
   sessionId: string;
   clip: ClipSuggestionData;
   playbackUrl: string | null;
+  /** Absolute timeline time represented by media time zero. */
+  playbackTimelineOffsetSeconds?: number;
   sourceDuration: number;
   includeCaptions: boolean;
   onIncludeCaptionsChange: (value: boolean) => void;
@@ -80,6 +95,8 @@ interface AgentClipEditorProps {
   lookPreset?: ContentLookPresetId;
   /** Normalized face box for centering look crops. */
   faceRect?: { x: number; y: number; width: number; height: number } | null;
+  /** Expanded webcam crop used by stacked gaming and PiP layouts. */
+  facecamRect?: { x: number; y: number; width: number; height: number } | null;
   faceKeyframes?: PreviewCropKeyframe[];
   faceBaseCropWidth?: number | null;
   autoResolvedLayout?: VerticalLayout | null;
@@ -94,12 +111,18 @@ interface AgentClipEditorProps {
   onCaptionEditsChange?: (edits: CaptionEditsMap) => void;
   active?: boolean;
   onPreviewFaceRectChange?: (rect: BrowserFaceRect | null) => void;
+  /** Ask the studio to replace a present-but-undecodable session preview. */
+  onPlaybackUnavailable?: () => void;
+  captionDirectionPlan?: CaptionDirectionPlan | null;
+  captionDirectorLoading?: boolean;
+  captionRefinementLoading?: boolean;
 }
 
 export function AgentClipEditor({
   sessionId,
   clip,
   playbackUrl,
+  playbackTimelineOffsetSeconds = 0,
   sourceDuration,
   includeCaptions,
   onIncludeCaptionsChange,
@@ -108,6 +131,7 @@ export function AgentClipEditor({
   onClipChange,
   lookPreset = "auto",
   faceRect = null,
+  facecamRect = null,
   faceKeyframes = [],
   faceBaseCropWidth = null,
   autoResolvedLayout = null,
@@ -122,6 +146,10 @@ export function AgentClipEditor({
   onCaptionEditsChange,
   active = true,
   onPreviewFaceRectChange,
+  onPlaybackUnavailable,
+  captionDirectionPlan = null,
+  captionDirectorLoading = false,
+  captionRefinementLoading = false,
 }: AgentClipEditorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
@@ -173,6 +201,60 @@ export function AgentClipEditor({
   }, []);
 
   useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !playbackUrl || !onPlaybackUnavailable) return;
+
+    let reported = false;
+    const reportUnavailable = () => {
+      if (reported) return;
+      reported = true;
+      onPlaybackUnavailable();
+    };
+    const hasDecodedFrame = () =>
+      video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+      video.videoWidth > 0 &&
+      video.videoHeight > 0;
+    const hasCompleteRange = () =>
+      mediaCoversTimelineRange({
+        mediaDurationSeconds: video.duration,
+        timelineOffsetSeconds: playbackTimelineOffsetSeconds,
+        rangeStartSeconds: clip.startTimeSeconds,
+        rangeEndSeconds: clip.endTimeSeconds,
+      });
+    const isUsable = () => hasDecodedFrame() && hasCompleteRange();
+    const acceptDecodedMedia = () => {
+      if (isUsable()) {
+        window.clearTimeout(timeout);
+      } else if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
+        reportUnavailable();
+      }
+    };
+    const timeout = window.setTimeout(() => {
+      if (!isUsable()) reportUnavailable();
+    }, 2200);
+
+    video.addEventListener("loadedmetadata", acceptDecodedMedia);
+    video.addEventListener("loadeddata", acceptDecodedMedia);
+    video.addEventListener("canplay", acceptDecodedMedia);
+    video.addEventListener("durationchange", acceptDecodedMedia);
+    video.addEventListener("error", reportUnavailable);
+    return () => {
+      window.clearTimeout(timeout);
+      video.removeEventListener("loadedmetadata", acceptDecodedMedia);
+      video.removeEventListener("loadeddata", acceptDecodedMedia);
+      video.removeEventListener("canplay", acceptDecodedMedia);
+      video.removeEventListener("durationchange", acceptDecodedMedia);
+      video.removeEventListener("error", reportUnavailable);
+    };
+  }, [
+    clip.endTimeSeconds,
+    clip.startTimeSeconds,
+    onPlaybackUnavailable,
+    playbackTimelineOffsetSeconds,
+    playbackUrl,
+  ]);
+
+  useEffect(() => {
     if (prefetchedTranscriptChunks !== undefined) {
       setChunks(prefetchedTranscriptChunks);
       setEdits(prefetchedCaptionEdits ?? {});
@@ -221,12 +303,21 @@ export function AgentClipEditor({
   const cues = useMemo(() => {
     const track = buildCaptionTrack(chunks, "vertical");
     const applied = applyCaptionEdits(track, edits);
-    return applied.filter(
-      (c) =>
-        c.endTimeSeconds > clip.startTimeSeconds &&
-        c.startTimeSeconds < clip.endTimeSeconds
+    return directCaptionTrack(
+      applied.filter(
+        (c) =>
+          c.endTimeSeconds > clip.startTimeSeconds &&
+          c.startTimeSeconds < clip.endTimeSeconds
+      ),
+      captionDirectionPlan
     );
-  }, [chunks, edits, clip.startTimeSeconds, clip.endTimeSeconds]);
+  }, [
+    chunks,
+    edits,
+    clip.startTimeSeconds,
+    clip.endTimeSeconds,
+    captionDirectionPlan,
+  ]);
 
   const activeCue = useMemo(
     () => lookupCueAtTime(cues, currentTime),
@@ -235,6 +326,77 @@ export function AgentClipEditor({
   const previewStyles = useMemo(
     () => captionPreviewStyle(captionAppearance, previewHeight),
     [captionAppearance, previewHeight]
+  );
+
+  // HTMLMediaElement timeupdate can fire only a few times per second. Sample
+  // the playing video more closely so word reveal and karaoke do not appear
+  // frozen or jump several words at once in Clip Studio.
+  useEffect(() => {
+    if (!active || !playbackUrl) return;
+    let frame = 0;
+    let lastUpdate = 0;
+    const tick = (now: number) => {
+      const video = videoRef.current;
+      if (video && !video.paused && now - lastUpdate >= 45) {
+        lastUpdate = now;
+        const timelineTime = timelineTimeForMedia(
+          video.currentTime,
+          playbackTimelineOffsetSeconds
+        );
+        const clamped = Math.max(
+          clip.startTimeSeconds,
+          Math.min(clip.endTimeSeconds, timelineTime)
+        );
+        setCurrentTime((previous) =>
+          Math.abs(previous - clamped) >= 0.01 ? clamped : previous
+        );
+      }
+      frame = window.requestAnimationFrame(tick);
+    };
+    frame = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    active,
+    clip.endTimeSeconds,
+    clip.startTimeSeconds,
+    playbackTimelineOffsetSeconds,
+    playbackUrl,
+  ]);
+
+  const handleCaptionAppearanceChange = useCallback(
+    (next: CaptionAppearance) => {
+      const animationChanged = next.animation !== captionAppearance.animation;
+      onCaptionAppearanceChange(next);
+      if (!animationChanged || !includeCaptions) return;
+
+      const cue = activeCue ?? cues[0];
+      const video = videoRef.current;
+      if (!cue || !video) return;
+      const replayTime = Math.max(
+        clip.startTimeSeconds,
+        Math.min(clip.endTimeSeconds, cue.startTimeSeconds + 0.01)
+      );
+      video.currentTime = mediaTimeForTimeline(
+        replayTime,
+        playbackTimelineOffsetSeconds
+      );
+      setCurrentTime(replayTime);
+      window.requestAnimationFrame(() => {
+        void video.play().catch(() => {
+          // Autoplay can be blocked, but remounting still previews entrance motion.
+        });
+      });
+    },
+    [
+      activeCue,
+      captionAppearance.animation,
+      clip.endTimeSeconds,
+      clip.startTimeSeconds,
+      cues,
+      includeCaptions,
+      onCaptionAppearanceChange,
+      playbackTimelineOffsetSeconds,
+    ]
   );
 
   const trackedCameraFrame = useMemo(
@@ -281,7 +443,7 @@ export function AgentClipEditor({
         return;
       }
       if (!force && Math.abs(video.currentTime - lastVideoTime) < 0.02) {
-        schedule(video.paused ? 700 : 320);
+        schedule(video.paused ? 450 : 150);
         return;
       }
 
@@ -298,7 +460,12 @@ export function AgentClipEditor({
           detections,
           video.videoWidth,
           video.videoHeight,
-          previousRect
+          previousRect,
+          {
+            preferEmbeddedFacecam:
+              effectiveLayout === "facecam_top_gameplay_bottom" ||
+              effectiveLayout === "facecam_bottom_gameplay_top",
+          }
         );
         if (selected) {
           previousRect = smoothBrowserFaceRect(previousRect, selected);
@@ -311,22 +478,29 @@ export function AgentClipEditor({
         cancelled = true;
       } finally {
         loading = false;
-        if (!cancelled) schedule(video.paused ? 700 : 320);
+        if (!cancelled) schedule(video.paused ? 450 : 150);
       }
     };
 
     const analyzeNow = () => void analyze(true);
-    video.addEventListener("loadeddata", analyzeNow);
+    const analyzeDiscontinuity = () => {
+      // Seeking or loading is a new shot context. Do not slowly interpolate
+      // from a face selected at an unrelated timestamp.
+      previousRect = null;
+      lastVideoTime = -1;
+      void analyze(true);
+    };
+    video.addEventListener("loadeddata", analyzeDiscontinuity);
     video.addEventListener("play", analyzeNow);
-    video.addEventListener("seeked", analyzeNow);
+    video.addEventListener("seeked", analyzeDiscontinuity);
     void analyze(true);
 
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
-      video.removeEventListener("loadeddata", analyzeNow);
+      video.removeEventListener("loadeddata", analyzeDiscontinuity);
       video.removeEventListener("play", analyzeNow);
-      video.removeEventListener("seeked", analyzeNow);
+      video.removeEventListener("seeked", analyzeDiscontinuity);
     };
   }, [
     playbackUrl,
@@ -334,6 +508,7 @@ export function AgentClipEditor({
     needsFaceTracking,
     hasServerTracking,
     faceRect,
+    effectiveLayout,
     onPreviewFaceRectChange,
   ]);
 
@@ -342,6 +517,9 @@ export function AgentClipEditor({
   }, [active]);
 
   const effectiveFaceRect = faceRect ?? browserFaceRect;
+  const effectiveFacecamRect =
+    facecamRect ??
+    (browserFaceRect ? expandFaceToFacecamCrop(browserFaceRect) : null);
   const effectiveFaceCenterX =
     trackedCameraFrame?.centerX ??
     (browserFaceRect
@@ -408,7 +586,10 @@ export function AgentClipEditor({
     if (!video || !playbackUrl) return;
     const seek = () => {
       try {
-        video.currentTime = clip.startTimeSeconds;
+        video.currentTime = mediaTimeForTimeline(
+          clip.startTimeSeconds,
+          playbackTimelineOffsetSeconds
+        );
         setCurrentTime(clip.startTimeSeconds);
       } catch {
         // ignore
@@ -416,7 +597,12 @@ export function AgentClipEditor({
     };
     if (video.readyState >= 1) seek();
     else video.addEventListener("loadedmetadata", seek, { once: true });
-  }, [playbackUrl, clip.id, clip.startTimeSeconds]);
+  }, [
+    playbackUrl,
+    playbackTimelineOffsetSeconds,
+    clip.id,
+    clip.startTimeSeconds,
+  ]);
 
   const commitRange = useCallback(
     async (start: number, end: number) => {
@@ -459,12 +645,15 @@ export function AgentClipEditor({
     const video = videoRef.current;
     if (video) {
       try {
-        video.currentTime = clamped;
+        video.currentTime = mediaTimeForTimeline(
+          clamped,
+          playbackTimelineOffsetSeconds
+        );
       } catch {
         // ignore
       }
     }
-  }, []);
+  }, [playbackTimelineOffsetSeconds]);
 
   const placeClipRangeAt = useCallback(
     (timeSeconds: number) => {
@@ -486,14 +675,17 @@ export function AgentClipEditor({
       const video = videoRef.current;
       if (video) {
         try {
-          video.currentTime = start;
+          video.currentTime = mediaTimeForTimeline(
+            start,
+            playbackTimelineOffsetSeconds
+          );
         } catch {
           // The loaded-metadata effect will apply the new start time.
         }
       }
       void commitRange(start, end);
     },
-    [clip, commitRange, maxTime, onClipChange]
+    [clip, commitRange, maxTime, onClipChange, playbackTimelineOffsetSeconds]
   );
 
   useEffect(() => {
@@ -591,19 +783,35 @@ export function AgentClipEditor({
             videoRef={videoRef}
             posterUrl={clipThumbnailApiUrl(clip.id)}
             faceRect={effectiveFaceRect}
+            facecamRect={effectiveFacecamRect}
             faceCenterX={effectiveFaceCenterX}
             faceCenterY={effectiveFaceCenterY}
             zoom={effectiveZoom}
             layoutOverride={lookPreset === "auto" ? autoResolvedLayout : null}
+            cameraKeyframes={faceKeyframes}
+            cameraStartSeconds={mediaTimeForTimeline(
+              clip.startTimeSeconds,
+              playbackTimelineOffsetSeconds
+            )}
+            cameraBaseCropWidth={faceBaseCropWidth}
             className="mx-auto max-h-[62vh] w-full rounded-none border-0"
             onTimeUpdate={(e) => {
-              const t = e.currentTarget.currentTime;
+              const t = timelineTimeForMedia(
+                e.currentTarget.currentTime,
+                playbackTimelineOffsetSeconds
+              );
               setCurrentTime(t);
               if (t < clip.startTimeSeconds - 0.15) {
-                e.currentTarget.currentTime = clip.startTimeSeconds;
+                e.currentTarget.currentTime = mediaTimeForTimeline(
+                  clip.startTimeSeconds,
+                  playbackTimelineOffsetSeconds
+                );
               } else if (t > clip.endTimeSeconds) {
                 e.currentTarget.pause();
-                e.currentTarget.currentTime = clip.endTimeSeconds;
+                e.currentTarget.currentTime = mediaTimeForTimeline(
+                  clip.endTimeSeconds,
+                  playbackTimelineOffsetSeconds
+                );
               }
             }}
           >
@@ -631,11 +839,16 @@ export function AgentClipEditor({
                 <div style={previewStyles.container}>
                   {activeCue && activeCue.text ? (
                     <p
-                      key={activeCue.id}
+                      key={`${activeCue.id}:${captionAppearance.animation}:${captionAppearance.karaokeEnabled}:${captionAppearance.highlightColor}`}
                       style={previewStyles.text}
                       className={cn(
                         "caption-preview-text whitespace-pre-line break-words",
-                        captionAnimationClass(captionAppearance.animation)
+                        captionAnimationClass(
+                          effectiveCaptionAnimation(
+                            activeCue,
+                            captionAppearance.animation
+                          )
+                        )
                       )}
                     >
                       <CaptionCueText
@@ -823,18 +1036,38 @@ export function AgentClipEditor({
 
       <div className="grid gap-4 lg:grid-cols-2">
         <div className="space-y-3 rounded-lg border border-white/[0.08] bg-[#080a08] p-4">
-          <label className="flex items-center gap-2 text-xs">
-            <input
-              type="checkbox"
-              checked={includeCaptions}
-              onChange={(e) => onIncludeCaptionsChange(e.target.checked)}
-              className="accent-[var(--color-accent)]"
-            />
-            Show &amp; burn captions
-          </label>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <label className="flex items-center gap-2 text-xs">
+              <input
+                type="checkbox"
+                checked={includeCaptions}
+                onChange={(e) => onIncludeCaptionsChange(e.target.checked)}
+                className="accent-[var(--color-accent)]"
+              />
+              Show &amp; burn captions
+            </label>
+            {includeCaptions && (
+              <span className="inline-flex h-6 items-center gap-1.5 rounded-full border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/[0.08] px-2 text-[10px] font-semibold text-[var(--color-accent)]">
+                <span
+                  className={cn(
+                    "h-1.5 w-1.5 rounded-full bg-current",
+                    (captionDirectorLoading || captionRefinementLoading) &&
+                      "animate-pulse"
+                  )}
+                />
+                {captionRefinementLoading
+                  ? "Polishing transcript"
+                  : captionDirectorLoading
+                    ? "Directing captions"
+                  : captionDirectionPlan?.generatedBy === "ai"
+                    ? "AI Caption Director"
+                    : "Caption Director"}
+              </span>
+            )}
+          </div>
           <CaptionAppearancePanel
             appearance={captionAppearance}
-            onChange={onCaptionAppearanceChange}
+            onChange={handleCaptionAppearanceChange}
             disabled={!includeCaptions}
           />
         </div>
@@ -849,9 +1082,12 @@ export function AgentClipEditor({
               Captions are off for this export.
             </p>
           ) : chunksLoading ? (
-            <p className="text-xs text-[var(--color-muted)]">
-              Loading transcript…
-            </p>
+            <OperationProgress
+              compact
+              title="Loading transcript"
+              stages={["Fetching caption words…", "Building editable caption cues…"]}
+              resetKey={`${clip.id}:captions`}
+            />
           ) : cues.length === 0 ? (
             <p className="text-xs text-[var(--color-muted)]">
               No caption cues in this trim range. Try widening the in/out
@@ -867,14 +1103,19 @@ export function AgentClipEditor({
                     activeCue?.id === cue.id && "border-[var(--color-accent)]"
                   )}
                 >
-                  <button
-                    type="button"
-                    className="mb-1 text-[10px] text-[var(--color-muted)] hover:text-[var(--color-accent)]"
-                    onClick={() => seekVideo(cue.startTimeSeconds)}
-                  >
-                    {formatSeconds(cue.startTimeSeconds)}–
-                    {formatSeconds(cue.endTimeSeconds)}
-                  </button>
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      className="text-[10px] text-[var(--color-muted)] hover:text-[var(--color-accent)]"
+                      onClick={() => seekVideo(cue.startTimeSeconds)}
+                    >
+                      {formatSeconds(cue.startTimeSeconds)}–
+                      {formatSeconds(cue.endTimeSeconds)}
+                    </button>
+                    <span className="text-[9px] font-semibold uppercase text-[var(--color-accent)]/80">
+                      {captionDirectionLabel(cue.direction)}
+                    </span>
+                  </div>
                   {editingCueId === cue.id ? (
                     <div className="space-y-2">
                       <textarea

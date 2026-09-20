@@ -20,8 +20,10 @@ import {
   Play,
   RotateCcw,
   Send,
+  ShieldCheck,
   SlidersHorizontal,
   Smartphone,
+  TriangleAlert,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -80,9 +82,21 @@ import {
 } from "@/lib/reframePlayback";
 import { buildFallbackPlatformCopy } from "@/lib/platformCopyDefaults";
 import {
+  invalidateClipStudioCaptionCache,
   loadClipStudioCaptions,
   updateClipStudioCaptionCache,
 } from "@/lib/clipStudioPreload";
+import type { PostRenderQualityReview } from "@/lib/postRenderCritic";
+import { OperationProgress } from "@/components/ui/operation-progress";
+import {
+  directCaptionTrack,
+  type CaptionDirectionPlan,
+} from "@/lib/captionDirector";
+import {
+  mediaCoversTimelineRange,
+  mediaTimeForTimeline,
+  timelineTimeForMedia,
+} from "@/lib/clipPlaybackTime";
 
 type StudioTab = "edit" | "preview" | "export";
 
@@ -172,6 +186,68 @@ function socialContentFromCopy(
   };
 }
 
+function RenderQualityReport({
+  review,
+}: {
+  review: PostRenderQualityReview;
+}) {
+  const passed = review.verdict === "pass";
+  const failed = review.verdict === "fail";
+  const ReviewIcon = passed ? ShieldCheck : TriangleAlert;
+  const tone = passed
+    ? "text-[var(--color-accent)]"
+    : failed
+      ? "text-[var(--color-danger)]"
+      : "text-[var(--color-warning)]";
+
+  return (
+    <div className="mt-4 border-t border-[var(--color-card-border)] pt-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 items-start gap-2.5">
+          <ReviewIcon className={cn("mt-0.5 h-4 w-4 shrink-0", tone)} />
+          <div className="min-w-0">
+            <p className="text-xs font-semibold text-white">
+              {review.reviewer === "ai_visual"
+                ? "AI export critic"
+                : "Export quality check"}
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-[var(--color-muted)]">
+              {review.summary}
+            </p>
+          </div>
+        </div>
+        <div className={cn("shrink-0 text-right", tone)}>
+          <span className="text-lg font-semibold tabular-nums">{review.score}</span>
+          <span className="text-[10px] text-[var(--color-muted)]">/100</span>
+        </div>
+      </div>
+
+      {review.issues.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {review.issues.slice(0, 3).map((issue, index) => (
+            <div
+              key={`${issue.category}-${issue.timestampSeconds ?? "all"}-${index}`}
+              className="border-l-2 border-[var(--color-card-border)] pl-3"
+            >
+              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                <span className="text-xs font-medium text-white">{issue.title}</span>
+                {issue.timestampSeconds !== null && (
+                  <span className="font-mono text-[10px] text-[var(--color-accent)]">
+                    {formatSeconds(issue.timestampSeconds)}
+                  </span>
+                )}
+              </div>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-[var(--color-muted)]">
+                {issue.recommendation}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface SocialAccount {
   id: string;
   platform: SocialPlatform;
@@ -219,7 +295,8 @@ function buildVerticalSelection(
     stacked: {
       ...base.stacked,
       facecamPosition: "top",
-      hideOriginalFacecam: presetId === "gaming" ? "blur" : "none",
+      facecamHeightRatio: presetId === "gaming" ? 0.34 : base.stacked.facecamHeightRatio,
+      hideOriginalFacecam: presetId === "gaming" ? "crop_out" : "none",
     },
     pip: {
       ...base.pip,
@@ -249,12 +326,38 @@ export function AgentClipStudioModal({
   const scrollRef = useRef<HTMLDivElement>(null);
   const [tab, setTab] = useState<StudioTab>("edit");
   const [previewPrimed, setPreviewPrimed] = useState(false);
+  const [preparedPlayback, setPreparedPlayback] = useState<{
+    url: string;
+    timelineOffsetSeconds: number;
+    durationSeconds: number;
+  } | null>(null);
+  const [preparingPlayback, setPreparingPlayback] = useState(false);
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const [playbackPrepareAttempt, setPlaybackPrepareAttempt] = useState(0);
   const [lookPreset, setLookPreset] = useState<ContentLookPresetId>("auto");
   const [reframeStyle, setReframeStyle] =
     useState<ReframeStyle>("professional");
   const [lockSubject, setLockSubject] = useState(false);
   const [faceJobId, setFaceJobId] = useState<string | null>(null);
   const [faceRect, setFaceRect] = useState<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const [facecamRect, setFacecamRect] = useState<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const [gamingFaceRect, setGamingFaceRect] = useState<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const [gamingFacecamRect, setGamingFacecamRect] = useState<{
     x: number;
     y: number;
     width: number;
@@ -277,6 +380,7 @@ export function AgentClipStudioModal({
   const [analyzingFace, setAnalyzingFace] = useState(false);
   const [analysisProgress, setAnalysisProgress] = useState(0);
   const [faceTrackingReady, setFaceTrackingReady] = useState(false);
+  const [activeSpeakerReady, setActiveSpeakerReady] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const lookGenRef = useRef(0);
   const userChoseLookRef = useRef(false);
@@ -298,7 +402,21 @@ export function AgentClipStudioModal({
   >([]);
   const [platformCaptionEdits, setPlatformCaptionEdits] =
     useState<CaptionEditsMap>({});
+  const platformCaptionEditsRef = useRef<CaptionEditsMap>({});
+  const captionClipIdRef = useRef<string | null>(null);
+  const clipRangeRef = useRef({
+    startTimeSeconds: clip.startTimeSeconds,
+    endTimeSeconds: clip.endTimeSeconds,
+  });
+  clipRangeRef.current = {
+    startTimeSeconds: clip.startTimeSeconds,
+    endTimeSeconds: clip.endTimeSeconds,
+  };
   const [platformCaptionsLoading, setPlatformCaptionsLoading] = useState(true);
+  const [captionDirectionPlan, setCaptionDirectionPlan] =
+    useState<CaptionDirectionPlan | null>(null);
+  const [captionDirectorLoading, setCaptionDirectorLoading] = useState(false);
+  const [captionRefinementLoading, setCaptionRefinementLoading] = useState(false);
   const [selectedPlatforms, setSelectedPlatforms] = useState<PlatformKey[]>([
     "youtube_shorts",
     "tiktok",
@@ -308,7 +426,10 @@ export function AgentClipStudioModal({
   const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
   const [rendering, setRendering] = useState(false);
   const [renderProgress, setRenderProgress] = useState(0);
+  const [renderStage, setRenderStage] = useState("queued");
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  const [qualityReview, setQualityReview] =
+    useState<PostRenderQualityReview | null>(null);
   const [packing, setPacking] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [copyingPackage, setCopyingPackage] = useState(false);
@@ -321,10 +442,121 @@ export function AgentClipStudioModal({
   const [actionOk, setActionOk] = useState<string | null>(null);
   includeCaptionsRef.current = includeCaptions;
   onCloseRef.current = onClose;
+  const preparedPlaybackCoversRange = preparedPlayback
+    ? mediaCoversTimelineRange({
+        mediaDurationSeconds: preparedPlayback.durationSeconds,
+        timelineOffsetSeconds: preparedPlayback.timelineOffsetSeconds,
+        rangeStartSeconds: clip.startTimeSeconds,
+        rangeEndSeconds: clip.endTimeSeconds,
+      })
+    : false;
+  const hasPreparedPlayback = preparedPlayback !== null;
+  const effectivePlaybackUrl = preparedPlayback?.url ?? playbackUrl;
+  const playbackTimelineOffsetSeconds = preparedPlayback
+    ? preparedPlayback.timelineOffsetSeconds
+    : 0;
 
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  useEffect(() => {
+    if (!open) {
+      setPreparedPlayback(null);
+      setPreparingPlayback(false);
+      setPlaybackError(null);
+      setPlaybackPrepareAttempt(0);
+      return;
+    }
+    if (preparedPlaybackCoversRange) {
+      setPreparingPlayback(false);
+      setPlaybackError(null);
+      return;
+    }
+    if (playbackUrl && playbackPrepareAttempt === 0 && !hasPreparedPlayback) {
+      setPreparingPlayback(false);
+      setPlaybackError(null);
+      return;
+    }
+
+    let cancelled = false;
+    let retryTimer: number | null = null;
+    setPreparingPlayback(true);
+    setPlaybackError(null);
+    void fetchJson<{
+      playbackUrl?: string;
+      timelineOffsetSeconds?: number;
+      durationSeconds?: number;
+      error?: string;
+      retryable?: boolean;
+      retryAfterMs?: number;
+    }>(`/api/clips/${clip.id}/preview-source`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        startTimeSeconds: clip.startTimeSeconds,
+        endTimeSeconds: clip.endTimeSeconds,
+      }),
+    })
+      .then(({ ok, data }) => {
+        if (cancelled) return;
+        if (!ok || !data.playbackUrl) {
+          if (data.retryable && playbackPrepareAttempt < 24) {
+            const retryAfterMs = Math.max(
+              1000,
+              Math.min(5000, data.retryAfterMs ?? 2500)
+            );
+            retryTimer = window.setTimeout(() => {
+              if (!cancelled) {
+                setPlaybackPrepareAttempt((value) => value + 1);
+              }
+            }, retryAfterMs);
+            return;
+          }
+          throw new Error(data.error ?? "The clip preview could not be prepared.");
+        }
+        setPreparedPlayback({
+          url: data.playbackUrl,
+          timelineOffsetSeconds: Number.isFinite(data.timelineOffsetSeconds)
+            ? Math.max(0, data.timelineOffsetSeconds ?? 0)
+            : 0,
+          durationSeconds: Number.isFinite(data.durationSeconds)
+            ? Math.max(0.1, data.durationSeconds ?? 0.1)
+            : Math.max(0.1, clip.endTimeSeconds - clip.startTimeSeconds),
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setPlaybackError(
+          error instanceof Error
+            ? error.message
+            : "The clip preview could not be prepared."
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setPreparingPlayback(false);
+      });
+
+    return () => {
+      cancelled = true;
+      if (retryTimer) window.clearTimeout(retryTimer);
+    };
+  }, [
+    clip.endTimeSeconds,
+    clip.id,
+    clip.startTimeSeconds,
+    open,
+    playbackPrepareAttempt,
+    playbackUrl,
+    hasPreparedPlayback,
+    preparedPlaybackCoversRange,
+  ]);
+
+  const handlePlaybackUnavailable = useCallback(() => {
+    if (preparingPlayback) return;
+    setPlaybackError(null);
+    setPlaybackPrepareAttempt((value) => value + 1);
+  }, [preparingPlayback]);
 
   useEffect(() => {
     if (!open) {
@@ -360,6 +592,10 @@ export function AgentClipStudioModal({
     userChoseLookRef.current = false;
     setTab("edit");
     setDownloadUrl(null);
+    setQualityReview(null);
+    setCaptionDirectionPlan(null);
+    setCaptionDirectorLoading(false);
+    setRenderStage("queued");
     setPlatformDownloadUrls({});
     setDownloadingPlatform(null);
     setCopyingPackage(false);
@@ -381,6 +617,9 @@ export function AgentClipStudioModal({
     setLockSubject(false);
     setFaceJobId(null);
     setFaceRect(null);
+    setFacecamRect(null);
+    setGamingFaceRect(null);
+    setGamingFacecamRect(null);
     setInstantFaceRect(null);
     setFaceKeyframes([]);
     setFaceBaseCropWidth(null);
@@ -390,6 +629,7 @@ export function AgentClipStudioModal({
     setAnalyzingFace(true);
     setAnalysisProgress(0);
     setFaceTrackingReady(false);
+    setActiveSpeakerReady(false);
     setAnalysisError(null);
 
     void (async () => {
@@ -430,6 +670,27 @@ export function AgentClipStudioModal({
             sourceWidth?: number;
             sourceHeight?: number;
             recommendation?: { layout?: VerticalLayout };
+            professionalPlan?: {
+              sourceLayout?: string;
+              activeSpeaker?: {
+                audioAvailable?: boolean;
+                averageConfidence?: number;
+              } | null;
+            } | null;
+            gamingCandidate?: {
+              faceRect?: {
+                x: number;
+                y: number;
+                width: number;
+                height: number;
+              } | null;
+              rect?: {
+                x: number;
+                y: number;
+                width: number;
+                height: number;
+              } | null;
+            } | null;
           };
           }>(
           `/api/face-analysis/${jobId}?style=${encodeURIComponent(
@@ -463,6 +724,12 @@ export function AgentClipStudioModal({
         const candidate = job.primaryCandidate;
         const rect = candidate?.faceRect ?? candidate?.rect ?? null;
         if (rect) setFaceRect(rect);
+        setFacecamRect(candidate?.rect ?? null);
+        const gamingCandidate = job.gamingCandidate ?? candidate;
+        setGamingFaceRect(
+          gamingCandidate?.faceRect ?? gamingCandidate?.rect ?? null
+        );
+        setGamingFacecamRect(gamingCandidate?.rect ?? null);
         setAutoResolvedLayout(job.recommendation?.layout ?? null);
         if (job.sourceWidth && job.sourceHeight) {
           setFaceBaseCropWidth(
@@ -486,6 +753,10 @@ export function AgentClipStudioModal({
         setAnalyzingFace(false);
         setAnalysisProgress(100);
         setFaceTrackingReady(Boolean(rect || keyframes.length > 0));
+        setActiveSpeakerReady(
+          job.professionalPlan?.sourceLayout === "multi_person" &&
+            job.professionalPlan.activeSpeaker?.audioAvailable === true
+        );
         if (!rect && keyframes.length === 0) {
           setAnalysisError(
             job.warnings?.[0] ??
@@ -511,7 +782,7 @@ export function AgentClipStudioModal({
           startSeconds: clip.startTimeSeconds,
           endSeconds: clip.endTimeSeconds,
           clipSuggestionId: clip.id,
-          sampleFps: 2.5,
+          sampleFps: 4,
           priority: true,
         }),
       }).catch((error: unknown) => ({
@@ -564,7 +835,19 @@ export function AgentClipStudioModal({
             savedStyle,
             savedLock
           );
-          if (status === "completed") return;
+          if (status === "completed") {
+            // The request above may have queued a newer analysis-version job.
+            // Keep the cached framing visible, but only stop polling when that
+            // request resolved to the same completed job.
+            const requestedFace = await faceRequest;
+            if (
+              !requestedFace.ok ||
+              requestedFace.data.analysisJobId ===
+                data.configuration.faceAnalysisJobId
+            ) {
+              return;
+            }
+          }
         }
       }
 
@@ -580,6 +863,7 @@ export function AgentClipStudioModal({
       const jobId = face.data.analysisJobId;
       setFaceJobId(jobId);
       setAnalyzingFace(true);
+      setAnalysisProgress(0);
       setAnalysisError(null);
       if (
         !userChoseLookRef.current &&
@@ -744,34 +1028,148 @@ export function AgentClipStudioModal({
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
+    const clipChanged = captionClipIdRef.current !== clip.id;
+    captionClipIdRef.current = clip.id;
     setPlatformCaptionsLoading(true);
-    setPlatformCaptionChunks([]);
-    setPlatformCaptionEdits({});
-    void loadClipStudioCaptions(
-      sessionId,
-      clip.startTimeSeconds,
-      clip.endTimeSeconds
-    )
+    if (clipChanged) {
+      setPlatformCaptionChunks([]);
+      setPlatformCaptionEdits({});
+      platformCaptionEditsRef.current = {};
+    }
+    const timer = window.setTimeout(() => {
+      void loadClipStudioCaptions(
+        sessionId,
+        clip.startTimeSeconds,
+        clip.endTimeSeconds
+      )
       .then((bundle) => {
         if (cancelled) return;
         setPlatformCaptionChunks(bundle.chunks);
-        setPlatformCaptionEdits(bundle.edits);
+        setPlatformCaptionEdits((current) => {
+          const merged = clipChanged
+            ? bundle.edits
+            : { ...bundle.edits, ...current };
+          platformCaptionEditsRef.current = merged;
+          return merged;
+        });
       })
       .catch(() => {
         if (cancelled) return;
-        setPlatformCaptionChunks([]);
-        setPlatformCaptionEdits({});
+        // Keep the previous caption window visible during a transient refresh error.
       })
       .finally(() => {
         if (!cancelled) setPlatformCaptionsLoading(false);
       });
+    }, 120);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
   }, [open, sessionId, clip.id, clip.startTimeSeconds, clip.endTimeSeconds]);
 
+  useEffect(() => {
+    if (!open) return;
+    const controller = new AbortController();
+    setCaptionRefinementLoading(true);
+
+    void fetch(`/api/clips/${clip.id}/transcript-refinement`, {
+      method: "POST",
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const body = (await response.json()) as {
+          status?: "refined" | "cached" | "skipped";
+        };
+        if (!response.ok || body.status !== "refined") return;
+
+        invalidateClipStudioCaptionCache(sessionId);
+        const currentRange = clipRangeRef.current;
+        const bundle = await loadClipStudioCaptions(
+          sessionId,
+          currentRange.startTimeSeconds,
+          currentRange.endTimeSeconds
+        );
+        if (controller.signal.aborted) return;
+        setPlatformCaptionChunks(bundle.chunks);
+        setPlatformCaptionEdits(bundle.edits);
+        platformCaptionEditsRef.current = bundle.edits;
+        setCaptionDirectionPlan(null);
+      })
+      .catch((error) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        // Refinement is opportunistic; the initial transcript remains editable.
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setCaptionRefinementLoading(false);
+      });
+
+    return () => controller.abort();
+  }, [open, sessionId, clip.id]);
+
+  useEffect(() => {
+    if (
+      !open ||
+      platformCaptionsLoading ||
+      captionRefinementLoading ||
+      platformCaptionChunks.length === 0
+    ) {
+      return;
+    }
+    const controller = new AbortController();
+    setCaptionDirectorLoading(true);
+    void fetch(`/api/clips/${clip.id}/caption-direction`, {
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const body = (await response.json()) as {
+          plan?: CaptionDirectionPlan;
+          error?: string;
+        };
+        if (!response.ok || !body.plan) {
+          throw new Error(body.error ?? "Caption direction unavailable");
+        }
+        setCaptionDirectionPlan(body.plan);
+      })
+      .catch((error) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        // The local director is already active, so AI failure never blocks editing.
+        setCaptionDirectionPlan(null);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setCaptionDirectorLoading(false);
+      });
+    return () => controller.abort();
+  }, [
+    open,
+    clip.id,
+    platformCaptionsLoading,
+    captionRefinementLoading,
+    platformCaptionChunks.length,
+  ]);
+
+  useEffect(() => {
+    if (!open) return;
+    // A rendered URL is only valid for the caption configuration that made it.
+    setDownloadUrl(null);
+    setQualityReview(null);
+    setPlatformDownloadUrls({});
+  }, [
+    open,
+    includeCaptions,
+    captionAppearance,
+    captionDirectionPlan,
+    clip.startTimeSeconds,
+    clip.endTimeSeconds,
+  ]);
+
   const previewMeta = PLATFORM_PRESETS[previewPlatform];
   const thumbUrl = clipThumbnailApiUrl(clip.id);
+  const selectedFaceRect =
+    lookPreset === "gaming" ? gamingFaceRect ?? faceRect : faceRect;
+  const selectedFacecamRect =
+    lookPreset === "gaming" ? gamingFacecamRect ?? facecamRect : facecamRect;
 
   const duration = clip.endTimeSeconds - clip.startTimeSeconds;
   const activePlatformCopy = platformCopies[previewPlatform];
@@ -809,17 +1207,63 @@ export function AgentClipStudioModal({
       : 1;
   const platformCaptionCues = useMemo(() => {
     const track = buildCaptionTrack(platformCaptionChunks, "vertical");
-    return applyCaptionEdits(track, platformCaptionEdits).filter(
-      (cue) =>
-        cue.endTimeSeconds > clip.startTimeSeconds &&
-        cue.startTimeSeconds < clip.endTimeSeconds
+    return directCaptionTrack(
+      applyCaptionEdits(track, platformCaptionEdits).filter(
+        (cue) =>
+          cue.endTimeSeconds > clip.startTimeSeconds &&
+          cue.startTimeSeconds < clip.endTimeSeconds
+      ),
+      captionDirectionPlan
     );
   }, [
     platformCaptionChunks,
     platformCaptionEdits,
     clip.startTimeSeconds,
     clip.endTimeSeconds,
+    captionDirectionPlan,
   ]);
+
+  const resolveRenderCaptionCues = useCallback(async () => {
+    if (!includeCaptions) return undefined;
+    const bundle = await loadClipStudioCaptions(
+      sessionId,
+      clip.startTimeSeconds,
+      clip.endTimeSeconds
+    );
+    const edits = { ...bundle.edits, ...platformCaptionEditsRef.current };
+    setPlatformCaptionChunks(bundle.chunks);
+    setPlatformCaptionEdits(edits);
+    platformCaptionEditsRef.current = edits;
+    return directCaptionTrack(
+      applyCaptionEdits(buildCaptionTrack(bundle.chunks, "vertical"), edits).filter(
+        (cue) =>
+          cue.endTimeSeconds > clip.startTimeSeconds &&
+          cue.startTimeSeconds < clip.endTimeSeconds
+      ),
+      captionDirectionPlan
+    );
+  }, [
+    includeCaptions,
+    sessionId,
+    clip.startTimeSeconds,
+    clip.endTimeSeconds,
+    captionDirectionPlan,
+  ]);
+
+  const persistCurrentClipRange = useCallback(async () => {
+    const { ok, data } = await fetchJson<{ error?: string }>(
+      `/api/clips/${clip.id}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          startTimeSeconds: clip.startTimeSeconds,
+          endTimeSeconds: clip.endTimeSeconds,
+        }),
+      }
+    );
+    if (!ok) throw new Error(data.error ?? "Could not save the current clip range");
+  }, [clip.id, clip.startTimeSeconds, clip.endTimeSeconds]);
   const activePlatformCaptionCue = useMemo(
     () => lookupCueAtTime(platformCaptionCues, previewTime),
     [platformCaptionCues, previewTime]
@@ -855,7 +1299,10 @@ export function AgentClipStudioModal({
     if (video) {
       video.pause();
       try {
-        video.currentTime = clip.startTimeSeconds;
+        video.currentTime = mediaTimeForTimeline(
+          clip.startTimeSeconds,
+          playbackTimelineOffsetSeconds
+        );
       } catch {
         // Metadata may still be loading; the next play will seek correctly.
       }
@@ -872,11 +1319,18 @@ export function AgentClipStudioModal({
       return;
     }
     const play = () => {
+      const timelineTime = timelineTimeForMedia(
+        video.currentTime,
+        playbackTimelineOffsetSeconds
+      );
       if (
-        video.currentTime < clip.startTimeSeconds - 0.1 ||
-        video.currentTime >= clip.endTimeSeconds - 0.05
+        timelineTime < clip.startTimeSeconds - 0.1 ||
+        timelineTime >= clip.endTimeSeconds - 0.05
       ) {
-        video.currentTime = clip.startTimeSeconds;
+        video.currentTime = mediaTimeForTimeline(
+          clip.startTimeSeconds,
+          playbackTimelineOffsetSeconds
+        );
       }
       void video.play().catch(() => setPreviewPlaying(false));
     };
@@ -892,15 +1346,24 @@ export function AgentClipStudioModal({
     event: SyntheticEvent<HTMLVideoElement>
   ) => {
     const video = event.currentTarget;
-    const time = video.currentTime;
+    const time = timelineTimeForMedia(
+      video.currentTime,
+      playbackTimelineOffsetSeconds
+    );
     if (time < clip.startTimeSeconds - 0.15) {
-      video.currentTime = clip.startTimeSeconds;
+      video.currentTime = mediaTimeForTimeline(
+        clip.startTimeSeconds,
+        playbackTimelineOffsetSeconds
+      );
       setPreviewTime(clip.startTimeSeconds);
       return;
     }
     if (time >= clip.endTimeSeconds) {
       video.pause();
-      video.currentTime = clip.startTimeSeconds;
+      video.currentTime = mediaTimeForTimeline(
+        clip.startTimeSeconds,
+        playbackTimelineOffsetSeconds
+      );
       setPreviewTime(clip.startTimeSeconds);
       setPreviewPlaying(false);
       return;
@@ -1061,7 +1524,12 @@ export function AgentClipStudioModal({
     setActionError(null);
     setActionOk(null);
     setRenderProgress(5);
+    setRenderStage("queued");
     try {
+      await persistCurrentClipRange();
+      setRenderProgress(8);
+      setRenderStage("captions");
+      const renderCaptionCues = await resolveRenderCaptionCues();
       const selection = buildVerticalSelection(
         lookPreset,
         faceJobId,
@@ -1075,13 +1543,21 @@ export function AgentClipStudioModal({
         "vertical",
         includeCaptions,
         captionAppearance,
-        undefined,
-        (u) => setRenderProgress(u.progress),
+        renderCaptionCues,
+        (u) => {
+          setRenderProgress(u.progress);
+          setRenderStage(
+            u.progress >= 94 && u.status !== "completed"
+              ? "quality_check"
+              : u.stage ?? u.status
+          );
+        },
         undefined,
         undefined,
         selection
       );
       setDownloadUrl(result.downloadUrl);
+      setQualityReview(result.qualityReview);
       await triggerFileDownload(
         result.downloadUrl,
         `${clip.title.slice(0, 40) || "short"}.mp4`
@@ -1096,10 +1572,15 @@ export function AgentClipStudioModal({
   }
 
   async function ensureRendered(): Promise<boolean> {
-    if (downloadUrl || clip.status === "rendered") return true;
+    if (downloadUrl) return true;
     setRendering(true);
+    setRenderStage("queued");
     setActionError(null);
     try {
+      await persistCurrentClipRange();
+      setRenderProgress(8);
+      setRenderStage("captions");
+      const renderCaptionCues = await resolveRenderCaptionCues();
       const selection = buildVerticalSelection(
         lookPreset,
         faceJobId,
@@ -1113,13 +1594,21 @@ export function AgentClipStudioModal({
         "vertical",
         includeCaptions,
         captionAppearance,
-        undefined,
-        (u) => setRenderProgress(u.progress),
+        renderCaptionCues,
+        (u) => {
+          setRenderProgress(u.progress);
+          setRenderStage(
+            u.progress >= 94 && u.status !== "completed"
+              ? "quality_check"
+              : u.stage ?? u.status
+          );
+        },
         undefined,
         undefined,
         selection
       );
       setDownloadUrl(result.downloadUrl);
+      setQualityReview(result.qualityReview);
       onClipChange({ ...clip, status: "rendered" });
       return true;
     } catch (err) {
@@ -1660,16 +2149,54 @@ export function AgentClipStudioModal({
                     {analysisError}
                   </p>
                 )}
+                {preparingPlayback && !effectivePlaybackUrl && (
+                  <OperationProgress
+                    compact
+                    title="Preparing playable preview"
+                    detail="Building a lightweight video for this moment…"
+                    progress={null}
+                    resetKey={`${clip.id}:studio-playback`}
+                    className="mt-2"
+                  />
+                )}
+                {playbackError && !effectivePlaybackUrl && (
+                  <div className="mt-2 flex items-center justify-between gap-3 rounded-md border border-[var(--color-warning,#e6b84d)]/25 bg-[var(--color-warning,#e6b84d)]/10 px-3 py-2">
+                    <p className="text-xs text-[var(--color-warning,#e6b84d)]">
+                      {playbackError}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPlaybackPrepareAttempt((value) => value + 1)
+                      }
+                      className="shrink-0 text-xs font-semibold text-white hover:text-[var(--color-accent)]"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
                 {analyzingFace && (
-                  <p className="mt-2 flex items-center gap-2 text-xs text-[var(--color-muted)]">
-                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-accent)]" />
-                    Tracking faces… {analysisProgress}%
-                  </p>
+                  <OperationProgress
+                    compact
+                    title="Preparing smart framing"
+                    detail={
+                      analysisProgress >= 75
+                        ? "Choosing the strongest framing…"
+                        : analysisProgress >= 40
+                          ? "Tracking faces across scene changes…"
+                          : "Reading representative video frames…"
+                    }
+                    progress={analysisProgress > 0 ? analysisProgress : null}
+                    resetKey={`${clip.id}:face-analysis`}
+                    className="mt-2"
+                  />
                 )}
                 {faceTrackingReady && !analyzingFace && !analysisError && (
                   <p className="mt-2 flex items-center gap-2 text-xs text-[var(--color-accent)]">
                     <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-accent)]" />
-                    Face tracking ready
+                    {activeSpeakerReady
+                      ? "Audio-visual speaker tracking ready"
+                      : "Face tracking ready"}
                   </p>
                 )}
               </section>
@@ -1677,7 +2204,9 @@ export function AgentClipStudioModal({
               <AgentClipEditor
                 sessionId={sessionId}
                 clip={clip}
-                playbackUrl={playbackUrl}
+                playbackUrl={effectivePlaybackUrl}
+                playbackTimelineOffsetSeconds={playbackTimelineOffsetSeconds}
+                onPlaybackUnavailable={handlePlaybackUnavailable}
                 sourceDuration={sourceDuration}
                 includeCaptions={includeCaptions}
                 onIncludeCaptionsChange={onIncludeCaptionsChange}
@@ -1685,7 +2214,8 @@ export function AgentClipStudioModal({
                 onCaptionAppearanceChange={onCaptionAppearanceChange}
                 onClipChange={onClipChange}
                 lookPreset={lookPreset}
-                faceRect={faceRect}
+                faceRect={selectedFaceRect}
+                facecamRect={selectedFacecamRect}
                 faceKeyframes={faceKeyframes}
                 faceBaseCropWidth={faceBaseCropWidth}
                 autoResolvedLayout={autoResolvedLayout}
@@ -1699,6 +2229,7 @@ export function AgentClipStudioModal({
                 prefetchedCaptionsLoading={platformCaptionsLoading}
                 onCaptionEditsChange={(edits) => {
                   setPlatformCaptionEdits(edits);
+                  platformCaptionEditsRef.current = edits;
                   updateClipStudioCaptionCache(
                     sessionId,
                     clip.startTimeSeconds,
@@ -1708,6 +2239,9 @@ export function AgentClipStudioModal({
                 }}
                 active={tab === "edit"}
                 onPreviewFaceRectChange={setInstantFaceRect}
+                captionDirectionPlan={captionDirectionPlan}
+                captionDirectorLoading={captionDirectorLoading}
+                captionRefinementLoading={captionRefinementLoading}
               />
             </div>
           </div>
@@ -1752,20 +2286,27 @@ export function AgentClipStudioModal({
                     captionAppearance={captionAppearance}
                     copy={activePlatformCopy}
                   >
-                    {playbackUrl ? (
+                    {effectivePlaybackUrl ? (
                       <LookVideoStage
                         presetId={lookPreset}
-                        playbackUrl={playbackUrl}
+                        playbackUrl={effectivePlaybackUrl}
                         videoRef={platformVideoRef}
                         posterUrl={thumbUrl}
                         preload={tab === "preview" ? "auto" : "metadata"}
-                        faceRect={faceRect ?? instantFaceRect}
+                        faceRect={selectedFaceRect ?? instantFaceRect}
+                        facecamRect={selectedFacecamRect}
                         faceCenterX={platformCameraFrame?.centerX}
                         faceCenterY={platformCameraFrame?.centerY}
                         zoom={platformCameraZoom}
                         layoutOverride={
                           lookPreset === "auto" ? autoResolvedLayout : null
                         }
+                        cameraKeyframes={faceKeyframes}
+                        cameraStartSeconds={mediaTimeForTimeline(
+                          clip.startTimeSeconds,
+                          playbackTimelineOffsetSeconds
+                        )}
+                        cameraBaseCropWidth={faceBaseCropWidth}
                         className="h-full w-full rounded-none border-0"
                         onTimeUpdate={onPlatformPreviewTimeUpdate}
                         onPlay={() => setPreviewPlaying(true)}
@@ -1779,7 +2320,7 @@ export function AgentClipStudioModal({
                       <button
                         type="button"
                         onClick={togglePreviewPlayback}
-                        disabled={!playbackUrl}
+                        disabled={!effectivePlaybackUrl}
                         className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--color-accent)] text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-40"
                         aria-label={previewPlaying ? "Pause platform preview" : "Play platform preview"}
                       >
@@ -1791,12 +2332,15 @@ export function AgentClipStudioModal({
                         max={Math.max(0.1, duration)}
                         step={0.05}
                         value={previewElapsed}
-                        disabled={!playbackUrl}
+                        disabled={!effectivePlaybackUrl}
                         onChange={(event) => {
                           const next = clip.startTimeSeconds + Number(event.target.value);
                           setPreviewTime(next);
                           if (platformVideoRef.current) {
-                            platformVideoRef.current.currentTime = next;
+                            platformVideoRef.current.currentTime = mediaTimeForTimeline(
+                              next,
+                              playbackTimelineOffsetSeconds
+                            );
                           }
                         }}
                         className="h-1.5 min-w-0 flex-1 cursor-pointer accent-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-40"
@@ -1808,7 +2352,7 @@ export function AgentClipStudioModal({
                       <button
                         type="button"
                         onClick={resetPreviewPlayback}
-                        disabled={!playbackUrl}
+                        disabled={!effectivePlaybackUrl}
                         className="rounded-lg p-2 text-[var(--color-muted)] hover:bg-[var(--color-secondary)] hover:text-[var(--color-foreground)] disabled:opacity-40"
                         aria-label="Restart platform preview"
                       >
@@ -1816,7 +2360,13 @@ export function AgentClipStudioModal({
                       </button>
                     </div>
                     <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-[var(--color-muted)]">
-                      <span>{playbackUrl ? "Watch the selected clip inside the final post frame." : "Preview video is not available yet."}</span>
+                      <span>
+                        {effectivePlaybackUrl
+                          ? "Watch the selected clip inside the final post frame."
+                          : preparingPlayback
+                            ? "Preparing the selected clip preview…"
+                            : "Preview video is not available yet."}
+                      </span>
                       {durationHint && <span className="font-medium text-[var(--color-accent)]">{durationHint}</span>}
                     </div>
                   </div>
@@ -1938,12 +2488,43 @@ export function AgentClipStudioModal({
                     onClick={() => void handleRenderDownload()}
                   >
                     {rendering
-                      ? `Rendering… ${renderProgress}%`
+                      ? renderStage === "quality_check"
+                        ? "Reviewing export..."
+                        : `Rendering... ${renderProgress}%`
                       : downloadUrl
                         ? "Download again"
                         : "Render & download"}
                   </Button>
                 </div>
+                {rendering && (
+                  <OperationProgress
+                    title={
+                      renderStage === "quality_check"
+                        ? "Reviewing export"
+                        : "Rendering your video"
+                    }
+                    detail={
+                      renderStage === "queued"
+                        ? "Waiting for the render worker..."
+                        : renderStage === "captions"
+                          ? "Loading every caption in the final clip range..."
+                          : renderStage === "prepare_source" ||
+                              renderStage === "download_source"
+                            ? "Preparing the highest-quality source media..."
+                            : renderStage === "cached_source" ||
+                                renderStage === "local_hd_source" ||
+                                renderStage === "source_ready"
+                              ? "Source ready. Starting the final encode..."
+                        : renderStage === "quality_check"
+                          ? "Checking framing, captions, and output quality..."
+                          : "Encoding the final high-quality video..."
+                    }
+                    progress={renderProgress > 0 ? renderProgress : null}
+                    resetKey={`${clip.id}:render`}
+                    className="mt-4"
+                  />
+                )}
+                {qualityReview && <RenderQualityReport review={qualityReview} />}
               </div>
 
               <div className="rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-4">

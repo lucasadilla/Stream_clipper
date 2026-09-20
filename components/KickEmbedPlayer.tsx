@@ -13,6 +13,7 @@ interface KickEmbedPlayerProps {
   channel: string;
   onTimeUpdate?: (time: number) => void;
   onDurationChange?: (duration: number) => void;
+  onFrameReady?: () => void;
   fillContainer?: boolean;
 }
 
@@ -20,7 +21,7 @@ export const KickEmbedPlayer = forwardRef<
   StreamPlayerHandle,
   KickEmbedPlayerProps
 >(function KickEmbedPlayer(
-  { channel, onTimeUpdate, onDurationChange, fillContainer },
+  { channel, onTimeUpdate, onDurationChange, onFrameReady, fillContainer },
   ref
 ) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -63,6 +64,7 @@ export const KickEmbedPlayer = forwardRef<
         allow="autoplay; fullscreen; picture-in-picture"
         allowFullScreen
         title={`Kick stream: ${channel}`}
+        onLoad={onFrameReady}
       />
     </div>
   );

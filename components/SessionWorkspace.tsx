@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import Link from "next/link";
-import posthog from "posthog-js";
 import { EditorHeader } from "@/components/layout/EditorHeader";
 import { VideoPreview } from "@/components/VideoPreview";
 import type { StreamPlayerHandle } from "@/types/streamPlayer";
@@ -47,13 +46,15 @@ import {
   readEditorPreparedFlag,
   writeEditorPreparedFlag,
 } from "@/lib/editorReadiness";
+import type { SessionMode } from "@/lib/sessionMode";
 
-interface SessionData {
+export interface SessionData {
   id: string;
   platform?: StreamPlatform;
   youtubeVideoId: string;
   youtubeUrl?: string | null;
   title?: string | null;
+  thumbnailUrl?: string | null;
   liveStatus?: string | null;
   actualStartTime?: string | null;
   videoDurationSeconds?: number;
@@ -71,6 +72,9 @@ interface SessionData {
 
 interface SessionWorkspaceProps {
   sessionId: string;
+  initialSession?: SessionData | null;
+  modeSwitching?: boolean;
+  onModeChange?: (mode: SessionMode) => void;
 }
 
 function timelineThumbsEqual(
@@ -125,8 +129,39 @@ function mergeById<T extends { id: string }>(
   return [...merged.values()].sort((a, b) => timeOf(a) - timeOf(b));
 }
 
-export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
-  const [session, setSession] = useState<SessionData | null>(null);
+function timelinePlayheadKey(sessionId: string): string {
+  return `clipper:timelinePlayhead:${sessionId}`;
+}
+
+function readTimelinePlayhead(sessionId: string): number {
+  if (typeof window === "undefined") return 0;
+  try {
+    return sanitizeDurationSeconds(
+      Number(sessionStorage.getItem(timelinePlayheadKey(sessionId)) ?? 0)
+    );
+  } catch {
+    return 0;
+  }
+}
+
+function writeTimelinePlayhead(sessionId: string, seconds: number): void {
+  try {
+    sessionStorage.setItem(
+      timelinePlayheadKey(sessionId),
+      String(sanitizeDurationSeconds(seconds))
+    );
+  } catch {
+    // Ignore private-mode and storage failures.
+  }
+}
+
+export function SessionWorkspace({
+  sessionId,
+  initialSession = null,
+  modeSwitching,
+  onModeChange,
+}: SessionWorkspaceProps) {
+  const [session, setSession] = useState<SessionData | null>(initialSession);
   const [transcripts, setTranscripts] = useState<
     Array<{
       id: string;
@@ -145,13 +180,16 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   >([]);
   const [newSegmentIds, setNewSegmentIds] = useState<Set<string>>(new Set());
   const prevTranscriptIds = useRef<Set<string>>(new Set());
-  const [currentTime, setCurrentTime] = useState(0);
+  const [currentTime, setCurrentTime] = useState(() =>
+    readTimelinePlayhead(sessionId)
+  );
+  const [previewSeeking, setPreviewSeeking] = useState(true);
   const [playerDuration, setPlayerDuration] = useState(0);
   const handlePlayerDurationChange = useCallback((duration: number) => {
     setPlayerDuration(sanitizeDurationSeconds(duration));
   }, []);
 
-  const currentTimeRef = useRef(0);
+  const currentTimeRef = useRef(currentTime);
   const timeUpdateRaf = useRef<number | null>(null);
   const lastUiTimeFlush = useRef(0);
   const scrubLockUntil = useRef(0);
@@ -189,8 +227,8 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   }, []);
 
   const [liveClock, setLiveClock] = useState(() => Date.now());
-  const [loading, setLoading] = useState(true);
-  const [editorReady, setEditorReady] = useState(false);
+  const [loading, setLoading] = useState(!initialSession);
+  const [editorReady, setEditorReady] = useState(Boolean(initialSession));
   const [prepareClock, setPrepareClock] = useState(() => Date.now());
   const [error, setError] = useState<string | null>(null);
   const [transcriptionError, setTranscriptionError] = useState<string | null>(null);
@@ -217,7 +255,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const eventsCursorRef = useRef<string | null>(null);
   const transcriptSignature = useRef("");
   const captionRebuildAttempted = useRef(false);
-  const sessionLoadedOnce = useRef(false);
+  const sessionLoadedOnce = useRef(Boolean(initialSession));
   const prepareStartedAt = useRef<number | null>(null);
   const previousSessionIdRef = useRef(sessionId);
   const previouslyPreparedRef = useRef(readEditorPreparedFlag(sessionId));
@@ -235,6 +273,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const seekTo = useCallback(
     (seconds: number) => {
       const t = sanitizeDurationSeconds(seconds);
+      setPreviewSeeking(false);
       scrubTargetRef.current = t;
       scrubLockUntil.current = performance.now() + 800;
       currentTimeRef.current = t;
@@ -260,6 +299,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   const scrubTo = useCallback(
     (seconds: number) => {
       const t = pinPlayhead(seconds);
+      setPreviewSeeking(true);
       playerRef.current?.seekTo(t, { play: false });
     },
     [pinPlayhead]
@@ -304,6 +344,9 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       if (!data.session) throw new Error("Session not found");
       setSession(data.session);
       sessionLoadedOnce.current = true;
+      setEditorReady(true);
+      previouslyPreparedRef.current = true;
+      writeEditorPreparedFlag(sessionId, true);
       if (prepareStartedAt.current == null) {
         prepareStartedAt.current = Date.now();
       }
@@ -459,15 +502,23 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
     setCaptionAppearance(readCaptionAppearancePreference());
   }, []);
 
+  const handlePreviewFrameReady = useCallback(() => {
+    setPreviewSeeking(false);
+  }, []);
+
+  useEffect(() => {
+    writeTimelinePlayhead(sessionId, currentTime);
+  }, [currentTime, sessionId]);
+
   useEffect(() => {
     let cancelled = false;
 
     if (previousSessionIdRef.current !== sessionId) {
       previousSessionIdRef.current = sessionId;
       previouslyPreparedRef.current = readEditorPreparedFlag(sessionId);
-      setEditorReady(false);
+      setEditorReady(Boolean(initialSession));
       prepareStartedAt.current = null;
-      sessionLoadedOnce.current = false;
+      sessionLoadedOnce.current = Boolean(initialSession);
       sourceStarted.current = false;
       captionRebuildAttempted.current = false;
       transcriptSignature.current = "";
@@ -477,29 +528,27 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       eventsCursorRef.current = null;
       setPrepareClock(Date.now());
       setError(null);
+      const restoredPlayhead = readTimelinePlayhead(sessionId);
+      currentTimeRef.current = restoredPlayhead;
+      setCurrentTime(restoredPlayhead);
+      setPreviewSeeking(true);
       setTranscripts([]);
       setThumbnails([]);
-      setSession(null);
+      setSession(initialSession);
     }
 
-    setLoading(true);
-    void (async () => {
-      try {
-        await Promise.all([
-          loadSession({ holdLoading: true }),
-          loadEvents(),
-          loadCaptionEdits(),
-          loadThumbnails(),
-        ]);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
+    if (!sessionLoadedOnce.current) setLoading(true);
+    void loadSession({ holdLoading: true }).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    void loadEvents();
+    void loadCaptionEdits();
+    void loadThumbnails();
 
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [sessionId, initialSession]);
 
   useEffect(() => {
     if (!session) return;
@@ -536,6 +585,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
           return;
         }
         setSourcePreparationError(null);
+        void loadSession();
       })
       .catch((error) => {
         setSourcePreparationError(
@@ -544,6 +594,8 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
             : "Source download failed on the server"
         );
       });
+    // Source acquisition runs once per session; loadSession reads the same id.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
   const isLive =
@@ -703,9 +755,12 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
           setTranscriptionError(
             "Waiting for audio track — video-only capture detected, fetching audio…"
           );
-        } else if (data.reason === "no_openai_key") {
+        } else if (
+          data.reason === "no_transcription_provider" ||
+          data.reason === "no_openai_key"
+        ) {
           setTranscriptionError(
-            "Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env"
+            "Set DEEPGRAM_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY in .env"
           );
         } else if (data.reason === "too_short") {
           setTranscriptionError("Waiting for enough audio to transcribe...");
@@ -815,6 +870,24 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [segmentTranscripts, recordedBlockKey, newSegmentIds.size]
   );
+  const previewPosterUrl = useMemo(() => {
+    if (thumbnails.length === 0) return null;
+    let nearest = thumbnails[0];
+    let nearestDistance = Math.abs(
+      (nearest.startTimeSeconds + nearest.endTimeSeconds) / 2 - currentTime
+    );
+    for (let index = 1; index < thumbnails.length; index++) {
+      const candidate = thumbnails[index];
+      const distance = Math.abs(
+        (candidate.startTimeSeconds + candidate.endTimeSeconds) / 2 - currentTime
+      );
+      if (distance < nearestDistance) {
+        nearest = candidate;
+        nearestDistance = distance;
+      }
+    }
+    return nearest.url;
+  }, [currentTime, thumbnails]);
 
   const editorReadiness = useMemo(
     () =>
@@ -856,6 +929,8 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   if (loading) {
     return (
       <EditorPreparingScreen
+        modeSwitching={modeSwitching}
+        onModeChange={onModeChange}
         readiness={{
           ...computeEditorReadiness({
             recordedSeconds: 0,
@@ -873,7 +948,13 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
   if (error || !session) {
     return (
       <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
-        <EditorHeader title="Editor" mode="timeline" compact />
+        <EditorHeader
+          title="Editor"
+          mode="timeline"
+          modeSwitching={modeSwitching}
+          onModeChange={onModeChange}
+          compact
+        />
         <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6">
           <p className="text-[var(--color-danger)]">{error ?? "Session not found"}</p>
           <Link href="/" className="text-[var(--color-accent)] text-sm hover:underline">
@@ -889,6 +970,8 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
       <EditorPreparingScreen
         title={session.title ?? "Editor"}
         readiness={editorReadiness}
+        modeSwitching={modeSwitching}
+        onModeChange={onModeChange}
       />
     );
   }
@@ -966,6 +1049,8 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
         storageLabel={session.storageLabel}
         isLive={isLive}
         recordedSeconds={recordedSeconds}
+        modeSwitching={modeSwitching}
+        onModeChange={onModeChange}
         compact
       />
 
@@ -1003,6 +1088,9 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
                 streamPageUrl={session.youtubeUrl}
                 recordedSeconds={recordedSeconds}
                 preferLocalVideo={preferLocalVideo}
+                currentTime={currentTime}
+                posterUrl={previewPosterUrl ?? session.thumbnailUrl}
+                showPoster={previewSeeking}
                 playerRef={playerRef}
                 transcripts={transcripts}
                 captionsEnabled={captionsEnabled}
@@ -1018,6 +1106,7 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
                 }}
                 onTimeUpdate={handlePlayerTimeUpdate}
                 onDurationChange={handlePlayerDurationChange}
+                onFrameReady={handlePreviewFrameReady}
               />
             </div>
 
@@ -1057,11 +1146,20 @@ export function SessionWorkspace({ sessionId }: SessionWorkspaceProps) {
               onPause={pausePlayback}
               onScrub={scrubTo}
               onClipCreated={loadEvents}
+              playbackUrl={playbackVideoUrl}
               includeCaptions={captionsEnabled}
               captionChunks={transcripts}
               captionAppearance={captionAppearance}
               captionEdits={captionEdits}
               onCaptionEdit={handleCaptionEdit}
+              onIncludeCaptionsChange={(enabled) => {
+                setCaptionsEnabled(enabled);
+                writeCaptionsEnabledPreference(enabled);
+              }}
+              onCaptionAppearanceChange={(appearance) => {
+                setCaptionAppearance(appearance);
+                writeCaptionAppearancePreference(appearance);
+              }}
             />
           </div>
         </div>

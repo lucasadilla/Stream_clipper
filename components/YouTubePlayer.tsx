@@ -21,8 +21,10 @@ export type YouTubePlayerHandle = StreamPlayerHandle;
 
 interface YouTubePlayerProps {
   videoId: string;
+  initialTime?: number;
   onTimeUpdate?: (time: number) => void;
   onDurationChange?: (duration: number) => void;
+  onFrameReady?: () => void;
   /** When true, player fills its parent height instead of using aspect-video */
   fillContainer?: boolean;
 }
@@ -72,7 +74,14 @@ function loadYouTubeIframeApi(): Promise<void> {
 
 export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>(
   function YouTubePlayer(
-    { videoId, onTimeUpdate, onDurationChange, fillContainer },
+    {
+      videoId,
+      initialTime = 0,
+      onTimeUpdate,
+      onDurationChange,
+      onFrameReady,
+      fillContainer,
+    },
     ref
   ) {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -87,10 +96,13 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
     );
     const onTimeUpdateRef = useRef(onTimeUpdate);
     const onDurationChangeRef = useRef(onDurationChange);
+    const onFrameReadyRef = useRef(onFrameReady);
+    const initialTimeRef = useRef(initialTime);
 
     useEffect(() => {
       onTimeUpdateRef.current = onTimeUpdate;
       onDurationChangeRef.current = onDurationChange;
+      onFrameReadyRef.current = onFrameReady;
     });
 
     const applySeek = useCallback(
@@ -110,11 +122,27 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
           if (!play) {
             // Stay on the scrubbed time while paused.
             onTimeUpdateRef.current?.(seconds);
-            return;
+          } else {
+            onTimeUpdateRef.current?.(
+              Math.abs(reported - seconds) < 3 ? reported : seconds
+            );
           }
-          onTimeUpdateRef.current?.(
-            Math.abs(reported - seconds) < 3 ? reported : seconds
-          );
+
+          const revealWhenBuffered = (attempt: number) => {
+            if (playerRef.current !== player) return;
+            const loaded =
+              (
+                player as YT.Player & {
+                  getVideoLoadedFraction?: () => number;
+                }
+              ).getVideoLoadedFraction?.() ?? 0;
+            if (loaded > 0 || attempt >= 20) {
+              onFrameReadyRef.current?.();
+              return;
+            }
+            window.setTimeout(() => revealWhenBuffered(attempt + 1), 100);
+          };
+          revealWhenBuffered(0);
         }, 120);
       },
       []
@@ -222,6 +250,8 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
               if (pending && isYtPlayerReady(playerRef.current)) {
                 pendingSeekRef.current = null;
                 applySeek(playerRef.current, pending.seconds, pending.play);
+              } else if (isYtPlayerReady(playerRef.current)) {
+                applySeek(playerRef.current, initialTimeRef.current, false);
               }
             },
             onStateChange: (event: YT.OnStateChangeEvent) => {

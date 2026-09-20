@@ -92,8 +92,6 @@ export const DEFAULT_CENTER_CROP_SETTINGS: ResolvedCenterCropSettings = {
   useBlurredBackground: false,
 };
 
-const SCALE_FLAGS = "flags=fast_bilinear";
-
 function toEven(value: number): number {
   const rounded = Math.round(value);
   return rounded % 2 === 0 ? rounded : rounded - 1;
@@ -123,8 +121,14 @@ export interface FilterBuildContext {
   sourceHeight: number;
   outputWidth: number;
   outputHeight: number;
+  /** Fast for previews, Lanczos for final masters. */
+  scaleFlags?: "fast_bilinear" | "lanczos";
   /** Unique suffix for internal pad labels (needed inside -filter_complex). */
   labelSuffix?: string;
+}
+
+function scaleFlags(ctx: FilterBuildContext): string {
+  return `flags=${ctx.scaleFlags ?? "fast_bilinear"}`;
 }
 
 function assertContext(ctx: FilterBuildContext): void {
@@ -272,7 +276,7 @@ export function buildStackedFacecamFilter(
   // Facecam panel: crop the region, cover-scale, then crop centered on the face.
   filters.push(
     `[face_src${suffix}]crop=${facePx.width}:${facePx.height}:${facePx.x}:${facePx.y},` +
-      `scale=${outW}:${facePanelH}:force_original_aspect_ratio=increase:${SCALE_FLAGS},` +
+      `scale=${outW}:${facePanelH}:force_original_aspect_ratio=increase:${scaleFlags(ctx)},` +
       `crop=${outW}:${facePanelH}:x='${faceCrop.x}':y='${faceCrop.y}',setsar=1` +
       (divider > 0
         ? `,pad=${outW}:${facePanelH + divider}:0:${cfg.facecamPosition === "top" ? 0 : divider}:color=${dividerColor}`
@@ -299,8 +303,8 @@ export function buildStackedFacecamFilter(
     originalFacecamRect ?? rect
   );
   filters.push(
-    `[${gameIn}]scale=${outW}:${gamePanelH}:force_original_aspect_ratio=increase:${SCALE_FLAGS},` +
-      `crop=${outW}:${gamePanelH}:x=${cropX},setsar=1[game${suffix}]`
+    `[${gameIn}]scale=${outW}:${gamePanelH}:force_original_aspect_ratio=increase:${scaleFlags(ctx)},` +
+      `crop=${outW}:${gamePanelH}:x=${cropX}:y=(ih-oh)/2,setsar=1[game${suffix}]`
   );
 
   const stackOrder =
@@ -390,13 +394,13 @@ export function buildPictureInPictureFilter(
     originalFacecamRect ?? rect
   );
   filters.push(
-    `[${baseIn}]scale=${outW}:${outH}:force_original_aspect_ratio=increase:${SCALE_FLAGS},` +
+    `[${baseIn}]scale=${outW}:${outH}:force_original_aspect_ratio=increase:${scaleFlags(ctx)},` +
       `crop=${outW}:${outH}:x=${cropX},setsar=1[base${suffix}]`
   );
 
   filters.push(
     `[pip_src${suffix}]crop=${facePx.width}:${facePx.height}:${facePx.x}:${facePx.y},` +
-      `scale=${pipW}:${pipH}:force_original_aspect_ratio=increase:${SCALE_FLAGS},` +
+      `scale=${pipW}:${pipH}:force_original_aspect_ratio=increase:${scaleFlags(ctx)},` +
       `crop=${pipW}:${pipH}:x='${pipFocus.x}':y='${pipFocus.y}',setsar=1` +
       (border > 0
         ? `,pad=${totalW}:${totalH}:${border}:${border}:color=${borderColor}`
@@ -432,15 +436,15 @@ export function buildCenterCropFilter(
     // Blurred cover background + fitted foreground.
     return [
       `split=2[bg_src${suffix}][fg_src${suffix}]`,
-      `[bg_src${suffix}]scale=${outW}:${outH}:force_original_aspect_ratio=increase:${SCALE_FLAGS},` +
+      `[bg_src${suffix}]scale=${outW}:${outH}:force_original_aspect_ratio=increase:${scaleFlags(ctx)},` +
         `crop=${outW}:${outH},boxblur=20:2[bg${suffix}]`,
-      `[fg_src${suffix}]scale=${outW}:${outH}:force_original_aspect_ratio=decrease:${SCALE_FLAGS}[fg${suffix}]`,
+      `[fg_src${suffix}]scale=${outW}:${outH}:force_original_aspect_ratio=decrease:${scaleFlags(ctx)}[fg${suffix}]`,
       `[bg${suffix}][fg${suffix}]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p`,
     ].join(";");
   }
 
   return (
-    `scale=${scaleW}:${scaleH}:force_original_aspect_ratio=increase:${SCALE_FLAGS},` +
+    `scale=${scaleW}:${scaleH}:force_original_aspect_ratio=increase:${scaleFlags(ctx)},` +
     `crop=${outW}:${outH}:x='${focalExpr}':y=(ih-oh)/2,setsar=1,format=yuv420p`
   );
 }
@@ -561,7 +565,7 @@ export function buildSubjectAwareCropFilter(
     outH
   );
   return (
-    `scale=${scaledWidth}:${scaledHeight}:${SCALE_FLAGS},` +
+    `scale=${scaledWidth}:${scaledHeight}:${scaleFlags(ctx)},` +
     `crop=${outW}:${outH}:x='${xExpr}':y='${yExpr}',setsar=1,format=yuv420p`
   );
 }

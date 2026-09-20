@@ -168,7 +168,11 @@ export async function reclaimEphemeralStorage(options?: {
       try {
         const entries = await fs.readdir(uploadDir);
         const segments = entries
-          .filter((name) => /^segment-\d+-\d+\.mp4$/i.test(name))
+          .filter((name) =>
+            /^(?:segment-\d+-\d+|render-source-\d+-\d+(?:-h\d+)?)\.mp4$/i.test(
+              name
+            )
+          )
           .map((name) => ({
             name,
             full: path.join(uploadDir, name),

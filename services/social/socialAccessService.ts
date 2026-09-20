@@ -1,5 +1,6 @@
 import { auth } from "@/auth";
 import { prisma } from "@/lib/db";
+import { selectLatestFinalRenderJob } from "@/lib/renderJobSelection";
 import {
   ensureSessionBillingAccess,
   SessionAccessError,
@@ -64,8 +65,8 @@ export async function requireClipAccessForUser(
       renderJobs: {
         where: { status: "completed" },
         orderBy: { completedAt: "desc" },
-        take: 1,
-        select: { id: true, outputPath: true, status: true },
+        take: 20,
+        select: { id: true, outputPath: true, status: true, params: true },
       },
     },
   });
@@ -88,5 +89,20 @@ export async function requireClipAccessForUser(
     // ensureSessionBillingAccess already checked cookie/account
   }
 
-  return { userId, clip };
+  const finalRender = selectLatestFinalRenderJob(clip.renderJobs);
+  return {
+    userId,
+    clip: {
+      ...clip,
+      renderJobs: finalRender
+        ? [
+            {
+              id: finalRender.id,
+              outputPath: finalRender.outputPath,
+              status: finalRender.status,
+            },
+          ]
+        : [],
+    },
+  };
 }

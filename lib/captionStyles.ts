@@ -35,23 +35,51 @@ export function sanitizeCaptionText(text: string): string {
 export function wrapCaptionText(text: string, maxChars: number, maxLines = 2): string {
   const words = sanitizeCaptionText(text).split(/\s+/).filter(Boolean);
   if (words.length === 0) return "";
+  if (words.join(" ").length <= maxChars) return words.join(" ");
+
+  if (maxLines === 2 && words.length > 1) {
+    let bestSplit = 1;
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (let split = 1; split < words.length; split += 1) {
+      const firstLength = words.slice(0, split).join(" ").length;
+      const secondLength = words.slice(split).join(" ").length;
+      const overflow =
+        Math.max(0, firstLength - maxChars) +
+        Math.max(0, secondLength - maxChars);
+      const imbalance = Math.abs(firstLength - secondLength);
+      const score = overflow * 100 + imbalance;
+      if (score < bestScore) {
+        bestScore = score;
+        bestSplit = split;
+      }
+    }
+    const first = words.slice(0, bestSplit).join(" ");
+    const second = words.slice(bestSplit).join(" ");
+    if (first.length <= maxChars && second.length <= maxChars) {
+      return `${first}\n${second}`;
+    }
+  }
 
   const lines: string[] = [];
   let line = "";
 
-  for (const word of words) {
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index]!;
+    if (lines.length === maxLines - 1) {
+      line = [line, ...words.slice(index)].filter(Boolean).join(" ");
+      break;
+    }
     const candidate = line ? `${line} ${word}` : word;
     if (candidate.length > maxChars && line) {
       lines.push(line);
       line = word;
-      if (lines.length >= maxLines) break;
     } else {
       line = candidate;
     }
   }
 
   if (lines.length < maxLines && line) lines.push(line);
-  return lines.slice(0, maxLines).join("\n");
+  return lines.join("\n");
 }
 
 export function formatCaptionTextForBurn(

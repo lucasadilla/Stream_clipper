@@ -11,8 +11,11 @@ import type { StreamPlayerHandle } from "@/types/streamPlayer";
 
 interface LocalVideoPlayerProps {
   src: string;
+  initialTime?: number;
+  posterUrl?: string | null;
   onTimeUpdate?: (time: number) => void;
   onDurationChange?: (duration: number) => void;
+  onFrameReady?: () => void;
   onError?: () => void;
   fillContainer?: boolean;
 }
@@ -40,7 +43,16 @@ export const LocalVideoPlayer = forwardRef<
   StreamPlayerHandle,
   LocalVideoPlayerProps
 >(function LocalVideoPlayer(
-  { src, onTimeUpdate, onDurationChange, onError, fillContainer },
+  {
+    src,
+    initialTime = 0,
+    posterUrl,
+    onTimeUpdate,
+    onDurationChange,
+    onFrameReady,
+    onError,
+    fillContainer,
+  },
   ref
 ) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -48,18 +60,27 @@ export const LocalVideoPlayer = forwardRef<
   const loadedVersionRef = useRef<string | null>(null);
   const onTimeUpdateRef = useRef(onTimeUpdate);
   const onDurationChangeRef = useRef(onDurationChange);
+  const onFrameReadyRef = useRef(onFrameReady);
   const onErrorRef = useRef(onError);
+  const initialTimeRef = useRef(initialTime);
+  const pendingSeekRef = useRef<{ seconds: number; play: boolean } | null>(null);
   onTimeUpdateRef.current = onTimeUpdate;
   onDurationChangeRef.current = onDurationChange;
+  onFrameReadyRef.current = onFrameReady;
   onErrorRef.current = onError;
 
   const seekTo = useCallback(
     (seconds: number, options?: { play?: boolean }) => {
       const video = videoRef.current;
       if (!video) return;
+      const play = options?.play !== false;
+      if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
+        pendingSeekRef.current = { seconds, play };
+        return;
+      }
       const duration = Number.isFinite(video.duration) ? video.duration : Infinity;
       video.currentTime = Math.max(0, Math.min(seconds, Math.max(0, duration - 0.05)));
-      if (options?.play === false) {
+      if (!play) {
         void video.pause();
       } else {
         void video.play().catch(() => {});
@@ -101,19 +122,37 @@ export const LocalVideoPlayer = forwardRef<
     video.setAttribute("src", src);
     video.load();
     const restore = () => {
-      if (previousTime > 0.25 && Number.isFinite(previousTime)) {
+      const pending = pendingSeekRef.current;
+      pendingSeekRef.current = null;
+      const requestedTime =
+        pending?.seconds ??
+        (previousTime > 0.25 && Number.isFinite(previousTime)
+          ? previousTime
+          : initialTimeRef.current);
+      const needsSeek = Math.abs(requestedTime - previousTime) > 0.05;
+      if (Number.isFinite(requestedTime)) {
         try {
-          const duration = Number.isFinite(video.duration) ? video.duration : previousTime;
-          video.currentTime = Math.min(previousTime, Math.max(0, duration - 0.05));
+          const duration = Number.isFinite(video.duration)
+            ? video.duration
+            : requestedTime;
+          video.currentTime = Math.max(
+            0,
+            Math.min(requestedTime, Math.max(0, duration - 0.05))
+          );
         } catch {
           // ignore seek before ready
         }
       }
-      if (!wasPaused) {
+      if (pending ? pending.play : !wasPaused) {
         void video.play().catch(() => {});
+      } else {
+        void video.pause();
       }
       if (Number.isFinite(video.duration) && video.duration > 0) {
         onDurationChangeRef.current?.(video.duration);
+      }
+      if (!needsSeek) {
+        requestAnimationFrame(() => onFrameReadyRef.current?.());
       }
     };
     video.addEventListener("loadeddata", restore, { once: true });
@@ -129,6 +168,7 @@ export const LocalVideoPlayer = forwardRef<
         onDurationChangeRef.current?.(video.duration);
       }
     };
+    const onSeeked = () => onFrameReadyRef.current?.();
     const onTime = () => onTimeUpdateRef.current?.(video.currentTime);
     const onDuration = () => {
       if (Number.isFinite(video.duration) && video.duration > 0) {
@@ -150,6 +190,7 @@ export const LocalVideoPlayer = forwardRef<
     video.addEventListener("loadedmetadata", onLoaded);
     video.addEventListener("durationchange", onDuration);
     video.addEventListener("timeupdate", onTime);
+    video.addEventListener("seeked", onSeeked);
     video.addEventListener("error", onMediaError);
     video.addEventListener("stalled", onStalled);
 
@@ -157,6 +198,7 @@ export const LocalVideoPlayer = forwardRef<
       video.removeEventListener("loadedmetadata", onLoaded);
       video.removeEventListener("durationchange", onDuration);
       video.removeEventListener("timeupdate", onTime);
+      video.removeEventListener("seeked", onSeeked);
       video.removeEventListener("error", onMediaError);
       video.removeEventListener("stalled", onStalled);
     };
@@ -173,6 +215,7 @@ export const LocalVideoPlayer = forwardRef<
       <video
         ref={videoRef}
         src={src}
+        poster={posterUrl ?? undefined}
         className="absolute inset-0 w-full h-full object-contain bg-black"
         controls
         playsInline

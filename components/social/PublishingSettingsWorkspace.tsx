@@ -15,6 +15,7 @@ import type {
   SocialPlatform,
 } from "@/lib/social/types";
 import type { PublishingPreferencesView } from "@/lib/social/preferences";
+import { OperationProgress } from "@/components/ui/operation-progress";
 
 interface AccountOption {
   id: string;
@@ -165,9 +166,11 @@ export function PublishingSettingsWorkspace() {
     >
       {loading || !prefs ? (
         <div className="mt-10 border border-[var(--color-card-border)] bg-[#050805] p-8">
-          <p className="text-sm text-[var(--color-muted)] animate-pulse">
-            Loading publishing settings…
-          </p>
+          <OperationProgress
+            compact
+            title="Loading publishing settings"
+            stages={["Loading connected destinations…", "Restoring publishing defaults…"]}
+          />
         </div>
       ) : (
         <AccountSettingsPanels>

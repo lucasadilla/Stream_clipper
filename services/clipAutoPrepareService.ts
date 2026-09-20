@@ -27,12 +27,16 @@ export function buildAutoVerticalLayoutRequest(
   faceAnalysisJobId?: string | null,
   contentType: ClipContentType = "general"
 ): VerticalLayoutRequest {
-  const isGaming =
-    contentType === "gaming" || contentType === "gameplay_only";
+  const isGaming = contentType === "gaming";
+  const isGameplayOnly = contentType === "gameplay_only";
   const isConversation = contentType === "podcast";
   return (
     parseVerticalLayoutRequest({
-      layout: "auto",
+      layout: isGaming
+        ? "facecam_top_gameplay_bottom"
+        : isGameplayOnly
+          ? "gameplay_full"
+          : "auto",
       faceAnalysisJobId: faceAnalysisJobId ?? undefined,
       faceSelection: { mode: "auto" },
       stacked: {
@@ -40,7 +44,7 @@ export function buildAutoVerticalLayoutRequest(
         facecamHeightRatio: isGaming ? 0.34 : 0.4,
         dividerSize: 0,
         dividerColor: "#000000",
-        hideOriginalFacecam: "blur",
+        hideOriginalFacecam: isGaming ? "crop_out" : "blur",
       },
       pip: {
         position: "top_right",
@@ -149,6 +153,15 @@ export async function applyCompletedFaceAnalysisToClip(
   const visualContentType = contentTypeFromVisualClassification(
     result?.classification ?? ""
   );
+  const rawAi = job.clipSuggestion?.rawAiJson;
+  const aiContentType =
+    rawAi && typeof rawAi === "object" && !Array.isArray(rawAi)
+      ? (rawAi as { contentType?: unknown }).contentType
+      : undefined;
+  const contentType: ClipContentType =
+    aiContentType === "gaming" || aiContentType === "gameplay_only"
+      ? aiContentType
+      : visualContentType;
 
   const existing = await getVerticalLayoutConfiguration(job.clipSuggestionId);
   // Don't overwrite a user-chosen non-auto layout.
@@ -162,10 +175,11 @@ export async function applyCompletedFaceAnalysisToClip(
     return;
   }
 
+  const preparedRequest = buildAutoVerticalLayoutRequest(job.id, contentType);
   await saveVerticalLayoutConfiguration({
     streamSessionId: job.streamSessionId,
     clipSuggestionId: job.clipSuggestionId,
-    request: buildAutoVerticalLayoutRequest(job.id, visualContentType),
+    request: preparedRequest,
     faceAnalysisJobId: job.id,
   });
 
@@ -179,10 +193,12 @@ export async function applyCompletedFaceAnalysisToClip(
     await prisma.clipSuggestion.update({
       where: { id: job.clipSuggestionId },
       data: {
-        suggestedLayout: recommended,
+        suggestedLayout:
+          preparedRequest.layout === "auto" ? recommended : preparedRequest.layout,
         rawAiJson: toJsonValue({
           ...existingRaw,
           visualContentType,
+          contentType,
         }),
       },
     });

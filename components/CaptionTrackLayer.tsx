@@ -17,6 +17,7 @@ import {
 import type { RefObject } from "react";
 import { CaptionCueText } from "@/components/CaptionCueText";
 import { cn } from "@/lib/utils";
+import { effectiveCaptionAnimation } from "@/lib/captionDirector";
 
 interface CaptionTrackLayerProps {
   enabled: boolean;
@@ -89,8 +90,8 @@ export function CaptionTrackLayer({
           setActiveCue(cue);
         }
         if (
-          appearance.karaokeEnabled ||
-          appearance.animation === "wordReveal"
+          appearance.animation === "wordReveal" ||
+          appearance.karaokeEnabled
         ) {
           setPlayhead(t);
         }
@@ -125,11 +126,13 @@ export function CaptionTrackLayer({
       <div style={previewStyles.container}>
         {activeCue && activeCue.text && (
           <p
-            key={activeCue.id}
+            key={`${activeCue.id}:${appearance.animation}:${appearance.karaokeEnabled}:${appearance.highlightColor}`}
             style={previewStyles.text}
             className={cn(
               "caption-preview-text whitespace-pre-line break-words",
-              captionAnimationClass(appearance.animation)
+              captionAnimationClass(
+                effectiveCaptionAnimation(activeCue, appearance.animation)
+              )
             )}
           >
             <CaptionCueText

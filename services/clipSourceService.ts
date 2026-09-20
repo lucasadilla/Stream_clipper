@@ -23,6 +23,7 @@ import {
 import {
   downloadClipSegmentFromStream,
   isYtDlpAvailable,
+  renderSourceMaxHeight,
   resolveStreamCaptureUrl,
 } from "@/services/youtubeDownloadService";
 import { getPreviewMp4Path } from "@/services/previewVideoService";
@@ -44,7 +45,9 @@ function formatYtDlpTime(seconds: number): string {
 }
 
 function isSegmentFile(name: string): boolean {
-  return /^segment-\d+-\d+\.mp4$/i.test(name);
+  return /^(?:segment-\d+-\d+|render-source-\d+-\d+(?:-h\d+)?)\.mp4$/i.test(
+    name
+  );
 }
 
 /**
@@ -374,6 +377,129 @@ async function ensureSourceMediaRow(
   });
 }
 
+function isOriginalUpload(
+  source: {
+    originalFilename: string;
+    isLiveRecording: boolean;
+  },
+  sourceVideoId: string
+): boolean {
+  const name = path.basename(source.originalFilename).toLowerCase();
+  if (source.isLiveRecording || isSegmentFile(name) || name === "preview.mp4") {
+    return false;
+  }
+  if (/^source(?:\.f\d+)?\./i.test(name)) return false;
+  const stem = path.parse(name).name;
+  return stem !== sourceVideoId.toLowerCase();
+}
+
+function renderSourceFetchTimeoutMs(): number {
+  const configured = Number.parseInt(
+    process.env.RENDER_SOURCE_FETCH_TIMEOUT_MS?.trim() ?? "",
+    10
+  );
+  return Number.isFinite(configured)
+    ? Math.min(180_000, Math.max(15_000, configured))
+    : 45_000;
+}
+
+async function highQualityRemoteClipSource(options: {
+  streamSessionId: string;
+  streamUrl: string;
+  startTimeSeconds: number;
+  endTimeSeconds: number;
+  liveFromStart: boolean;
+}): Promise<{
+  sourceMediaId: string;
+  renderStart: number;
+  renderEnd: number;
+} | null> {
+  if (!(await isYtDlpAvailable())) return null;
+
+  const leadIn = 2;
+  const trailOut = 2;
+  const segmentStart = Math.floor(
+    Math.max(0, options.startTimeSeconds - leadIn)
+  );
+  const segmentEnd = Math.ceil(options.endTimeSeconds + trailOut);
+  const targetHeight = renderSourceMaxHeight();
+  // Including the requested source quality invalidates old 480p/720p cache
+  // files created before high-resolution final rendering was introduced.
+  const filename = `render-source-${segmentStart}-${segmentEnd}-h${targetHeight}.mp4`;
+  const uploadDir = getUploadDir(options.streamSessionId);
+  const outputPath = path.join(uploadDir, filename);
+  const relativePath = toRelativeStoragePath(outputPath);
+
+  await ensureDir(uploadDir);
+  let probe = null;
+  if (existsSync(outputPath)) {
+    try {
+      probe = await probeMedia(outputPath);
+      if (!probe.videoCodec || !(await canDecodeVideoFrame(outputPath))) {
+        probe = null;
+      }
+    } catch {
+      probe = null;
+    }
+  }
+
+  if (!probe) {
+    const tempPath = `${outputPath}.${process.pid}-${Date.now()}.tmp.mp4`;
+    const fs = await import("fs/promises");
+    try {
+      await downloadClipSegmentFromStream(
+        options.streamUrl,
+        formatYtDlpTime(segmentStart),
+        formatYtDlpTime(segmentEnd),
+        tempPath,
+        {
+          liveFromStart: options.liveFromStart,
+          timeoutMs: renderSourceFetchTimeoutMs(),
+        }
+      );
+      probe = await probeMedia(tempPath);
+      if (!probe.videoCodec || !(await canDecodeVideoFrame(tempPath))) {
+        throw new Error("High-resolution clip source was not decodable");
+      }
+      await fs.unlink(outputPath).catch(() => {});
+      await fs.rename(tempPath, outputPath);
+    } finally {
+      await fs.unlink(tempPath).catch(() => {});
+    }
+  }
+
+  const stat = await import("fs/promises").then((fs) => fs.stat(outputPath));
+  const existing = await prisma.sourceMedia.findFirst({
+    where: { streamSessionId: options.streamSessionId, filePath: relativePath },
+  });
+  const data = {
+    originalFilename: filename,
+    filePath: relativePath,
+    mimeType: "video/mp4",
+    sizeBytes: BigInt(stat.size),
+    durationSeconds: probe.durationSeconds || segmentEnd - segmentStart,
+    width: probe.width || null,
+    height: probe.height || null,
+    fps: probe.fps || null,
+    codecInfo: toJsonValue(probe.raw),
+    isLiveRecording: false,
+  };
+  const media = existing
+    ? await prisma.sourceMedia.update({ where: { id: existing.id }, data })
+    : await prisma.sourceMedia.create({
+        data: { streamSessionId: options.streamSessionId, ...data },
+      });
+
+  return {
+    sourceMediaId: media.id,
+    renderStart: options.startTimeSeconds - segmentStart,
+    renderEnd: Math.min(
+      options.endTimeSeconds - segmentStart,
+      probe.durationSeconds || segmentEnd - segmentStart
+    ),
+  };
+}
+
 function localClipFromSource(options: {
   sourceMediaId: string;
   segmentStart?: number;
@@ -416,7 +542,11 @@ export async function ensureClipSourceForRender(
   streamSessionId: string,
   startTimeSeconds: number,
   endTimeSeconds: number,
-  preferredSourceMediaId?: string
+  preferredSourceMediaId?: string,
+  options: {
+    purpose?: "preview" | "final";
+    onStage?: (progress: number, step: string) => void | Promise<void>;
+  } = {}
 ): Promise<{
   sourceMediaId: string;
   renderStart: number;
@@ -436,6 +566,142 @@ export async function ensureClipSourceForRender(
     where: { streamSessionId },
     orderBy: { createdAt: "desc" },
   });
+
+  if (options.purpose === "final") {
+    // A creator upload is already the best source and must never be replaced by
+    // a network copy. Otherwise fetch only this clip range at master quality;
+    // the continuously captured 480p file remains an intentionally cheap edit proxy.
+    const uploadedSource = allSources.find(
+      (source) =>
+        isOriginalUpload(source, session.youtubeVideoId) &&
+        fileExists(source.filePath)
+    );
+    if (uploadedSource) {
+      const absolutePath = resolveStoragePath(uploadedSource.filePath);
+      const duration = await resolveFileDurationSeconds(
+        absolutePath,
+        liveRecordedSeconds,
+        false,
+        endTimeSeconds
+      );
+      const local = localClipFromSource({
+        sourceMediaId: uploadedSource.id,
+        startTimeSeconds,
+        endTimeSeconds,
+        availableDuration: duration,
+      });
+      if (local) {
+        return preferAudibleClipSource(
+          streamSessionId,
+          absolutePath,
+          local,
+          startTimeSeconds,
+          endTimeSeconds
+        );
+      }
+    }
+
+    // Reuse a previously downloaded master segment whenever it fully covers
+    // the new trim. Extending or shortening a clip should not redownload media.
+    for (const source of allSources) {
+      const match = source.originalFilename.match(
+        /^render-source-(\d+)-(\d+)-h(\d+)\.mp4$/i
+      );
+      if (!match || !fileExists(source.filePath)) continue;
+      const segmentStart = Number(match[1]);
+      const segmentEnd = Number(match[2]);
+      const requestedHeight = Number(match[3]);
+      if (
+        segmentStart > startTimeSeconds ||
+        segmentEnd < endTimeSeconds ||
+        requestedHeight < 720
+      ) {
+        continue;
+      }
+      const absolutePath = resolveStoragePath(source.filePath);
+      if (!(await canDecodeVideoFrame(absolutePath))) continue;
+      const local = localClipFromSource({
+        sourceMediaId: source.id,
+        segmentStart,
+        startTimeSeconds,
+        endTimeSeconds,
+        availableDuration: source.durationSeconds ?? segmentEnd - segmentStart,
+      });
+      if (local) {
+        await options.onStage?.(18, "cached_source");
+        return preferAudibleClipSource(
+          streamSessionId,
+          absolutePath,
+          local,
+          startTimeSeconds,
+          endTimeSeconds
+        );
+      }
+    }
+
+    // A configured 720p+ local capture is already export quality and avoids
+    // a second platform download entirely.
+    for (const source of allSources) {
+      if (
+        source.isLiveRecording ||
+        source.originalFilename === "preview.mp4" ||
+        isSegmentFile(source.originalFilename) ||
+        (source.height ?? 0) < 720 ||
+        !fileExists(source.filePath)
+      ) {
+        continue;
+      }
+      const absolutePath = resolveStoragePath(source.filePath);
+      const duration = await resolveFileDurationSeconds(
+        absolutePath,
+        liveRecordedSeconds,
+        false,
+        endTimeSeconds
+      );
+      const local = localClipFromSource({
+        sourceMediaId: source.id,
+        startTimeSeconds,
+        endTimeSeconds,
+        availableDuration: duration,
+      });
+      if (local && (await canDecodeVideoFrame(absolutePath))) {
+        await options.onStage?.(18, "local_hd_source");
+        return preferAudibleClipSource(
+          streamSessionId,
+          absolutePath,
+          local,
+          startTimeSeconds,
+          endTimeSeconds
+        );
+      }
+    }
+
+    const streamUrl = resolveStreamCaptureUrl(session) || session.youtubeUrl;
+    if (streamUrl) {
+      try {
+        await options.onStage?.(18, "download_source");
+        const master = await highQualityRemoteClipSource({
+          streamSessionId,
+          streamUrl,
+          startTimeSeconds,
+          endTimeSeconds,
+          liveFromStart:
+            session.platform !== "kick" &&
+            (session.liveStatus === "live" ||
+              session.liveStatus === "upcoming" ||
+              activelyRecording),
+        });
+        if (master) return master;
+      } catch (error) {
+        // Direct segment retrieval can be blocked by a platform while the local
+        // proxy remains usable. Preserve reliability and render from the proxy.
+        console.warn(
+          "[render] High-resolution source unavailable; using local capture:",
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    }
+  }
 
   // 1. preview.mp4 — only use it after a successful structural probe. File
   // existence/size is insufficient because MP4 writes its moov atom at EOF.
@@ -556,7 +822,7 @@ export async function ensureClipSourceForRender(
     );
 
     const segmentMatch = sourceMedia.originalFilename.match(
-      /^segment-(\d+)-(\d+)\.mp4$/i
+      /^(?:segment|render-source)-(\d+)-(\d+)(?:-h\d+)?\.mp4$/i
     );
     const segmentStart = segmentMatch ? parseInt(segmentMatch[1], 10) : undefined;
 

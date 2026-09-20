@@ -35,7 +35,7 @@ export function ClipSuggestionCard({
   renderHint,
   onSeek,
   onUpdate,
-  includeCaptions = false,
+  includeCaptions = true,
   captionAppearance,
 }: ClipSuggestionCardProps) {
   const [loading, setLoading] = useState(false);

@@ -9,6 +9,7 @@ import {
   preloadClipStudio,
   preloadClipStudioFaceTracker,
 } from "@/lib/clipStudioPreload";
+import { OperationProgress } from "@/components/ui/operation-progress";
 
 export interface AgentClipCardData extends ClipSuggestionData {
   thumbnailUrl?: string | null;
@@ -22,7 +23,6 @@ interface AgentClipPickGridProps {
   onGetMore?: () => void;
   getMoreLoading?: boolean;
   suggesting?: boolean;
-  findingElapsedSec?: number;
   isLive?: boolean;
   onOpenAssistant?: () => void;
   sessionId?: string;
@@ -43,13 +43,12 @@ export function AgentClipPickGrid({
   onGetMore,
   getMoreLoading,
   suggesting,
-  findingElapsedSec = 0,
   isLive = false,
   onOpenAssistant,
   sessionId,
   playbackUrl,
 }: AgentClipPickGridProps) {
-  const [sort, setSort] = useState<ClipSort>("newest");
+  const [sort, setSort] = useState<ClipSort>("best");
 
   useEffect(() => {
     if (clips.length > 0) preloadClipStudioFaceTracker();
@@ -80,18 +79,19 @@ export function AgentClipPickGrid({
 
   if (suggesting && clips.length === 0) {
     return (
-      <div className="flex min-h-[26rem] flex-col items-center justify-center gap-4 border-y border-[var(--color-card-border)] text-center">
-        <div className="relative grid h-14 w-14 place-items-center border border-[var(--color-accent)]/35 bg-[var(--color-accent)]/10">
-          <Sparkles className="h-5 w-5 text-[var(--color-accent)]" />
-          <span className="absolute inset-[-1px] animate-pulse border border-[var(--color-accent)]/20" />
-        </div>
-        <div>
-          <p className="text-base font-semibold text-white">Finding standout moments</p>
-          <p className="mt-1 text-xs text-[var(--color-muted)]">
-            Reading the transcript and scoring each moment
-            {findingElapsedSec > 0 ? ` · ${findingElapsedSec}s` : ""}
-          </p>
-        </div>
+      <div className="flex min-h-[26rem] items-center justify-center border-y border-[var(--color-card-border)] px-6">
+        <OperationProgress
+          title="Finding standout moments"
+          stages={[
+            "Reading the transcript…",
+            "Scoring hooks and payoffs…",
+            "Checking clip boundaries…",
+            "Writing accurate titles…",
+            "Ranking the strongest moments…",
+          ]}
+          resetKey={`clip-search:${sessionId ?? "session"}`}
+          className="max-w-md"
+        />
       </div>
     );
   }
@@ -207,35 +207,38 @@ export function AgentClipPickGrid({
                 warmClip(clip);
                 onOpenClip(clip.id);
               }}
-              className="group flex h-full min-w-0 flex-col overflow-hidden rounded-lg border border-t-2 border-[#292d31] bg-[#0d0f12] text-left shadow-[0_12px_32px_rgba(0,0,0,0.24)] transition-[border-color,background-color,transform,box-shadow] duration-200 hover:-translate-y-1 hover:border-[#596168] hover:bg-[#111419] hover:shadow-[0_18px_42px_rgba(0,0,0,0.38)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#65d8c1]"
+              className="group flex h-full min-w-0 origin-center flex-col overflow-hidden rounded-lg border border-t-2 border-[#292d31] bg-[#0d0f12] text-left shadow-[0_12px_32px_rgba(0,0,0,0.24)] transition-[border-color,background-color,transform,box-shadow] duration-300 ease-out hover:-translate-y-1.5 hover:scale-[1.015] hover:border-[#596168] hover:bg-[#111419] hover:shadow-[0_24px_52px_rgba(0,0,0,0.48)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#65d8c1] motion-reduce:hover:translate-y-0 motion-reduce:hover:scale-100"
               style={{ borderTopColor: cardAccent }}
             >
               <div className="relative aspect-[9/16] w-full shrink-0 overflow-hidden border-b border-white/[0.08] bg-[#050607]">
-                {clip.thumbnailUrl ? (
+                <div
+                  className="absolute inset-0 animate-pulse bg-[#15191d] motion-reduce:animate-none"
+                  aria-hidden="true"
+                />
+                {clip.thumbnailUrl && (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
                     src={clip.thumbnailUrl}
                     alt={`Preview for ${clip.title}`}
-                    className="h-full w-full object-cover object-center opacity-90 transition duration-300 group-hover:scale-[1.025] group-hover:opacity-100"
+                    className="absolute inset-0 h-full w-full object-cover object-center opacity-0 transition-[transform,filter,opacity] duration-500 ease-out group-hover:scale-[1.055] group-hover:brightness-110 group-hover:saturate-[1.08] motion-reduce:group-hover:scale-100"
                     loading="lazy"
+                    onLoad={(event) => {
+                      event.currentTarget.style.opacity = "0.9";
+                    }}
                     onError={(event) => {
                       const image = event.currentTarget;
                       const retries = Number(image.dataset.retry ?? "0");
-                      if (retries >= 3) {
-                        image.style.display = "none";
+                      image.style.opacity = "0";
+                      if (retries >= 8) {
                         return;
                       }
                       image.dataset.retry = String(retries + 1);
                       const base = clip.thumbnailUrl ?? image.src;
                       window.setTimeout(() => {
                         image.src = `${base}${base.includes("?") ? "&" : "?"}retry=${retries + 1}&t=${Date.now()}`;
-                      }, 800 * (retries + 1));
+                      }, Math.min(8_000, 700 * 1.6 ** retries));
                     }}
                   />
-                ) : (
-                  <div className="grid h-full place-items-center bg-[#12161a]">
-                    <Sparkles className="h-5 w-5 text-[#65d8c1]" />
-                  </div>
                 )}
                 <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/75 via-black/5 to-black/20" />
                 <div className="absolute left-3 top-3 rounded-md border border-white/10 bg-black/65 px-2 py-1 text-[9px] font-semibold text-white/90 backdrop-blur-md">
@@ -246,7 +249,7 @@ export function AgentClipPickGrid({
                   {confidence}%
                 </div>
                 <div className="absolute inset-0 grid place-items-center">
-                  <span className="grid h-10 w-10 place-items-center rounded-full border border-white/20 bg-black/55 text-white shadow-[0_8px_24px_rgba(0,0,0,0.35)] backdrop-blur-md transition group-hover:scale-105 group-hover:border-[#f0b75a]/70 group-hover:bg-black/70 group-hover:text-[#f0b75a]">
+                  <span className="grid h-10 w-10 place-items-center rounded-full border border-white/20 bg-black/55 text-white shadow-[0_8px_24px_rgba(0,0,0,0.35)] backdrop-blur-md transition-[transform,border-color,background-color,color,box-shadow] duration-300 ease-out group-hover:scale-110 group-hover:border-[#95ff00]/70 group-hover:bg-[#95ff00] group-hover:text-[#0b0d0c] group-hover:shadow-[0_10px_30px_rgba(149,255,0,0.22)] motion-reduce:group-hover:scale-100">
                     <Play className="ml-0.5 h-3.5 w-3.5 fill-current" aria-hidden="true" />
                   </span>
                 </div>
@@ -257,7 +260,7 @@ export function AgentClipPickGrid({
               </div>
 
               <div
-                className="flex w-full shrink-0 flex-col p-4"
+                className="flex w-full shrink-0 flex-col p-4 transition-transform duration-300 ease-out group-hover:-translate-y-0.5 motion-reduce:group-hover:translate-y-0"
                 style={{ height: "9.75rem" }}
               >
                 <h2

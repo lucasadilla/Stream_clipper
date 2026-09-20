@@ -30,7 +30,12 @@ export type FaceSourceClassification =
   | "embedded_facecam"
   | "moving_subject"
   | "multiple_faces"
-  | "no_face";
+  | "no_face"
+  | "gameplay_only"
+  | "already_vertical"
+  | "group_panel"
+  | "obscured_face"
+  | "intermittent_face";
 
 export type FacecamQuality =
   | "good"
@@ -46,6 +51,10 @@ export type FaceDetection = {
   confidence: number;
   /** Mouth width / face width when the detector provides landmarks. */
   mouthOpenRatio?: number;
+  /** Normalized motion inside the aligned mouth region for this sample. */
+  speakingActivity?: number;
+  /** Normalized audio energy near this video frame. */
+  audioActivity?: number;
 };
 
 export type FaceTrackPoint = {
@@ -53,6 +62,8 @@ export type FaceTrackPoint = {
   rect: NormalizedRect;
   confidence: number;
   mouthOpenRatio?: number;
+  speakingActivity?: number;
+  audioActivity?: number;
 };
 
 export type FaceTrack = {
@@ -76,6 +87,16 @@ export type FaceTrackMetrics = {
    * Higher ≈ more likely the person who is talking.
    */
   speakingScore: number;
+  /** A face size that can survive a vertical crop without excessive enlargement. */
+  sizeUseful: number;
+  /** Central subject bias or a stable corner-facecam bias, whichever is stronger. */
+  centralityOrFacecamBias: number;
+  /** Rapid direction/size changes that look like detector noise. */
+  jitterPenalty: number;
+  /** Penalty for isolated, short-lived detections. */
+  oneFramePopPenalty: number;
+  /** Penalty for tiny transient faces commonly found in alerts, art, and UI. */
+  uiFalsePositivePenalty: number;
 };
 
 export type FacecamCandidate = {
@@ -92,6 +113,68 @@ export type FacecamCandidate = {
   /** Present when mouth landmarks were available during analysis. */
   speakingScore?: number;
 };
+
+/**
+ * Gaming layouts need the stable embedded webcam, not an in-game character or
+ * whichever detected face is currently speaking. Candidate confidence is the
+ * embedded-facecam score produced from persistence, edge affinity and jitter.
+ */
+export function bestEmbeddedFacecamCandidate(
+  candidates: Array<FacecamCandidate | null | undefined>
+): FacecamCandidate | undefined {
+  return candidates
+    .filter((candidate): candidate is FacecamCandidate => Boolean(candidate))
+    .slice()
+    .sort((a, b) => {
+      const confidenceDelta = b.confidence - a.confidence;
+      if (Math.abs(confidenceDelta) > 0.001) return confidenceDelta;
+      const bPixels = b.sourceWidthPixels * b.sourceHeightPixels;
+      const aPixels = a.sourceWidthPixels * a.sourceHeightPixels;
+      return bPixels - aPixels;
+    })[0];
+}
+
+export type ScoredFaceTrack = {
+  track: FaceTrack;
+  metrics: FaceTrackMetrics;
+};
+
+/**
+ * Keep the stable embedded webcam in the candidate set even when character
+ * faces rank higher as active speakers. The primary candidate can still be the
+ * speaker for talking-head layouts; gaming then selects the embedded candidate.
+ */
+export function selectFaceAnalysisCandidates(
+  entries: ScoredFaceTrack[],
+  preferSpeaker: boolean,
+  limit = 4
+): ScoredFaceTrack[] {
+  const safeLimit = Math.max(1, Math.floor(limit));
+  const speakerRanked = entries
+    .slice()
+    .sort(
+      (a, b) => scoreSpeakingSubject(b.metrics) - scoreSpeakingSubject(a.metrics)
+    );
+  const embeddedRanked = entries
+    .slice()
+    .sort(
+      (a, b) => scoreEmbeddedFacecam(b.metrics) - scoreEmbeddedFacecam(a.metrics)
+    );
+  if (!preferSpeaker) return embeddedRanked.slice(0, safeLimit);
+
+  const selected: ScoredFaceTrack[] = [];
+  const add = (entry: ScoredFaceTrack | undefined) => {
+    if (!entry || selected.some((item) => item.track.id === entry.track.id)) return;
+    if (selected.length < safeLimit) selected.push(entry);
+  };
+
+  // Reserve one slot for the best stable/edge-affine webcam candidate.
+  speakerRanked.slice(0, Math.max(0, safeLimit - 1)).forEach(add);
+  add(embeddedRanked[0]);
+  speakerRanked.forEach(add);
+  embeddedRanked.forEach(add);
+  return selected.slice(0, safeLimit);
+}
 
 export type LayoutRecommendation = {
   layout: VerticalLayout;
@@ -273,6 +356,11 @@ export function computeTrackMetrics(
       medianArea: 0,
       centerMovement: 0,
       speakingScore: 0,
+      sizeUseful: 0,
+      centralityOrFacecamBias: 0,
+      jitterPenalty: 1,
+      oneFramePopPenalty: 1,
+      uiFalsePositivePenalty: 1,
     };
   }
 
@@ -299,35 +387,60 @@ export function computeTrackMetrics(
   const sizeStability = Math.max(0, 1 - Math.sqrt(sizeVar) * 10);
 
   let movement = 0;
+  const normalizedSteps: number[] = [];
+  const sizeChanges: number[] = [];
   for (let i = 1; i < centers.length; i++) {
-    movement += Math.hypot(
+    const step = Math.hypot(
       centers[i]!.x - centers[i - 1]!.x,
       centers[i]!.y - centers[i - 1]!.y
     );
+    movement += step;
+    normalizedSteps.push(
+      step / Math.max(0.035, Math.sqrt((areas[i]! + areas[i - 1]!) / 2))
+    );
+    sizeChanges.push(
+      Math.abs(Math.log(Math.max(1e-6, areas[i]!) / Math.max(1e-6, areas[i - 1]!)))
+    );
   }
 
-  const last = points[points.length - 1]!.rect;
-  const edgeDist = Math.min(
-    last.x,
-    last.y,
-    1 - (last.x + last.width),
-    1 - (last.y + last.height)
-  );
+  const edgeDistances = points
+    .map((point) =>
+      Math.min(
+        point.rect.x,
+        point.rect.y,
+        1 - (point.rect.x + point.rect.width),
+        1 - (point.rect.y + point.rect.height)
+      )
+    )
+    .sort((a, b) => a - b);
+  const edgeDist =
+    edgeDistances[Math.floor(edgeDistances.length / 2)] ?? 0.5;
   const edgeAffinity = Math.max(0, 1 - edgeDist * 4);
 
-  // Speaking score: mouth-width variance when landmarks exist; otherwise a
-  // soft fallback from face-height jitter (talking heads bob and open mouth).
+  // Prefer aligned lower-face motion from the worker. Landmark variance is a
+  // secondary signal because mouth-corner distance alone is not lip opening.
+  const directSpeakingSamples = points
+    .map((p) => p.speakingActivity)
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v))
+    .map((value) => Math.min(1, Math.max(0, value)));
   const mouthSamples = points
     .map((p) => p.mouthOpenRatio)
     .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
   let speakingScore = 0;
-  if (mouthSamples.length >= 3) {
+  if (directSpeakingSamples.length >= 2) {
+    const sorted = [...directSpeakingSamples].sort((a, b) => a - b);
+    const upperQuartile =
+      sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.75))] ?? 0;
+    const mean =
+      directSpeakingSamples.reduce((sum, value) => sum + value, 0) /
+      directSpeakingSamples.length;
+    speakingScore = Math.min(1, upperQuartile * 0.7 + mean * 0.3);
+  } else if (mouthSamples.length >= 3) {
     const mean =
       mouthSamples.reduce((s, v) => s + v, 0) / mouthSamples.length;
     const variance =
       mouthSamples.reduce((s, v) => s + (v - mean) ** 2, 0) /
       mouthSamples.length;
-    // Typical idle mouths sit near ~0.35–0.55; talking pushes variance up.
     speakingScore = Math.min(1, Math.sqrt(variance) * 12);
   } else if (heights.length >= 3) {
     const aspectDeltas: number[] = [];
@@ -341,50 +454,160 @@ export function computeTrackMetrics(
     speakingScore = Math.min(1, meanDelta * 25);
   }
 
+  const sortedAreas = [...areas].sort((a, b) => a - b);
+  const medianArea =
+    sortedAreas[Math.floor(sortedAreas.length / 2)] ?? 0;
+  const medianStep = normalizedSteps.length
+    ? [...normalizedSteps].sort((a, b) => a - b)[
+        Math.floor(normalizedSteps.length / 2)
+      ] ?? 0
+    : 0;
+  const medianSizeChange = sizeChanges.length
+    ? [...sizeChanges].sort((a, b) => a - b)[
+        Math.floor(sizeChanges.length / 2)
+      ] ?? 0
+    : 0;
+  const jitterPenalty = Math.min(
+    1,
+    Math.max(0, (medianStep - 0.08) * 2.8) +
+      Math.max(0, (medianSizeChange - 0.09) * 2.2)
+  );
+  const persistence =
+    sampleCount > 0 ? Math.min(1, points.length / sampleCount) : 0;
+  const oneFramePopPenalty =
+    points.length <= 1
+      ? 1
+      : points.length === 2
+        ? 0.8
+        : Math.max(0, (0.16 - persistence) / 0.16);
+  const sizeUseful =
+    medianArea < 0.0025
+      ? Math.max(0, medianArea / 0.0025)
+      : medianArea > 0.32
+        ? Math.max(0.35, 1 - (medianArea - 0.32) * 1.8)
+        : Math.min(1, 0.55 + Math.sqrt(medianArea) * 2.4);
+  const centrality =
+    centers.reduce(
+      (sum, center) =>
+        sum +
+        Math.max(0, 1 - Math.hypot(center.x - 0.5, center.y - 0.48) / 0.68),
+      0
+    ) / centers.length;
+  const facecamBias = edgeAffinity * positionStability * sizeStability;
+  const centralityOrFacecamBias = Math.max(centrality, facecamBias);
+  const uiFalsePositivePenalty = Math.min(
+    1,
+    (medianArea < 0.004 ? 0.5 : 0) +
+      (persistence < 0.22 ? 0.35 : 0) +
+      (sizeStability < 0.45 ? 0.25 : 0) +
+      oneFramePopPenalty * 0.5
+  );
+
   return {
-    persistence: sampleCount > 0 ? Math.min(1, points.length / sampleCount) : 0,
+    persistence,
     averageConfidence: track.averageConfidence,
     positionStability,
     sizeStability,
     edgeAffinity,
-    medianArea: areas.sort((a, b) => a - b)[Math.floor(areas.length / 2)] ?? 0,
+    medianArea,
     centerMovement: movement,
     speakingScore,
+    sizeUseful,
+    centralityOrFacecamBias,
+    jitterPenalty,
+    oneFramePopPenalty,
+    uiFalsePositivePenalty,
   };
 }
 
 /** Prefer the face that is most likely talking (for Follow speaker). */
 export function scoreSpeakingSubject(metrics: FaceTrackMetrics): number {
-  return (
-    metrics.speakingScore * 0.55 +
-    metrics.persistence * 0.25 +
-    metrics.averageConfidence * 0.1 +
-    Math.min(1, metrics.medianArea * 8) * 0.1
+  return Math.min(
+    1,
+    Math.max(
+      0,
+      metrics.persistence * 0.38 +
+        metrics.averageConfidence * 0.22 +
+        metrics.speakingScore * 0.18 +
+        metrics.sizeUseful * 0.12 +
+        metrics.centralityOrFacecamBias * 0.1 -
+        metrics.jitterPenalty * 0.25 -
+        metrics.oneFramePopPenalty * 0.35 -
+        metrics.uiFalsePositivePenalty * 0.2
+    )
   );
 }
 
 export function scoreEmbeddedFacecam(metrics: FaceTrackMetrics): number {
   const w = FACE_SCORING_WEIGHTS;
-  return (
-    metrics.persistence * w.persistence +
-    metrics.positionStability * w.positionStability +
-    metrics.sizeStability * w.sizeStability +
-    metrics.edgeAffinity * w.edgeAffinity +
-    metrics.averageConfidence * w.averageConfidence
+  return Math.min(
+    1,
+    Math.max(
+      0,
+      metrics.persistence * w.persistence +
+        metrics.positionStability * w.positionStability +
+        metrics.sizeStability * w.sizeStability +
+        metrics.edgeAffinity * w.edgeAffinity +
+        metrics.averageConfidence * w.averageConfidence -
+        metrics.jitterPenalty * 0.2 -
+        metrics.oneFramePopPenalty * 0.35 -
+        metrics.uiFalsePositivePenalty * 0.3
+    )
   );
 }
 
 export function classifySourceFromTracks(
   tracks: FaceTrack[],
-  metricsById: Map<string, FaceTrackMetrics>
+  metricsById: Map<string, FaceTrackMetrics>,
+  source?: { width: number; height: number }
 ): { classification: FaceSourceClassification; confidence: number } {
+  if (source && source.height > source.width * 1.2) {
+    return { classification: "already_vertical", confidence: 0.98 };
+  }
   const meaningful = tracks.filter((t) => {
     const m = metricsById.get(t.id);
-    return m && m.persistence >= 0.25 && m.averageConfidence >= 0.5;
+    return (
+      m &&
+      m.persistence >= 0.2 &&
+      m.averageConfidence >= 0.5 &&
+      m.oneFramePopPenalty < 0.75 &&
+      m.uiFalsePositivePenalty < 0.9
+    );
   });
 
   if (meaningful.length === 0) {
+    const intermittent = tracks
+      .map((track) => ({ track, metrics: metricsById.get(track.id) }))
+      .filter(
+        (item): item is { track: FaceTrack; metrics: FaceTrackMetrics } =>
+          Boolean(
+            item.metrics &&
+              item.metrics.persistence >= 0.08 &&
+              item.metrics.averageConfidence >= 0.48 &&
+              item.metrics.oneFramePopPenalty < 0.95
+          )
+      )
+      .sort((a, b) => b.metrics.persistence - a.metrics.persistence)[0];
+    if (intermittent) {
+      return {
+        classification: "intermittent_face",
+        confidence: Math.min(
+          0.62,
+          intermittent.metrics.persistence * 0.7 +
+            intermittent.metrics.averageConfidence * 0.3
+        ),
+      };
+    }
     return { classification: "no_face", confidence: 0.7 };
+  }
+
+  if (meaningful.length >= 3) {
+    const panelTracks = meaningful.filter(
+      (track) => (metricsById.get(track.id)?.persistence ?? 0) >= 0.38
+    );
+    if (panelTracks.length >= 3) {
+      return { classification: "group_panel", confidence: 0.82 };
+    }
   }
 
   if (meaningful.length >= 2) {
@@ -405,6 +628,18 @@ export function classifySourceFromTracks(
     .sort((a, b) => scoreEmbeddedFacecam(b.metrics) - scoreEmbeddedFacecam(a.metrics))[0]!;
 
   const m = best.metrics;
+  if (m.persistence < 0.46) {
+    return {
+      classification: "intermittent_face",
+      confidence: Math.min(0.7, m.persistence * 0.8 + m.averageConfidence * 0.2),
+    };
+  }
+  if (m.averageConfidence < 0.6 || m.jitterPenalty > 0.62) {
+    return {
+      classification: "obscured_face",
+      confidence: Math.min(0.62, m.averageConfidence),
+    };
+  }
   const embeddedScore = scoreEmbeddedFacecam(m);
   const isEmbedded =
     embeddedScore >= 0.55 &&
@@ -437,10 +672,39 @@ export function recommendVerticalLayout(
 ): LayoutRecommendation {
   const warnings = [...(primary?.warnings ?? [])];
 
-  if (classification === "no_face" || !primary) {
+  if (
+    classification === "no_face" ||
+    classification === "gameplay_only" ||
+    classification === "group_panel" ||
+    classification === "already_vertical" ||
+    !primary
+  ) {
     return {
       layout: "center_crop",
-      reason: "No reliable facecam was detected. Center Crop is the safest option.",
+      reason:
+        classification === "already_vertical"
+          ? "The source is already vertical, so only minimal centered reframing is needed."
+          : classification === "group_panel"
+            ? "Several persistent faces share the frame, so a stable wide crop avoids distracting subject hunting."
+            : "No reliable facecam was detected. Center Crop is the safest option.",
+      warnings,
+    };
+  }
+
+  if (classification === "intermittent_face" && primary.confidence < 0.45) {
+    return {
+      layout: "center_crop",
+      reason:
+        "The face appears too inconsistently for reliable tracking, so a stable centered crop is safer.",
+      warnings,
+    };
+  }
+
+  if (classification === "intermittent_face" || classification === "obscured_face") {
+    return {
+      layout: "subject_aware_crop",
+      reason:
+        "A usable but imperfect face track was found. Conservative framing will hold the last good composition through brief losses.",
       warnings,
     };
   }

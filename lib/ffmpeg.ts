@@ -117,7 +117,7 @@ function exportEncodeProfile(options: {
   preset: string;
   crf: string;
   audioBitrate: string;
-  scaleFlags: string;
+  scaleFlags: "fast_bilinear" | "lanczos";
 } {
   if (options.previewQuality) {
     return {
@@ -146,13 +146,13 @@ function exportEncodeProfile(options: {
     (lowMemory ? "medium" : "slow");
   const crf = parseCrf(
     process.env.FFMPEG_EXPORT_CRF,
-    lowMemory ? 18 : 15
+    lowMemory ? 16 : 14
   );
 
   return {
     preset,
     crf,
-    audioBitrate: "256k",
+    audioBitrate: "320k",
     scaleFlags: "lanczos",
   };
 }
@@ -831,14 +831,14 @@ export async function accurateCutSegment(
       process.env.FFMPEG_EXPORT_PRESET?.trim() ||
       (lowMemory ? "medium" : "slow"),
     "-crf",
-    parseCrf(process.env.FFMPEG_EXPORT_CRF, lowMemory ? 18 : 15),
+    parseCrf(process.env.FFMPEG_EXPORT_CRF, lowMemory ? 16 : 14),
     "-threads",
     String(getFfmpegThreadCount()),
     ...x264EncodeArgs(true),
     "-c:a",
     "aac",
     "-b:a",
-    "256k",
+    "320k",
     "-avoid_negative_ts",
     "make_zero",
     "-movflags",
@@ -1025,15 +1025,15 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
   }).scaleFlags;
 
   try {
-    // Prefer a single encode pass from the source (seek + filters) so captions
-    // are not softened by an intermediate re-encode. Low-memory hosts still
-    // cut/downscale first to avoid OOM on long 4K sources.
+    // Final masters always encode directly from the source. Intermediate lossy
+    // cuts made Railway exports visibly softer and caused caption edge ringing.
+    // Low-memory safety is handled by thread/filter limits in encodeWithFilters.
     let encodeInput = inputPath;
     let seekStart: number | undefined = startTimeSeconds;
     let seekDuration: number | undefined = duration;
-    let accurateSeek = Boolean(srtPath);
+    let accurateSeek = !previewQuality;
 
-    if (previewQuality || isFfmpegLowMemoryMode()) {
+    if (previewQuality) {
       const tempCut = `${outputPath}.cut.mp4`;
       tempFiles.push(tempCut);
       if (srtPath) {
@@ -1078,6 +1078,7 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
         sourceHeight: encodeProbe.height,
         outputWidth: width,
         outputHeight: height,
+        scaleFlags,
       });
     } else {
       switch (layout) {
@@ -1203,6 +1204,11 @@ export async function renderSequence(options: RenderSequenceOptions): Promise<vo
   const concatInputs: string[] = [];
   const width = Math.max(2, Math.round(options.width / 2) * 2);
   const height = Math.max(2, Math.round(options.height / 2) * 2);
+  const outputFps =
+    Number.isFinite(probe.fps) && probe.fps > 0
+      ? Math.min(60, Math.max(1, probe.fps))
+      : 30;
+  const fpsFilter = `fps=${outputFps.toFixed(3)}`;
 
   const profile = exportEncodeProfile({ highQuality: true });
   const scaleFlags = profile.scaleFlags;
@@ -1221,11 +1227,11 @@ export async function renderSequence(options: RenderSequenceOptions): Promise<vo
         `[fg${index}]scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=${scaleFlags}[fit${index}]`
       );
       filters.push(
-        `[blur${index}][fit${index}]overlay=(W-w)/2:(H-h)/2,setsar=1,fps=30,format=yuv420p[v${index}]`
+        `[blur${index}][fit${index}]overlay=(W-w)/2:(H-h)/2,setsar=1,${fpsFilter},format=yuv420p[v${index}]`
       );
     } else {
       filters.push(
-        `${source},scale=${width}:${height}:force_original_aspect_ratio=increase:flags=${scaleFlags},crop=${width}:${height},setsar=1,fps=30,format=yuv420p[v${index}]`
+        `${source},scale=${width}:${height}:force_original_aspect_ratio=increase:flags=${scaleFlags},crop=${width}:${height},setsar=1,${fpsFilter},format=yuv420p[v${index}]`
       );
     }
 

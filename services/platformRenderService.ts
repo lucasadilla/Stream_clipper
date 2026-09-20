@@ -4,6 +4,7 @@ import {
   getFfmpegPath,
   getFfmpegThreadCount,
   isFfmpegLowMemoryMode,
+  probeMedia,
   runCommand,
 } from "@/lib/ffmpeg";
 import { PLATFORM_SAFE_ZONES } from "@/lib/platforms/safeZones";
@@ -21,6 +22,8 @@ export interface RenderPlatformVideoInput {
   settings: PlatformExportSettings;
   subtitlePath?: string | null;
   quoteText?: string | null;
+  /** The master already contains the approved preview captions. */
+  sourceIncludesCaptions?: boolean;
 }
 
 function escapeSubtitlePath(filePath: string): string {
@@ -55,9 +58,9 @@ function wrapQuote(value: string, lineLength = 34): string {
 function standardVideoFilter(settings: PlatformExportSettings): string {
   const { width, height } = settings;
   if (settings.aspectRatio === "4:5" || settings.aspectRatio === "1:1") {
-    return `scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=#050805`;
+    return `scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=#050805`;
   }
-  return `scale=${width}:${height}:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=${width}:${height}`;
+  return `scale=${width}:${height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width}:${height}`;
 }
 
 function quoteCardFilter(
@@ -74,7 +77,7 @@ function quoteCardFilter(
   const videoHeight = settings.height - quoteHeight;
   const videoY = layout === "quote_bottom" ? 0 : quoteHeight;
   const textY = layout === "quote_bottom" ? videoHeight + `((${quoteHeight}-text_h)/2)` : `(${quoteHeight}-text_h)/2`;
-  return `scale=${settings.width}:${videoHeight}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad=${settings.width}:${settings.height}:(ow-iw)/2:${videoY}:color=#050805,drawtext=text='${quote}':fontcolor=white:fontsize=${fontSize}:line_spacing=14:x=(w-text_w)/2:y=${textY}`;
+  return `scale=${settings.width}:${videoHeight}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${settings.width}:${settings.height}:(ow-iw)/2:${videoY}:color=#050805,drawtext=text='${quote}':fontcolor=white:fontsize=${fontSize}:line_spacing=14:x=(w-text_w)/2:y=${textY}`;
 }
 
 function subtitleFilter(
@@ -92,14 +95,25 @@ async function encode(
   input: RenderPlatformVideoInput,
   includeQuoteCard: boolean
 ): Promise<void> {
-  const filters = [
-    includeQuoteCard && input.quoteText
-      ? quoteCardFilter(input.settings, input.quoteText, input.settings.xQuoteLayout)
-      : standardVideoFilter(input.settings),
-  ];
-  if (input.settings.burnSubtitles && input.subtitlePath) {
-    filters.push(subtitleFilter(input.platform, input.settings, input.subtitlePath));
-  }
+  const filters = buildPlatformVideoFilters(input, includeQuoteCard);
+
+  const lowMemory = isFfmpegLowMemoryMode();
+  const preset =
+    process.env.FFMPEG_PLATFORM_EXPORT_PRESET?.trim() ||
+    process.env.FFMPEG_EXPORT_PRESET?.trim() ||
+    (lowMemory ? "medium" : "slow");
+  const configuredCrf = Number.parseInt(
+    process.env.FFMPEG_PLATFORM_EXPORT_CRF?.trim() ||
+      process.env.FFMPEG_EXPORT_CRF?.trim() ||
+      "",
+    10
+  );
+  const crf =
+    Number.isFinite(configuredCrf) && configuredCrf >= 0 && configuredCrf <= 51
+      ? String(configuredCrf)
+      : lowMemory
+        ? "16"
+        : "14";
 
   const args = [
     "-y",
@@ -117,9 +131,9 @@ async function encode(
     "-c:v",
     "libx264",
     "-preset",
-    process.env.FFMPEG_RENDER_PRESET?.trim() || "ultrafast",
+    preset,
     "-crf",
-    isFfmpegLowMemoryMode() ? "26" : "23",
+    crf,
     "-pix_fmt",
     "yuv420p",
     "-threads",
@@ -127,15 +141,80 @@ async function encode(
     "-c:a",
     "aac",
     "-b:a",
-    "128k",
+    "320k",
     "-movflags",
     "+faststart",
   ];
-  if (isFfmpegLowMemoryMode()) {
+  if (lowMemory) {
     args.push("-filter_threads", "1", "-max_muxing_queue_size", "1024");
   }
   args.push(input.outputPath);
   await runCommand(getFfmpegPath(), args);
+}
+
+export function buildPlatformVideoFilters(
+  input: RenderPlatformVideoInput,
+  includeQuoteCard: boolean
+): string[] {
+  const filters = [
+    includeQuoteCard && input.quoteText
+      ? quoteCardFilter(input.settings, input.quoteText, input.settings.xQuoteLayout)
+      : standardVideoFilter(input.settings),
+  ];
+  if (
+    input.settings.burnSubtitles &&
+    input.subtitlePath &&
+    !input.sourceIncludesCaptions
+  ) {
+    filters.push(subtitleFilter(input.platform, input.settings, input.subtitlePath));
+  }
+  return filters;
+}
+
+async function reuseFinishedMaster(input: RenderPlatformVideoInput): Promise<boolean> {
+  const wantsQuote =
+    input.platform === "x" &&
+    input.settings.xQuoteCard &&
+    Boolean(input.quoteText);
+  const needsNewCaptions =
+    input.settings.burnSubtitles &&
+    Boolean(input.subtitlePath) &&
+    !input.sourceIncludesCaptions;
+  if (wantsQuote || needsNewCaptions) return false;
+
+  const source = await probeMedia(input.inputPath).catch(() => null);
+  if (
+    !source ||
+    source.width !== input.settings.width ||
+    source.height !== input.settings.height ||
+    source.videoCodec !== "h264" ||
+    (source.audioCodec != null && source.audioCodec !== "aac")
+  ) {
+    return false;
+  }
+
+  await runCommand(getFfmpegPath(), [
+    "-y",
+    "-nostdin",
+    "-loglevel",
+    "error",
+    "-i",
+    input.inputPath,
+    "-map",
+    "0:v:0",
+    "-map",
+    "0:a:0?",
+    "-c",
+    "copy",
+    "-map_metadata",
+    "0",
+    "-map_chapters",
+    "-1",
+    "-movflags",
+    "+faststart",
+    input.outputPath,
+  ]);
+  return true;
 }
 
 export async function renderPlatformVideo(
@@ -146,12 +225,15 @@ export async function renderPlatformVideo(
   const wantsQuote =
     input.platform === "x" && input.settings.xQuoteCard && Boolean(input.quoteText);
 
-  try {
-    await encode(input, wantsQuote);
-  } catch (error) {
-    if (!wantsQuote) throw error;
-    warnings.push("Quote-card text could not be burned in; a standard X video was rendered instead.");
-    await encode(input, false);
+  const reusedMaster = await reuseFinishedMaster(input);
+  if (!reusedMaster) {
+    try {
+      await encode(input, wantsQuote);
+    } catch (error) {
+      if (!wantsQuote) throw error;
+      warnings.push("Quote-card text could not be burned in; a standard X video was rendered instead.");
+      await encode(input, false);
+    }
   }
 
   await runCommand(getFfmpegPath(), [
@@ -166,9 +248,9 @@ export async function renderPlatformVideo(
     "-frames:v",
     "1",
     "-vf",
-    "scale=1280:-2:flags=fast_bilinear",
+    "scale=1280:-2:flags=lanczos",
     "-q:v",
-    "3",
+    "2",
     input.thumbnailPath,
   ]).catch(() => {
     warnings.push("A cover image could not be generated for this export.");

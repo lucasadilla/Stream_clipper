@@ -35,6 +35,7 @@ import {
   processOneFaceAnalysisJob,
   reclaimStaleFaceAnalysisJobs,
 } from "@/services/faceAnalysisService";
+import { processOneStreamAutomation } from "@/services/streamAutomationService";
 
 const WORKER_ID = `worker-${process.pid}-${randomUUID().slice(0, 8)}`;
 
@@ -145,7 +146,7 @@ async function claimNextRenderJob(): Promise<string | null> {
     where: { status: "queued" },
     orderBy: { createdAt: "asc" },
     take: 8,
-    select: { id: true, attempts: true, maxAttempts: true },
+    select: { id: true, attempts: true, maxAttempts: true, params: true },
   });
 
   for (const candidate of candidates) {
@@ -155,6 +156,31 @@ async function claimNextRenderJob(): Promise<string | null> {
         "Exceeded maximum render attempts"
       );
       continue;
+    }
+
+    const params = parseRenderJobParams(candidate.params);
+    const vertical = params?.verticalLayout;
+    const needsFaceAnalysis =
+      vertical?.layout === "auto" ||
+      vertical?.layout === "facecam_top_gameplay_bottom" ||
+      vertical?.layout === "facecam_bottom_gameplay_top" ||
+      vertical?.layout === "facecam_pip" ||
+      vertical?.layout === "facecam_overlay";
+    if (needsFaceAnalysis && vertical?.faceAnalysisJobId) {
+      const dependency = await prisma.faceAnalysisJob.findUnique({
+        where: { id: vertical.faceAnalysisJobId },
+        select: { status: true },
+      });
+      // Keep the render queued without consuming an attempt. A different
+      // worker may be analyzing the clip, and center-cropping here would make
+      // the final export disagree with the Gaming preview.
+      if (
+        dependency &&
+        dependency.status !== "completed" &&
+        dependency.status !== "failed"
+      ) {
+        continue;
+      }
     }
 
     const updated = await prisma.renderJob.updateMany({
@@ -309,6 +335,7 @@ export interface WorkerTickResult {
   socialPublishes: number;
   transcriptions: number;
   faceAnalyses: number;
+  streamAutomations: number;
   retentionDeleted: number;
 }
 
@@ -322,6 +349,7 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
       socialPublishes: 0,
       transcriptions: 0,
       faceAnalyses: 0,
+      streamAutomations: 0,
       retentionDeleted: 0,
     };
   }
@@ -347,6 +375,17 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
     // Free volume space before any render/transcription attempts to write.
     await runFrequentStorageReclaim();
 
+    // Face-aware renders depend on this result. Run analysis first and leave
+    // dependent renders queued until it completes instead of silently falling
+    // back to Center Crop.
+    let faceAnalyses = 0;
+    try {
+      const didFace = await processOneFaceAnalysisJob();
+      if (didFace) faceAnalyses = 1;
+    } catch (err) {
+      console.error("[worker] face analysis failed:", err);
+    }
+
     let renders = 0;
     // Process up to a few renders per tick so the loop stays responsive.
     for (let i = 0; i < 2; i++) {
@@ -363,17 +402,17 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
     const didSocial = await processOneSocialPublish();
     if (didSocial) socialPublishes = 1;
 
-    let faceAnalyses = 0;
-    try {
-      const didFace = await processOneFaceAnalysisJob();
-      if (didFace) faceAnalyses = 1;
-    } catch (err) {
-      console.error("[worker] face analysis failed:", err);
-    }
-
     let transcriptions = 0;
     const didTx = await processOneTranscription();
     if (didTx) transcriptions = 1;
+
+    let streamAutomations = 0;
+    try {
+      const didAutomation = await processOneStreamAutomation();
+      if (didAutomation) streamAutomations = 1;
+    } catch (err) {
+      console.error("[worker] stream automation failed:", err);
+    }
 
     let retentionDeleted = 0;
     if (Date.now() - lastRetentionAt >= retentionTickMs()) {
@@ -393,6 +432,7 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
       socialPublishes,
       transcriptions,
       faceAnalyses,
+      streamAutomations,
       retentionDeleted,
     };
   } finally {
@@ -418,6 +458,7 @@ export function workerTickDidWork(result: WorkerTickResult): boolean {
       result.socialPublishes +
       result.transcriptions +
       result.faceAnalyses +
+      result.streamAutomations +
       result.retentionDeleted >
     0
   );

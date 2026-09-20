@@ -13,7 +13,10 @@ import {
   getYtDlpVersion,
 } from "@/services/youtubeDownloadService";
 import { getYtDlpPathCandidates } from "@/lib/ytDlp";
-import { isWhisperAvailable } from "@/services/whisperTranscription";
+import {
+  configuredTranscriptionProviders,
+  isTranscriptionAvailable,
+} from "@/services/transcriptionRouterService";
 import { PRICING_PLANS } from "@/lib/pricing";
 import path from "path";
 import fs from "fs/promises";
@@ -29,6 +32,8 @@ export interface RuntimeHealthReport {
   youtubeCookiesValid: boolean;
   aiConfigured: boolean;
   whisperConfigured: boolean;
+  transcriptionConfigured: boolean;
+  transcriptionProviders: string[];
   storageRoot: string;
   storageWritable: boolean;
   storagePersistent: boolean;
@@ -181,10 +186,14 @@ export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
     );
   }
   if (!hasAnyAiKey()) {
-    issues.push("Set OPENROUTER_API_KEY or OPENAI_API_KEY for transcription.");
+    issues.push(
+      "Set OPENROUTER_API_KEY or OPENAI_API_KEY for clip ranking, titles, and AI editing features."
+    );
   }
-  if (!isWhisperAvailable()) {
-    issues.push("Whisper provider is not configured.");
+  if (!isTranscriptionAvailable()) {
+    issues.push(
+      "No transcription provider is configured. Set DEEPGRAM_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY."
+    );
   }
   if (!storageWritable) {
     issues.push(
@@ -212,7 +221,10 @@ export async function getRuntimeHealthReport(): Promise<RuntimeHealthReport> {
     youtubeCookiesConfigured: youtubeCookies.configured,
     youtubeCookiesValid: youtubeCookies.valid,
     aiConfigured: hasAnyAiKey(),
-    whisperConfigured: isWhisperAvailable(),
+    // Retained for older health clients; this now means any supported speech provider.
+    whisperConfigured: isTranscriptionAvailable(),
+    transcriptionConfigured: isTranscriptionAvailable(),
+    transcriptionProviders: configuredTranscriptionProviders(),
     storageRoot,
     storageWritable,
     storagePersistent,

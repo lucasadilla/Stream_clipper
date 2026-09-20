@@ -8,6 +8,7 @@ import { cn } from "@/lib/cn";
 import type { StreamPlatform } from "@/lib/streamPlatform";
 import { platformLabel } from "@/lib/streamPlatform";
 import { PlatformBrandIcon } from "@/components/brand/PlatformBrandIcon";
+import { OperationProgress } from "@/components/ui/operation-progress";
 
 interface SessionRow {
   sessionId: string;
@@ -81,9 +82,12 @@ export function SessionStorageList() {
 
   if (loading) {
     return (
-      <p className="py-4 text-center text-sm text-[var(--color-muted)] animate-pulse">
-        Loading active session…
-      </p>
+      <OperationProgress
+        compact
+        title="Loading active session"
+        stages={["Checking your workspace…", "Calculating saved storage…"]}
+        className="mx-auto max-w-md py-4"
+      />
     );
   }
 

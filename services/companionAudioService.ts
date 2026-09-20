@@ -79,7 +79,12 @@ export async function ensureCompanionAudioTrack(
 export function startCompanionAudioForSession(
   streamSessionId: string,
   youtubeUrl: string,
-  options?: { isLive?: boolean; liveFromStart?: boolean }
+  options?: {
+    isLive?: boolean;
+    liveFromStart?: boolean;
+    youtubeExtractorArgs?: string | null;
+    includeYoutubeCookies?: boolean;
+  }
 ): void {
   const outputPath = path.join(
     getUploadDir(streamSessionId),
@@ -89,6 +94,8 @@ export function startCompanionAudioForSession(
     startCompanionAudioDownload(streamSessionId, youtubeUrl, outputPath, {
       isLive: options?.isLive ?? true,
       liveFromStart: options?.liveFromStart,
+      youtubeExtractorArgs: options?.youtubeExtractorArgs,
+      includeYoutubeCookies: options?.includeYoutubeCookies,
     });
   });
 }
@@ -97,7 +104,12 @@ function startCompanionAudioDownload(
   streamSessionId: string,
   youtubeUrl: string,
   outputPath: string,
-  options?: { isLive?: boolean; liveFromStart?: boolean }
+  options?: {
+    isLive?: boolean;
+    liveFromStart?: boolean;
+    youtubeExtractorArgs?: string | null;
+    includeYoutubeCookies?: boolean;
+  }
 ): void {
   const existingProc = activeCompanionAudio.get(streamSessionId);
   if (existingProc && !existingProc.killed) return;
@@ -117,8 +129,16 @@ function startCompanionAudioDownload(
       const liveFromStart = options?.liveFromStart ?? Boolean(options?.isLive);
       const args = [
         ...invocation.prefixArgs,
-        ...(await getYtDlpDeploymentArgs(platform)),
-        ...baseYtDlpArgs({ platform, url: youtubeUrl }),
+        ...(await getYtDlpDeploymentArgs(platform, {
+          includeCookies: options?.includeYoutubeCookies,
+        })),
+        ...(options && "youtubeExtractorArgs" in options
+          ? baseYtDlpArgs({
+              platform,
+              url: youtubeUrl,
+              youtubeExtractorArgs: options.youtubeExtractorArgs,
+            })
+          : baseYtDlpArgs({ platform, url: youtubeUrl })),
         ...(options?.isLive
           ? liveFromStart
             ? ["--live-from-start"]
@@ -168,6 +188,8 @@ function startCompanionAudioDownload(
           startCompanionAudioDownload(streamSessionId, youtubeUrl, outputPath, {
             isLive: true,
             liveFromStart: false,
+            youtubeExtractorArgs: options?.youtubeExtractorArgs,
+            includeYoutubeCookies: options?.includeYoutubeCookies,
           });
         }
       });

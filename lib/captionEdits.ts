@@ -1,4 +1,5 @@
 import type { CaptionCue, CaptionWord } from "@/lib/captionTrack";
+import { directCaptionTrack } from "@/lib/captionDirector";
 
 export const MIN_CUE_DURATION = 0.2;
 
@@ -75,7 +76,7 @@ export function applyCaptionEdits(
 ): CaptionCue[] {
   if (Object.keys(edits).length === 0) return cues;
 
-  return cues
+  const edited = cues
     .map((cue) => {
       const edit = edits[cue.id];
       if (!edit) return cue;
@@ -105,6 +106,7 @@ export function applyCaptionEdits(
       };
     })
     .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
+  return directCaptionTrack(edited);
 }
 
 export function mergeCaptionEdit(

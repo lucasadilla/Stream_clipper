@@ -2,6 +2,7 @@ import type { Prisma } from "@prisma/client";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 import { prisma } from "@/lib/db";
+import { isPreviewRenderJobParams } from "@/lib/renderJobSelection";
 import { canPublishPlatform, forcesPrivateUploads } from "@/lib/social/capabilities";
 import type {
   PreparedMedia,
@@ -119,7 +120,9 @@ export async function resolvePublishMedia(options: {
     };
   }
 
-  const render = clip.renderJobs.find((job) => job.outputPath);
+  const render = clip.renderJobs.find(
+    (job) => job.outputPath && !isPreviewRenderJobParams(job.params)
+  );
   if (!render?.outputPath) {
     throw new Error("No completed render found for this clip");
   }

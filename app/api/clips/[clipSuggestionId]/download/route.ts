@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
 import { serveStorageFile } from "@/lib/storage";
 import { errorResponse } from "@/lib/utils";
+import { getLatestCompletedFinalRenderJob } from "@/services/renderSelectionService";
 
 export const runtime = "nodejs";
 
@@ -17,14 +18,7 @@ export async function GET(
     });
     if (!clip) return errorResponse("Clip not found", 404);
 
-    const job = await prisma.renderJob.findFirst({
-      where: {
-        clipSuggestionId,
-        status: "completed",
-        outputPath: { not: null },
-      },
-      orderBy: { createdAt: "desc" },
-    });
+    const job = await getLatestCompletedFinalRenderJob(clipSuggestionId);
 
     if (!job?.outputPath) {
       return errorResponse("No rendered file for this clip yet. Click Render first.", 404);

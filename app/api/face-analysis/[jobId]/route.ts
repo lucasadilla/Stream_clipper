@@ -10,6 +10,7 @@ import {
   parseStoredFaceAnalysisResult,
 } from "@/services/faceAnalysisService";
 import {
+  bestEmbeddedFacecamCandidate,
   buildActiveSpeakerCropPlan,
   buildSubjectCropPlan,
 } from "@/lib/verticalLayout";
@@ -75,6 +76,10 @@ export async function GET(
           (track) => track.id === result.primaryCandidate?.trackId
         )
       : undefined;
+    const gamingCandidate = bestEmbeddedFacecamCandidate([
+      result.primaryCandidate,
+      ...result.alternativeCandidates,
+    ]);
     const usableTracks = result.tracks.filter(
       (track) => track.points.length >= 3
     );
@@ -142,6 +147,7 @@ export async function GET(
         sourceWidth: result.sourceWidth,
         sourceHeight: result.sourceHeight,
         primaryCandidate: result.primaryCandidate ?? null,
+        gamingCandidate: gamingCandidate ?? null,
         alternativeCandidates: result.alternativeCandidates,
         recommendation: result.recommendation,
         warnings: result.warnings,
@@ -155,6 +161,15 @@ export async function GET(
               scenes: requestedPlan.scenes,
               shots: requestedPlan.shots,
               validation: requestedPlan.validation,
+              activeSpeaker: requestedPlan.activeSpeaker
+                ? {
+                    version: requestedPlan.activeSpeaker.version,
+                    audioAvailable: requestedPlan.activeSpeaker.audioAvailable,
+                    switchCount: requestedPlan.activeSpeaker.switchCount,
+                    averageConfidence:
+                      requestedPlan.activeSpeaker.averageConfidence,
+                  }
+                : null,
             }
           : null,
         frameUrl: result.frameStoragePath

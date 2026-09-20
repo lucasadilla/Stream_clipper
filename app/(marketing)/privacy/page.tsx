@@ -62,8 +62,9 @@ export default function PrivacyPage() {
       <h2>3. AI and media processing</h2>
       <p>
         To generate transcripts, embeddings, and related features, we may send
-        audio segments or text you submit to AI providers (such as OpenRouter or
-        OpenAI). Use those providers only as needed for the features you use.
+        audio segments or text you submit to AI providers (such as Deepgram,
+        OpenRouter, or OpenAI). We use those providers only as needed for the
+        features you use.
       </p>
 
       <h2>4. Sharing</h2>

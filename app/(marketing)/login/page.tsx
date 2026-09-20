@@ -17,6 +17,7 @@ import {
   PlatformBrandIcon,
 } from "@/components/brand/PlatformBrandIcon";
 import type { BillingAccountSummary } from "@/services/billingService";
+import { OperationProgress } from "@/components/ui/operation-progress";
 
 const AUTH_WAIT_MS = 20_000;
 const AUTH_TIMEOUT_MESSAGE =
@@ -446,8 +447,12 @@ export default function LoginPage() {
   return (
     <Suspense
       fallback={
-        <div className="flex min-h-[50vh] items-center justify-center text-sm text-[var(--color-muted)]">
-          Loading…
+        <div className="flex min-h-[50vh] items-center justify-center px-6">
+          <OperationProgress
+            title="Loading sign in"
+            stages={["Checking sign-in options…", "Preparing secure login…"]}
+            className="max-w-sm"
+          />
         </div>
       }
     >
