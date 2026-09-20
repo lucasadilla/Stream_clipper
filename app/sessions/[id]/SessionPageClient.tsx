@@ -53,18 +53,25 @@ const AgentWorkspace = dynamic(
 );
 
 export function SessionPageClient({ sessionId }: { sessionId: string }) {
-  const [mode, setMode] = useState<SessionMode | null>(() =>
-    readSessionBootstrap(sessionId)?.mode ?? null
-  );
+  // Keep the server and first browser render identical. Session storage is
+  // restored immediately after hydration instead of inside state initializers.
+  const [mode, setMode] = useState<SessionMode | null>(null);
   const [session, setSession] = useState<
     (SessionData & { mode?: string }) | null
-  >(() => readSessionBootstrap(sessionId) as SessionData | null);
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [modeSwitching, setModeSwitching] = useState(false);
   const [modeError, setModeError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+
+    const bootstrap = readSessionBootstrap(sessionId);
+    if (bootstrap) {
+      setMode(bootstrap.mode);
+      setSession(bootstrap as SessionData);
+    }
+
     void fetchJson<{
       session?: SessionData & { mode?: string };
       error?: string;

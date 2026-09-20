@@ -1165,24 +1165,6 @@ function LayoutSettings({
     const reframe = value.reframe;
     return (
       <div className="space-y-3">
-        <SettingRow label="Camera style">
-          <SegmentedControl
-            options={[
-              { id: "professional", label: "Pro" },
-              { id: "dynamic", label: "Dynamic" },
-              { id: "stable", label: "Stable" },
-              { id: "close", label: "Close" },
-              { id: "context", label: "Context" },
-            ]}
-            value={reframe.style}
-            disabled={disabled}
-            onChange={(style) =>
-              update({
-                reframe: { ...reframe, style: style as ReframeStyle },
-              })
-            }
-          />
-        </SettingRow>
         <SettingRow label="Subject">
           <button
             type="button"

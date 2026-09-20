@@ -335,8 +335,7 @@ export function AgentClipStudioModal({
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [playbackPrepareAttempt, setPlaybackPrepareAttempt] = useState(0);
   const [lookPreset, setLookPreset] = useState<ContentLookPresetId>("auto");
-  const [reframeStyle, setReframeStyle] =
-    useState<ReframeStyle>("professional");
+  const reframeStyle: ReframeStyle = "professional";
   const [lockSubject, setLockSubject] = useState(false);
   const [faceJobId, setFaceJobId] = useState<string | null>(null);
   const [faceRect, setFaceRect] = useState<{
@@ -613,7 +612,6 @@ export function AgentClipStudioModal({
     setPreviewTime(clip.startTimeSeconds);
     setPreviewPlaying(false);
     setLookPreset("auto");
-    setReframeStyle("professional");
     setLockSubject(false);
     setFaceJobId(null);
     setFaceRect(null);
@@ -812,13 +810,11 @@ export function AgentClipStudioModal({
         } | null;
       }>(`/api/clips/${clip.id}/vertical-layout`);
       if (ok && data.configuration) {
-        const savedStyle =
-          data.configuration.settings?.reframe?.style ?? "professional";
+        const savedStyle: ReframeStyle = "professional";
         const savedLock =
           data.configuration.settings?.reframe?.lockSubject ?? false;
         const savedManual =
           data.configuration.settings?.reframe?.manualKeyframes ?? [];
-        setReframeStyle(savedStyle);
         setLockSubject(savedLock);
         manualReframeKeyframesRef.current = savedManual;
         setManualReframeKeyframes(savedManual);
@@ -1433,14 +1429,6 @@ export function AgentClipStudioModal({
       })();
     },
     [clip.id, faceJobId, saveLayout]
-  );
-
-  const selectReframeStyle = useCallback(
-    (style: ReframeStyle) => {
-      setReframeStyle(style);
-      void saveLayout(lookPreset, faceJobId, style, lockSubject);
-    },
-    [faceJobId, lockSubject, lookPreset, saveLayout]
   );
 
   const toggleSubjectLock = useCallback(() => {
@@ -2099,36 +2087,7 @@ export function AgentClipStudioModal({
                   })}
                 </div>
                 {(lookPreset === "just_chatting" || lookPreset === "auto") && (
-                  <div className="mt-3 flex flex-col gap-2 border-t border-white/[0.06] pt-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div
-                      className="grid min-w-0 grid-cols-5 gap-1"
-                      role="group"
-                      aria-label="Auto framing style"
-                    >
-                      {(
-                        [
-                          ["professional", "Pro"],
-                          ["dynamic", "Dynamic"],
-                          ["stable", "Stable"],
-                          ["close", "Close"],
-                          ["context", "Context"],
-                        ] as const
-                      ).map(([id, label]) => (
-                        <button
-                          key={id}
-                          type="button"
-                          onClick={() => selectReframeStyle(id)}
-                          className={cn(
-                            "min-w-0 rounded-md px-2 py-1.5 text-[10px] font-semibold transition-colors sm:text-[11px]",
-                            reframeStyle === id
-                              ? "bg-[var(--color-foreground)] text-[var(--color-background)]"
-                              : "text-[var(--color-muted)] hover:bg-[var(--color-card)] hover:text-[var(--color-foreground)]"
-                          )}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
+                  <div className="mt-3 flex justify-end border-t border-white/[0.06] pt-3">
                     <button
                       type="button"
                       onClick={toggleSubjectLock}

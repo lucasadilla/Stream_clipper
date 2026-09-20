@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname, useSearchParams } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import posthog from "posthog-js";
 import { capturePosthogPageview } from "@/lib/posthogPageview";
 
@@ -12,6 +12,21 @@ import { capturePosthogPageview } from "@/lib/posthogPageview";
  * sessions appear in Live (SDK/flags) then vanish from analytics.
  */
 export function PostHogPageView() {
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  // useSearchParams suspends while this route is rendered on the server. Wait
+  // until after hydration before mounting the tracker so the server and first
+  // client trees both contain the same empty Suspense boundary.
+  if (!mounted) return null;
+
+  return <PostHogNavigationTracker />;
+}
+
+function PostHogNavigationTracker() {
   const pathname = usePathname();
   const search = useSearchParams().toString();
 
