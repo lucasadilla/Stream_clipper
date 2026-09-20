@@ -10,25 +10,14 @@ import {
   readSessionBootstrap,
   writeSessionBootstrap,
 } from "@/lib/sessionBootstrap";
-import { OperationProgress } from "@/components/ui/operation-progress";
+import { EditorWorkspaceSkeleton } from "@/components/EditorWorkspaceSkeleton";
 
 const SessionWorkspace = dynamic(
   () =>
     import("@/components/SessionWorkspace").then((mod) => mod.SessionWorkspace),
   {
     ssr: false,
-    loading: () => (
-      <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
-        <div className="h-12 border-b border-[var(--color-card-border)]" />
-        <div className="flex flex-1 items-center justify-center px-6">
-          <OperationProgress
-            title="Opening timeline"
-            stages={["Loading editor code…", "Restoring timeline state…"]}
-            className="max-w-sm"
-          />
-        </div>
-      </div>
-    ),
+    loading: () => <EditorWorkspaceSkeleton mode="timeline" />,
   }
 );
 
@@ -37,18 +26,7 @@ const AgentWorkspace = dynamic(
     import("@/components/AgentWorkspace").then((mod) => mod.AgentWorkspace),
   {
     ssr: false,
-    loading: () => (
-      <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
-        <div className="h-12 border-b border-[var(--color-card-border)]" />
-        <div className="flex flex-1 items-center justify-center px-6">
-          <OperationProgress
-            title="Opening Agent Mode"
-            stages={["Loading editor code…", "Restoring clip suggestions…"]}
-            className="max-w-sm"
-          />
-        </div>
-      </div>
-    ),
+    loading: () => <EditorWorkspaceSkeleton mode="agent" />,
   }
 );
 
@@ -170,18 +148,7 @@ export function SessionPageClient({ sessionId }: { sessionId: string }) {
   }
 
   if (!mode) {
-    return (
-      <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
-        <div className="h-12 border-b border-[var(--color-card-border)]" />
-        <div className="flex flex-1 items-center justify-center px-6">
-          <OperationProgress
-            title="Loading session"
-            stages={["Fetching session details…", "Checking media availability…"]}
-            className="max-w-sm"
-          />
-        </div>
-      </div>
-    );
+    return <EditorWorkspaceSkeleton mode="timeline" />;
   }
 
   return (

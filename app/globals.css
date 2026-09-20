@@ -438,6 +438,58 @@ body[data-render-modal-open] [data-timeline-playhead] {
   animation: segment-pop 0.55s ease-out;
 }
 
+@keyframes clipper-skeleton-shimmer {
+  from {
+    transform: translate3d(-115%, 0, 0);
+  }
+  to {
+    transform: translate3d(315%, 0, 0);
+  }
+}
+
+.clipper-skeleton {
+  position: relative;
+  contain: paint;
+}
+
+.clipper-skeleton::after {
+  position: absolute;
+  inset: 0;
+  width: 38%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.075),
+    transparent
+  );
+  content: "";
+  animation: clipper-skeleton-shimmer 1.7s ease-in-out infinite;
+  will-change: transform;
+}
+
+.editor-surface-enter {
+  animation: editor-surface-enter 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes editor-surface-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 4px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .clipper-skeleton::after,
+  .editor-surface-enter,
+  .animate-segment-pop {
+    animation: none !important;
+  }
+}
+
 @keyframes caption-fade {
   from {
     opacity: 0;

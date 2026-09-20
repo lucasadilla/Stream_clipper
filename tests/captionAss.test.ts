@@ -186,6 +186,63 @@ describe("generateAss captions", () => {
     expect(ass).toContain("\\blur");
   });
 
+  it("precise sync snaps word reveal with no entrance fade lag", () => {
+    const ass = generateAss({
+      width: 1080,
+      height: 1920,
+      syncMode: "precise",
+      appearance: {
+        ...DEFAULT_CAPTION_APPEARANCE,
+        karaokeEnabled: true,
+        animation: "wordReveal",
+        color: "#FFFFFF",
+        highlightColor: "#FFE600",
+      },
+      cues: [
+        {
+          startTimeSeconds: 1,
+          endTimeSeconds: 3,
+          text: "hello world",
+          words: [
+            { word: "hello", start: 1.0, end: 1.5 },
+            { word: "world", start: 1.6, end: 2.4 },
+          ],
+        },
+      ],
+    });
+
+    expect(ass).not.toContain("\\fad(");
+    expect(ass).not.toContain("\\move(");
+    expect(ass).toContain("\\t(0,0,");
+    expect(ass).not.toContain("\\t(0,140,");
+    expect(ass).toContain("hello");
+    expect(ass).toContain("world");
+  });
+
+  it("precise sync skips invented karaoke when word timings are missing", () => {
+    const ass = generateAss({
+      width: 1080,
+      height: 1920,
+      syncMode: "precise",
+      appearance: {
+        ...DEFAULT_CAPTION_APPEARANCE,
+        karaokeEnabled: true,
+        animation: "wordReveal",
+      },
+      cues: [
+        {
+          startTimeSeconds: 2,
+          endTimeSeconds: 4,
+          text: "timing still works",
+        },
+      ],
+    });
+
+    // Full-line burn without alpha reveal stagger from estimated words.
+    expect(ass).toContain("timing still works");
+    expect(ass).not.toContain("\\alpha&HFF&");
+  });
+
   it("never burns punctuation-only pause placeholders", () => {
     const ass = generateAss({
       width: 1080,

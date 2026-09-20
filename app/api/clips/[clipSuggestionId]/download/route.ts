@@ -3,6 +3,8 @@ import { prisma } from "@/lib/db";
 import { serveStorageFile } from "@/lib/storage";
 import { errorResponse } from "@/lib/utils";
 import { getLatestCompletedFinalRenderJob } from "@/services/renderSelectionService";
+import { failRenderJob } from "@/services/renderService";
+import { inspectDeliverableVideo } from "@/services/deliverableVideoService";
 
 export const runtime = "nodejs";
 
@@ -22,6 +24,15 @@ export async function GET(
 
     if (!job?.outputPath) {
       return errorResponse("No rendered file for this clip yet. Click Render first.", 404);
+    }
+
+    const inspection = await inspectDeliverableVideo(job.outputPath, {
+      relativeToStorage: true,
+    });
+    if (!inspection.ok) {
+      const message = `${inspection.reason ?? "Rendered file is unavailable"} Render the clip again.`;
+      await failRenderJob(job.id, message);
+      return errorResponse(message, inspection.sizeBytes === 0 ? 404 : 409);
     }
 
     const safeName = `${clip.title.slice(0, 40).replace(/[^\w\s-]/g, "") || "short"}.mp4`;

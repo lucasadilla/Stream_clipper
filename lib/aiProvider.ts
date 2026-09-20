@@ -10,6 +10,22 @@ export function hasAnyAiKey(): boolean {
   return isOpenRouterEnabled() || Boolean(process.env.OPENAI_API_KEY?.trim());
 }
 
+export function isGeminiVisualEnabled(): boolean {
+  return Boolean(process.env.GEMINI_API_KEY?.trim());
+}
+
+export function hasVisualAiKey(): boolean {
+  return isGeminiVisualEnabled() || hasAnyAiKey();
+}
+
+/** Direct Gemini is preferred for native video; image-capable fallbacks remain supported. */
+export function getVisualAnalysisModel(): string {
+  if (isGeminiVisualEnabled()) {
+    return process.env.GEMINI_VISUAL_MODEL?.trim() || "gemini-3.8-flash";
+  }
+  return process.env.VISUAL_ANALYSIS_MODEL?.trim() || getChatModel();
+}
+
 /** Chat model slug (OpenRouter) or OpenAI model id. */
 export function getChatModel(): string {
   if (isOpenRouterEnabled()) {

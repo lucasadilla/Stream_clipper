@@ -13,6 +13,7 @@ import {
   type NarrativeTranscriptChunk,
 } from "@/lib/narrativeBeats";
 import { speechEndingNeedsContinuation } from "@/lib/clipBoundaries";
+import type { StructuredVisualContext } from "@/lib/visualAnalysis";
 
 export type RankingCandidate = {
   id: string;
@@ -26,6 +27,7 @@ export type RankingCandidate = {
   targetMinSeconds?: number;
   maximumDurationSeconds?: number;
   transcriptChunks?: NarrativeTranscriptChunk[];
+  visualContext?: StructuredVisualContext;
 };
 
 export type RankedCandidate = {
@@ -541,6 +543,9 @@ Rules:
 - For transcript-backed candidates, return 2-8 chronological beats, including
   hook or setup and at least one payoff, reaction, or resolution beat.
 - For visual-only candidates, use null chunk IDs, no beats, and visual_payoff.
+- Treat structured visual context as evidence only when its sufficient flag is
+  true. Preserve its setup, action, outcome, and reaction timestamps.
+- Never turn an uncertainty from visual analysis into a title claim.
 
 Return JSON only:
 {"clips":[{"id":"candidate_id","title":"Specific clickable title","interestScore":87,"rationale":"Why this complete arc works","evidence":"exact words from this candidate","startChunkId":"chunk_id","endChunkId":"chunk_id","focusChunkId":"chunk_id","arcType":"problem_solution","beats":[{"role":"hook","chunkId":"chunk_id","evidence":"exact chunk words"},{"role":"payoff","chunkId":"chunk_id","evidence":"exact chunk words"}],"narrativeScores":{"hook":82,"payoff":91,"completeness":96,"standalone":88,"coherence":90,"pacing":80,"total":89}}]}
@@ -556,7 +561,10 @@ ${candidates
             `${chunk.id} ${chunk.startTimeSeconds.toFixed(2)}-${chunk.endTimeSeconds.toFixed(2)}: ${cleanNarrativeText(chunk.text).slice(0, 280)}`
         )
         .join("\n");
-      return `[${candidate.id}] proposed=${Math.round(candidate.startTimeSeconds)}-${Math.round(candidate.endTimeSeconds)}s | focus=${(candidate.focusTimeSeconds ?? (candidate.startTimeSeconds + candidate.endTimeSeconds) / 2).toFixed(2)}s | source=${candidate.source} | signal=${candidate.signalScore.toFixed(1)} | current=${candidate.currentTitle}\nSUPPORTING CONTEXT: ${candidate.context.slice(0, 900)}\nTRANSCRIPT CHUNKS:\n${transcript || "NONE - visual/audio signal only"}`;
+      const visual = candidate.visualContext
+        ? `\nSTRUCTURED VISUAL EVIDENCE: ${JSON.stringify(candidate.visualContext).slice(0, 1800)}`
+        : "";
+      return `[${candidate.id}] proposed=${Math.round(candidate.startTimeSeconds)}-${Math.round(candidate.endTimeSeconds)}s | focus=${(candidate.focusTimeSeconds ?? (candidate.startTimeSeconds + candidate.endTimeSeconds) / 2).toFixed(2)}s | source=${candidate.source} | signal=${candidate.signalScore.toFixed(1)} | current=${candidate.currentTitle}\nSUPPORTING CONTEXT: ${candidate.context.slice(0, 1400)}${visual}\nTRANSCRIPT CHUNKS:\n${transcript || "NONE - visual/audio signal only"}`;
     }
   )
   .join("\n\n")}`;

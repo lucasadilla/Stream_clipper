@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyVisualContextToNarrativePlan,
   narrativePlanQualityBonus,
   planNarrativeClip,
   type NarrativeTranscriptChunk,
 } from "@/lib/narrativeBeats";
+import { VISUAL_ANALYSIS_VERSION } from "@/lib/visualAnalysis";
 import { validateNarrativeChunkSelection } from "@/services/clipRankingService";
 
 function chunks(
@@ -103,6 +105,54 @@ describe("narrative beat planning", () => {
     expect(plan.arcType).toBe("visual_payoff");
     expect(plan.accepted).toBe(true);
     expect(plan.startChunkId).toBeNull();
+  });
+});
+
+describe("visual narrative evidence", () => {
+  it("turns a verified silent event into a complete visual payoff", () => {
+    const base = planNarrativeClip({
+      startTimeSeconds: 40,
+      endTimeSeconds: 58,
+      focusTimeSeconds: 50,
+      transcriptChunks: [],
+      contentType: "gaming",
+      source: "visual_event",
+      targetMinSeconds: 12,
+      maximumDurationSeconds: 45,
+    });
+    const result = applyVisualContextToNarrativePlan(base, {
+      version: VISUAL_ANALYSIS_VERSION,
+      sourceId: "source_1",
+      startTimeSeconds: 36,
+      endTimeSeconds: 65,
+      eventType: "unexpected_gameplay_success",
+      summary: "The player escapes and a victory indicator appears.",
+      events: [
+        {
+          timeSeconds: 43,
+          type: "setup",
+          description: "The player is surrounded.",
+          confidence: 0.9,
+        },
+        {
+          timeSeconds: 53,
+          type: "outcome",
+          description: "A victory indicator appears.",
+          confidence: 0.94,
+        },
+      ],
+      confidence: 0.91,
+      uncertainties: [],
+      sufficient: true,
+      analysisLevel: "screenshots",
+      modelVersion: "gemini-test",
+      evidence: [],
+    });
+
+    expect(result.arcType).toBe("visual_payoff");
+    expect(result.accepted).toBe(true);
+    expect(result.visualBeats).toHaveLength(2);
+    expect(result.scores.payoff).toBeGreaterThan(base.scores.payoff);
   });
 });
 

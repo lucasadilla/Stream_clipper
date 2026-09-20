@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
-import { Suspense } from "react";
 import { Instrument_Serif } from "next/font/google";
-import { PostHogPageView } from "@/components/PostHogPageView";
+import { PostHogPageViewBoundary } from "@/components/PostHogPageViewBoundary";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { getPublicSiteUrl } from "@/lib/publicOrigin";
 import "./globals.css";
@@ -83,9 +82,7 @@ export default function RootLayout({
       >
         <TooltipProvider delayDuration={200}>
           {children}
-          <Suspense fallback={null}>
-            <PostHogPageView />
-          </Suspense>
+          <PostHogPageViewBoundary />
         </TooltipProvider>
       </body>
     </html>

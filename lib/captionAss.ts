@@ -34,6 +34,12 @@ export interface GenerateAssOptions {
   height: number;
   /** Used to wrap karaoke lines like the editor (vertical ≈ 28 chars). */
   format?: "native" | "vertical";
+  /**
+   * `precise` (final burns): snap glyphs to transcript timestamps — no entrance
+   * fades, no 140ms word-reveal lag, and no invented karaoke timing.
+   * `stylized` (editor preview parity): keeps decorative motion.
+   */
+  syncMode?: "precise" | "stylized";
   overlays?: Array<{
     startTimeSeconds: number;
     endTimeSeconds: number;
@@ -51,15 +57,15 @@ function escapeAssText(text: string): string {
     .replace(/\n/g, "\\N");
 }
 
-function formatAssTime(seconds: number): string {
+function formatAssTime(seconds: number, mode: "start" | "end" = "start"): string {
   const s = Math.max(0, seconds);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = Math.floor(s % 60);
-  const cs = Math.round((s - Math.floor(s)) * 100);
-  if (cs === 100) {
-    return formatAssTime(Math.floor(s) + 1);
-  }
+  // Prefer early starts / late ends so rounding never hides spoken words.
+  const totalCs =
+    mode === "end" ? Math.ceil(s * 100 - 1e-9) : Math.floor(s * 100 + 1e-9);
+  const h = Math.floor(totalCs / 360000);
+  const m = Math.floor((totalCs % 360000) / 6000);
+  const sec = Math.floor((totalCs % 6000) / 100);
+  const cs = totalCs % 100;
   return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
 }
 
@@ -147,7 +153,8 @@ function timedWordAssBody(
   highlightColor: string,
   karaokeEnabled: boolean,
   wordReveal: boolean,
-  restingBlur: number
+  restingBlur: number,
+  preciseSync = false
 ): string {
   const usable = words
     .map((word) => {
@@ -182,8 +189,12 @@ function timedWordAssBody(
     const timedColor = karaokeEnabled
       ? `\\t(${startMs},${startMs},\\c${highlightColor}&)\\t(${endMs},${endMs},\\c${baseColor}&)`
       : "";
+    // Precise burns snap visible on the spoken timestamp. Stylized preview
+    // keeps a short fade so motion still matches the editor.
     const reveal = wordReveal
-      ? `\\alpha&HFF&\\blur2\\t(${startMs},${startMs + 140},\\alpha&H00&\\blur${restingBlur.toFixed(2)})`
+      ? preciseSync
+        ? `\\alpha&HFF&\\t(${startMs},${startMs},\\alpha&H00&)`
+        : `\\alpha&HFF&\\blur2\\t(${startMs},${startMs + 140},\\alpha&H00&\\blur${restingBlur.toFixed(2)})`
       : "";
     parts.push(
       `{\\c${baseColor}&${reveal}${timedColor}}${escapeAssText(piece)}${spacer}`
@@ -300,22 +311,40 @@ export function generateAss(options: GenerateAssOptions): string {
   const blurTag = edge.blur > 0 ? `\\blur${edge.blur.toFixed(2)}` : "";
   const dialogueLines: string[] = [];
 
+  const preciseSync = options.syncMode === "precise";
+
   for (const cue of cues) {
     if (cue.endTimeSeconds <= cue.startTimeSeconds) continue;
-    const start = formatAssTime(cue.startTimeSeconds);
-    const end = formatAssTime(cue.endTimeSeconds);
-    const cueAnimation = effectiveCaptionAnimation(cue, app.animation);
-    const animationTag = captionAnimationOverride(cueAnimation, {
-      width,
-      height,
-      alignment,
-      marginH,
-      marginV,
-      fontSize,
-      restingBlur: edge.blur,
-    });
+    const start = formatAssTime(cue.startTimeSeconds, "start");
+    const end = formatAssTime(cue.endTimeSeconds, "end");
+    const sourceAnimation = effectiveCaptionAnimation(cue, app.animation);
+    // Suppress decorative entrance motion on final burns, but keep the
+    // source animation so word-reveal / karaoke still fire on STT timings.
+    const animationTag = preciseSync
+      ? ""
+      : captionAnimationOverride(sourceAnimation, {
+          width,
+          height,
+          alignment,
+          marginH,
+          marginV,
+          fontSize,
+          restingBlur: edge.blur,
+        });
+    const wantsWordTiming =
+      sourceAnimation === "wordReveal" || app.karaokeEnabled;
+    const hasAuthoritativeWords = (cue.words ?? []).some(
+      (word) =>
+        Number.isFinite(word.start) &&
+        Number.isFinite(word.end) &&
+        word.end > word.start &&
+        word.word.trim().length > 0
+    );
+    // Invented proportional word times look late/early on final exports.
+    // Only burn word-level effects when STT supplied real words, or when
+    // stylized preview wants estimated karaoke.
     const words =
-      cueAnimation === "wordReveal" || app.karaokeEnabled
+      wantsWordTiming && (!preciseSync || hasAuthoritativeWords)
         ? captionWordsForAnimation(cue)
         : null;
 
@@ -332,8 +361,9 @@ export function generateAss(options: GenerateAssOptions): string {
         baseColor,
         highlightColor,
         app.karaokeEnabled,
-        cueAnimation === "wordReveal",
-        edge.blur
+        sourceAnimation === "wordReveal",
+        edge.blur,
+        preciseSync
       );
       if (!body) {
         const fallback = escapeAssText(
@@ -379,8 +409,8 @@ export function generateAss(options: GenerateAssOptions): string {
     if (!overlay.text.trim() || overlay.endTimeSeconds <= overlay.startTimeSeconds) {
       continue;
     }
-    const start = formatAssTime(overlay.startTimeSeconds);
-    const end = formatAssTime(overlay.endTimeSeconds);
+    const start = formatAssTime(overlay.startTimeSeconds, "start");
+    const end = formatAssTime(overlay.endTimeSeconds, "end");
     const size =
       overlay.kind === "lower-third"
         ? Math.round(height * 0.048)

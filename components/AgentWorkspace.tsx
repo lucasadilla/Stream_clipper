@@ -58,6 +58,7 @@ import { mergeClipSuggestions } from "@/lib/clipSuggestionMerge";
 import type { SessionMode } from "@/lib/sessionMode";
 import { OperationProgress } from "@/components/ui/operation-progress";
 import { renderClip } from "@/lib/clipActions";
+import { EditorWorkspaceSkeleton } from "@/components/EditorWorkspaceSkeleton";
 
 interface AgentSessionData {
   id: string;
@@ -157,6 +158,15 @@ export function AgentWorkspace({
     () => clips.filter((clip) => clip.status !== "rejected"),
     [clips]
   );
+
+  useEffect(() => {
+    if (!showFindChat) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowFindChat(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [showFindChat]);
 
   const persistWizard = useCallback(
     (patch: Partial<AgentWizardState>) => {
@@ -966,25 +976,11 @@ export function AgentWorkspace({
 
   if (loading) {
     return (
-      <div className="editor-shell agent-shell flex min-h-screen flex-col bg-[#07090b]">
-        <EditorHeader
-          title="Agent"
-          mode="agent"
-          modeSwitching={modeSwitching}
-          onModeChange={onModeChange}
-        />
-        <div className="flex flex-1 items-center justify-center px-6">
-          <OperationProgress
-            title="Opening Agent Mode"
-            stages={[
-              "Loading the session…",
-              "Checking source media…",
-              "Restoring your clip workspace…",
-            ]}
-            className="max-w-sm"
-          />
-        </div>
-      </div>
+      <EditorWorkspaceSkeleton
+        mode="agent"
+        modeSwitching={modeSwitching}
+        onModeChange={onModeChange}
+      />
     );
   }
 
@@ -1013,7 +1009,7 @@ export function AgentWorkspace({
       : 0;
 
   return (
-    <div className="editor-shell agent-shell flex h-screen flex-col overflow-hidden bg-[#07090b]">
+    <div className="editor-shell agent-shell editor-surface-enter flex h-screen flex-col overflow-hidden bg-[#07090b]">
       <EditorHeader
         title={session.title}
         mode="agent"
@@ -1135,16 +1131,21 @@ export function AgentWorkspace({
                 sessionId={sessionId}
                 playbackUrl={playbackUrl}
               />
-              {!showFindChat && (
-                <button
-                  type="button"
-                  onClick={() => setShowFindChat(true)}
-                  className="fixed bottom-6 right-6 z-30 flex h-12 items-center gap-2 rounded-md border border-[#f0b75a] bg-[#f0b75a] px-4 text-sm font-semibold text-[#1b1203] shadow-[0_16px_44px_rgba(0,0,0,0.4)] transition-[transform,background-color] hover:-translate-y-0.5 hover:bg-[#f7c974] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#f0b75a] focus-visible:ring-offset-2 focus-visible:ring-offset-[#07090b]"
-                >
-                  <MessageSquareText className="h-4 w-4" aria-hidden="true" />
-                  Find a specific moment
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => setShowFindChat(true)}
+                aria-hidden={showFindChat}
+                tabIndex={showFindChat ? -1 : 0}
+                className={cn(
+                  "fixed bottom-6 right-6 z-30 flex h-12 items-center gap-2 rounded-md border border-[#f0b75a] bg-[#f0b75a] px-4 text-sm font-semibold text-[#1b1203] shadow-[0_16px_44px_rgba(0,0,0,0.4)] transition-[transform,background-color,opacity] duration-200 hover:-translate-y-0.5 hover:bg-[#f7c974] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#f0b75a] focus-visible:ring-offset-2 focus-visible:ring-offset-[#07090b] motion-reduce:transition-none",
+                  showFindChat
+                    ? "pointer-events-none translate-y-2 opacity-0"
+                    : "translate-y-0 opacity-100"
+                )}
+              >
+                <MessageSquareText className="h-4 w-4" aria-hidden="true" />
+                Find a specific moment
+              </button>
             </div>
           )}
 
@@ -1298,8 +1299,18 @@ export function AgentWorkspace({
             </div>
           )}
 
-          {(showFindChat || displayStep === "pick") && showFindChat && (
-            <div className="fixed bottom-5 right-5 z-40 isolate flex max-h-[min(620px,calc(100vh-2.5rem))] w-[min(410px,calc(100vw-2.5rem))] flex-col overflow-hidden rounded-lg border border-[#3b4248] bg-[#0a0d0f] shadow-[0_28px_90px_rgba(0,0,0,0.92),0_0_0_1px_rgba(255,255,255,0.04)]">
+          <div
+            role="dialog"
+            aria-label="Moment assistant"
+            aria-hidden={!showFindChat}
+            inert={!showFindChat}
+            className={cn(
+              "fixed bottom-5 right-5 z-40 isolate flex max-h-[min(620px,calc(100vh-2.5rem))] w-[min(410px,calc(100vw-2.5rem))] origin-bottom-right flex-col overflow-hidden rounded-lg border border-[#3b4248] bg-[#0a0d0f] shadow-[0_28px_90px_rgba(0,0,0,0.92),0_0_0_1px_rgba(255,255,255,0.04)] transition-[transform,opacity] duration-200 ease-out motion-reduce:transition-none",
+              showFindChat
+                ? "scale-100 translate-y-0 opacity-100"
+                : "pointer-events-none translate-y-3 scale-[0.98] opacity-0"
+            )}
+          >
               <div className="flex shrink-0 items-center justify-between border-b border-[#30363c] bg-[#111519] px-4 py-3">
                 <div className="flex items-center gap-3">
                   <span className="grid h-8 w-8 place-items-center rounded-md bg-[#f0b75a] text-[#1b1203]">
@@ -1407,7 +1418,6 @@ export function AgentWorkspace({
                 </PromptInput>
               </div>
             </div>
-          )}
         </section>
 
       </div>

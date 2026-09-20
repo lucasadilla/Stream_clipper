@@ -1,5 +1,9 @@
 import { hasIncompleteSpeechEnding } from "@/lib/clipBoundaries";
 import type { ClipContentType } from "@/lib/clipContentProfile";
+import type {
+  StructuredVisualContext,
+  VisualNarrativeRole,
+} from "@/lib/visualAnalysis";
 
 export type NarrativeBeatRole =
   | "hook"
@@ -57,6 +61,12 @@ export type NarrativePlan = {
   beats: NarrativeBeat[];
   scores: NarrativeScores;
   contextChunks: NarrativeTranscriptChunk[];
+  visualBeats?: Array<{
+    role: VisualNarrativeRole;
+    timeSeconds: number;
+    evidence: string;
+    strength: number;
+  }>;
   selectedText: string;
   endingComplete: boolean;
   accepted: boolean;
@@ -428,7 +438,10 @@ export function planNarrativeClip(input: {
     .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
 
   if (contextChunks.length === 0) {
-    const visual = input.source === "event_window" || input.source === "audio_event";
+    const visual =
+      input.source === "event_window" ||
+      input.source === "audio_event" ||
+      input.source === "visual_event";
     return {
       startTimeSeconds: originalStart,
       endTimeSeconds: originalEnd,
@@ -633,4 +646,78 @@ export function narrativePlanSummary(plan: NarrativePlan): string {
   const labels = plan.beats.map((beat) => beat.role).filter((role, index, all) => all.indexOf(role) === index);
   if (labels.length === 0) return "A visually driven moment with a clear outcome.";
   return `A complete ${plan.arcType.replace(/_/g, "-")} arc with ${labels.join(", ")}.`;
+}
+
+/** Blend verified visual beats into the deterministic transcript story plan. */
+export function applyVisualContextToNarrativePlan(
+  plan: NarrativePlan,
+  visual: StructuredVisualContext
+): NarrativePlan {
+  const usable = visual.events
+    .filter((event) => event.confidence >= 0.5)
+    .sort((a, b) => a.timeSeconds - b.timeSeconds);
+  if (usable.length === 0) return plan;
+
+  const hasSetup = usable.some(
+    (event) => event.type === "setup" || event.type === "context"
+  );
+  const hasPayoff = usable.some(
+    (event) => event.type === "outcome" || event.type === "reaction"
+  );
+  const hasAction = usable.some((event) => event.type === "action");
+  const verifiedArc =
+    visual.sufficient && visual.confidence >= 0.62 && (hasPayoff || hasAction);
+  const visualStrength = Math.round(visual.confidence * 100);
+  const blend = (base: number, visualScore: number, weight = 0.35) =>
+    Math.min(100, Math.round(base * (1 - weight) + visualScore * weight));
+  const scores: NarrativeScores = {
+    hook: blend(plan.scores.hook, hasAction ? visualStrength : 55, 0.22),
+    payoff: blend(plan.scores.payoff, hasPayoff ? visualStrength : 45, 0.42),
+    completeness: blend(
+      plan.scores.completeness,
+      hasSetup && hasPayoff ? visualStrength : 58,
+      0.38
+    ),
+    standalone: blend(
+      plan.scores.standalone,
+      visual.sufficient ? visualStrength : 48,
+      0.3
+    ),
+    coherence: blend(
+      plan.scores.coherence,
+      visual.sufficient ? visualStrength : 50,
+      0.3
+    ),
+    pacing: plan.scores.pacing,
+    total: 0,
+  };
+  scores.total = Math.round(
+    scores.hook * 0.18 +
+      scores.payoff * 0.26 +
+      scores.completeness * 0.2 +
+      scores.standalone * 0.14 +
+      scores.coherence * 0.16 +
+      scores.pacing * 0.06
+  );
+
+  return {
+    ...plan,
+    arcType:
+      verifiedArc &&
+      (plan.arcType === "incomplete" || plan.contextChunks.length === 0)
+        ? "visual_payoff"
+        : plan.arcType,
+    scores,
+    visualBeats: usable.map((event) => ({
+      role: event.type,
+      timeSeconds: event.timeSeconds,
+      evidence: event.description,
+      strength: event.confidence,
+    })),
+    endingComplete: verifiedArc ? true : plan.endingComplete,
+    accepted: verifiedArc ? true : plan.accepted,
+    ...(verifiedArc && plan.rejectionReason === "no_coherent_speech"
+      ? { rejectionReason: undefined }
+      : {}),
+  };
 }

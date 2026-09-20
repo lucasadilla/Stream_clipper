@@ -12,6 +12,12 @@ export type CompleteClipBoundary = {
   endingComplete: boolean;
 };
 
+export type VisualBoundaryEvent = {
+  timeSeconds: number;
+  type: "setup" | "action" | "outcome" | "reaction" | "context";
+  confidence: number;
+};
+
 const INCOMPLETE_ENDING = new Set([
   "a",
   "about",
@@ -277,5 +283,76 @@ export function refineClipToCompleteSpeech(options: {
       Math.abs(start - originalStart) > 0.05 ||
       Math.abs(end - originalEnd) > 0.05,
     endingComplete,
+  };
+}
+
+/** Preserve visually verified setup, outcome and reaction around a candidate. */
+export function refineClipToVisualEvents(options: {
+  start: number;
+  end: number;
+  events: VisualBoundaryEvent[];
+  maximumDurationSeconds: number;
+  preRollSeconds?: number;
+  postRollSeconds?: number;
+}): CompleteClipBoundary {
+  const originalStart = Math.max(0, options.start);
+  const originalEnd = Math.max(originalStart, options.end);
+  const relevant = options.events
+    .filter(
+      (event) =>
+        event.confidence >= 0.5 &&
+        Number.isFinite(event.timeSeconds) &&
+        event.timeSeconds >= originalStart - 20 &&
+        event.timeSeconds <= originalEnd + 20
+    )
+    .sort((a, b) => a.timeSeconds - b.timeSeconds);
+  if (relevant.length === 0) {
+    return {
+      start: originalStart,
+      end: originalEnd,
+      adjusted: false,
+      endingComplete: true,
+    };
+  }
+
+  const setup = relevant.find(
+    (event) => event.type === "setup" || event.type === "context"
+  );
+  const payoff = [...relevant]
+    .reverse()
+    .find(
+      (event) =>
+        event.type === "outcome" ||
+        event.type === "reaction" ||
+        event.type === "action"
+    );
+  let start = setup
+    ? Math.min(
+        originalStart,
+        Math.max(0, setup.timeSeconds - Math.max(0, options.preRollSeconds ?? 0.5))
+      )
+    : originalStart;
+  let end = payoff
+    ? Math.max(
+        originalEnd,
+        payoff.timeSeconds + Math.max(0, options.postRollSeconds ?? 1.1)
+      )
+    : originalEnd;
+  const maximumDurationSeconds = Math.max(3, options.maximumDurationSeconds);
+  if (end - start > maximumDurationSeconds) {
+    if (payoff && payoff.timeSeconds > originalEnd) {
+      start = Math.max(0, end - maximumDurationSeconds);
+    } else {
+      end = start + maximumDurationSeconds;
+    }
+  }
+
+  return {
+    start,
+    end,
+    adjusted:
+      Math.abs(start - originalStart) > 0.05 ||
+      Math.abs(end - originalEnd) > 0.05,
+    endingComplete: payoff == null || end + 0.05 >= payoff.timeSeconds,
   };
 }

@@ -1,7 +1,8 @@
 import { NextRequest } from "next/server";
-import { getRenderJob } from "@/services/renderService";
+import { getRenderJob, failRenderJob } from "@/services/renderService";
 import { serveStorageFile } from "@/lib/storage";
 import { errorResponse } from "@/lib/utils";
+import { inspectDeliverableVideo } from "@/services/deliverableVideoService";
 
 export const runtime = "nodejs";
 
@@ -15,6 +16,15 @@ export async function GET(
     if (!job) return errorResponse("Render job not found", 404);
     if (job.status !== "completed" || !job.outputPath) {
       return errorResponse("Render not ready yet", 404);
+    }
+
+    const inspection = await inspectDeliverableVideo(job.outputPath, {
+      relativeToStorage: true,
+    });
+    if (!inspection.ok) {
+      const message = `${inspection.reason ?? "Rendered file is unavailable"} Render the clip again.`;
+      await failRenderJob(renderJobId, message);
+      return errorResponse(message, inspection.sizeBytes === 0 ? 404 : 409);
     }
 
     return serveStorageFile(job.outputPath, `short-${renderJobId}.mp4`);

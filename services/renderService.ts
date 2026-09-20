@@ -14,7 +14,6 @@ import { generateAss } from "@/lib/captionAss";
 import {
   buildCaptionTrack,
   type CaptionCue,
-  type CaptionWord,
 } from "@/lib/captionTrack";
 import { applyCaptionEdits } from "@/lib/captionEdits";
 import {
@@ -62,6 +61,7 @@ import { reviewRenderedOutput } from "@/services/postRenderCriticService";
 import type { PostRenderQualityReview } from "@/lib/postRenderCritic";
 import { directCaptionTrack } from "@/lib/captionDirector";
 import { getCachedCaptionDirectionForClip } from "@/services/captionDirectorService";
+import { assertDeliverableVideo } from "@/services/deliverableVideoService";
 
 const PREVIEW_MAX_SECONDS = 5;
 const PREVIEW_HEIGHT = 640;
@@ -192,12 +192,20 @@ export function mergeRenderCaptionCoverage(
     }
     if (!client) return generated;
     matchedClientIds.add(client.id);
-    return { ...client, words: client.words };
+    // Prefer client text/trim edits, but keep authoritative STT word timings
+    // whenever the browser cue omitted them — dropping words forces estimated
+    // karaoke that drifts from the audio on export.
+    return {
+      ...generated,
+      ...client,
+      words:
+        client.words && client.words.length > 0 ? client.words : generated.words,
+    };
   });
 
   for (const client of clientCues) {
     if (!matchedClientIds.has(client.id)) {
-      merged.push({ ...client, words: client.words });
+      merged.push(client);
     }
   }
   return merged.sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
@@ -274,6 +282,17 @@ async function completeRenderJob(input: {
   completionMessage: string;
   resolvedLayout?: string;
 }): Promise<void> {
+  const outputStat = await fs.stat(input.outputPath).catch(() => null);
+  if (!outputStat || outputStat.size < 1024) {
+    throw new Error(
+      "Render finished but the output file is missing or empty. Try rendering again."
+    );
+  }
+
+  // A non-empty path is not enough: truncated MP4s and files without a
+  // decodable video stream must never be marked completed or offered to users.
+  await assertDeliverableVideo(input.outputPath);
+
   let qualityReview: PostRenderQualityReview | null = null;
   if (!input.params.preview) {
     await updateJobProgress(input.jobId, 94, "quality_check");
@@ -717,6 +736,9 @@ export async function executeRenderJob(
         width: outputWidth,
         height: outputHeight,
         format,
+        // Final downloads must lock to transcript timestamps; keep stylized
+        // motion only for quick studio previews.
+        syncMode: preview ? "stylized" : "precise",
       });
       if (
         (includeCaptions && shiftedCues.length > 0) ||

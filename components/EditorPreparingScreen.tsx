@@ -9,6 +9,7 @@ import {
 import { cn } from "@/lib/cn";
 import type { SessionMode } from "@/lib/sessionMode";
 import { OperationProgress } from "@/components/ui/operation-progress";
+import { EditorWorkspaceSkeletonBody } from "@/components/EditorWorkspaceSkeleton";
 
 function ProgressRow({
   label,
@@ -69,7 +70,7 @@ export function EditorPreparingScreen({
 }) {
   const targetPct = Math.round(EDITOR_READY_RATIO * 100);
   return (
-    <div className="editor-shell flex min-h-screen flex-col bg-[var(--color-background)]">
+    <div className="editor-shell flex h-screen flex-col overflow-hidden bg-[var(--color-background)]">
       <EditorHeader
         title={title}
         mode="timeline"
@@ -77,59 +78,62 @@ export function EditorPreparingScreen({
         onModeChange={onModeChange}
         compact
       />
-      <div className="flex flex-1 items-center justify-center px-6 py-10">
-        <div className="flex w-full max-w-md flex-col items-center gap-8 text-center">
-          <div className="w-full space-y-2">
-            <OperationProgress
-              title={readiness.statusMessage}
-              detail={readiness.detailMessage}
-              progress={
-                readiness.recordedSeconds > 0
-                  ? readiness.overallRatio * 100
-                  : null
-              }
-              stages={
-                readiness.recordedSeconds > 0
-                  ? []
-                  : [
-                      "Fetching stream details…",
-                      "Preparing source media…",
-                      "Waiting for the first playable frames…",
-                    ]
-              }
-            />
-            <p className="pt-1 text-[11px] text-[#6a7568]">
-              {readiness.openingWithoutFullTranscript
-                ? "Filmstrip is ready — transcript keeps building in the background."
-                : `Opening once filmstrip reaches ${targetPct}% (transcript opens after ${targetPct}% or shortly if audio is delayed)`}
-              {readiness.recordedSeconds > 0
-                ? ` · ${formatDuration(readiness.recordedSeconds)} media`
-                : ""}
-              .
-            </p>
-          </div>
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        <EditorWorkspaceSkeletonBody mode="timeline" />
+        <div className="absolute inset-0 flex items-center justify-center bg-[#020302]/72 px-6 py-10 backdrop-blur-[2px]">
+          <div className="flex w-full max-w-md flex-col items-center gap-7 rounded-xl border border-white/[0.09] bg-[#050705]/95 p-5 text-center shadow-[0_28px_80px_rgba(0,0,0,0.62)] sm:p-6">
+            <div className="w-full space-y-2">
+              <OperationProgress
+                title={readiness.statusMessage}
+                detail={readiness.detailMessage}
+                progress={
+                  readiness.recordedSeconds > 0
+                    ? readiness.overallRatio * 100
+                    : null
+                }
+                stages={
+                  readiness.recordedSeconds > 0
+                    ? []
+                    : [
+                        "Fetching stream details…",
+                        "Preparing source media…",
+                        "Waiting for the first playable frames…",
+                      ]
+                }
+              />
+              <p className="pt-1 text-[11px] text-[#6a7568]">
+                {readiness.openingWithoutFullTranscript
+                  ? "Filmstrip is ready — transcript keeps building in the background."
+                  : `Opening once filmstrip reaches ${targetPct}% (transcript opens after ${targetPct}% or shortly if audio is delayed)`}
+                {readiness.recordedSeconds > 0
+                  ? ` · ${formatDuration(readiness.recordedSeconds)} media`
+                  : ""}
+                .
+              </p>
+            </div>
 
-          <div className="w-full space-y-5 rounded-lg border border-[var(--color-card-border)] bg-[#050705] px-4 py-4 text-left">
-            <ProgressRow
-              label="Screenshots"
-              ratio={readiness.thumbRatio}
-              detail={
-                readiness.expectedThumbCount > 0
-                  ? `${readiness.thumbCount} / ~${readiness.expectedThumbCount} frames · ${formatDuration(readiness.thumbCoveredSeconds)} covered`
-                  : "Waiting for media…"
-              }
-              measurable={readiness.expectedThumbCount > 0}
-            />
-            <ProgressRow
-              label="Transcript"
-              ratio={readiness.transcriptRatio}
-              detail={
-                readiness.recordedSeconds > 0
-                  ? `${formatDuration(readiness.transcribedSeconds)} / ${formatDuration(readiness.recordedSeconds)} transcribed`
-                  : "Waiting for audio…"
-              }
-              measurable={readiness.recordedSeconds > 0}
-            />
+            <div className="w-full space-y-5 rounded-lg border border-[var(--color-card-border)] bg-[#050705] px-4 py-4 text-left">
+              <ProgressRow
+                label="Screenshots"
+                ratio={readiness.thumbRatio}
+                detail={
+                  readiness.expectedThumbCount > 0
+                    ? `${readiness.thumbCount} / ~${readiness.expectedThumbCount} frames · ${formatDuration(readiness.thumbCoveredSeconds)} covered`
+                    : "Waiting for media…"
+                }
+                measurable={readiness.expectedThumbCount > 0}
+              />
+              <ProgressRow
+                label="Transcript"
+                ratio={readiness.transcriptRatio}
+                detail={
+                  readiness.recordedSeconds > 0
+                    ? `${formatDuration(readiness.transcribedSeconds)} / ${formatDuration(readiness.recordedSeconds)} transcribed`
+                    : "Waiting for audio…"
+                }
+                measurable={readiness.recordedSeconds > 0}
+              />
+            </div>
           </div>
         </div>
       </div>

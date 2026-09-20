@@ -30,6 +30,7 @@ let resolvedYtDlpInvocation: YtDlpInvocation | null = null;
 let lastYtDlpProbeError: string | null = null;
 let generatedCookiesPath: string | null = null;
 let generatedTwitchCookiesPath: string | null = null;
+let automaticImpersonationPromise: Promise<boolean> | null = null;
 
 const RUNTIME_COOKIES_PATH = "/tmp/youtube-cookies.txt";
 const RUNTIME_TWITCH_COOKIES_PATH = "/tmp/twitch-cookies.txt";
@@ -202,8 +203,8 @@ export interface YoutubeCaptureStrategy {
 }
 
 /**
- * Ordered YouTube clients. The first two use the automatic PO-token provider;
- * later clients keep public/live capture working if token minting is down.
+ * Ordered YouTube clients. Prefer cookie-backed clients first; fall back to
+ * public android/tv clients that often work when cookies are rotated/invalid.
  */
 export function getYoutubeCaptureStrategies(): YoutubeCaptureStrategy[] {
   const configuredClient = process.env.YT_DLP_YOUTUBE_CLIENT?.trim();
@@ -230,9 +231,11 @@ export function getYoutubeCaptureStrategies(): YoutubeCaptureStrategy[] {
       extractorArgs: "player_client=tv",
       includeCookies: true,
     },
+    // Invalid/rotated cookies commonly poison web clients with CDN 403s.
+    // Plain android (no cookies) works; android_vr alone often 403s without a PO token.
     {
       id: "public-no-cookie",
-      extractorArgs: "player_client=android_vr",
+      extractorArgs: "player_client=android",
       includeCookies: false,
     },
   ];
@@ -248,7 +251,13 @@ export function getYoutubeCaptureStrategies(): YoutubeCaptureStrategy[] {
 
 export function isYoutubePoTokenError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /PO Token|GVS PO Token|No video formats found/i.test(
+  return /PO Token|GVS PO Token|No video formats found/i.test(message);
+}
+
+/** CDN/format blocks that often clear when switching player clients. */
+export function isYoutubeStreamForbiddenError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /unable to download video data.*403|HTTP Error 403:\s*Forbidden/i.test(
     message
   );
 }
@@ -347,8 +356,16 @@ function decodeCookiesBase64(value: string, label: string): Buffer {
 async function resolveYoutubeCookiesPath(): Promise<string | null> {
   const configuredPath = process.env.YT_DLP_COOKIES_PATH?.trim();
   if (configuredPath) {
-    validateNetscapeCookies(await fs.readFile(configuredPath), "YouTube cookies");
-    return configuredPath;
+    // Always copy to a runtime path. yt-dlp rewrites --cookies files in place
+    // and can strip LOGIN_INFO / SID, which immediately breaks later downloads.
+    if (!generatedCookiesPath) {
+      const contents = await fs.readFile(configuredPath);
+      validateNetscapeCookies(contents, "YouTube cookies");
+      await fs.writeFile(RUNTIME_COOKIES_PATH, contents, { mode: 0o600 });
+      await fs.chmod(RUNTIME_COOKIES_PATH, 0o600);
+      generatedCookiesPath = RUNTIME_COOKIES_PATH;
+    }
+    return generatedCookiesPath;
   }
 
   const cookiesBase64 = process.env.YT_DLP_COOKIES_B64?.trim();
@@ -365,8 +382,14 @@ async function resolveYoutubeCookiesPath(): Promise<string | null> {
 async function resolveTwitchCookiesPath(): Promise<string | null> {
   const configuredPath = process.env.TWITCH_COOKIES_PATH?.trim();
   if (configuredPath) {
-    validateNetscapeCookies(await fs.readFile(configuredPath), "Twitch cookies");
-    return configuredPath;
+    if (!generatedTwitchCookiesPath) {
+      const contents = await fs.readFile(configuredPath);
+      validateNetscapeCookies(contents, "Twitch cookies");
+      await fs.writeFile(RUNTIME_TWITCH_COOKIES_PATH, contents, { mode: 0o600 });
+      await fs.chmod(RUNTIME_TWITCH_COOKIES_PATH, 0o600);
+      generatedTwitchCookiesPath = RUNTIME_TWITCH_COOKIES_PATH;
+    }
+    return generatedTwitchCookiesPath;
   }
 
   const cookiesBase64 = process.env.TWITCH_COOKIES_B64?.trim();
@@ -413,6 +436,13 @@ export async function getYtDlpDeploymentArgs(
   const proxy = process.env.YT_DLP_PROXY?.trim();
   if (proxy) args.push("--proxy", proxy);
 
+  if (
+    !process.env.YT_DLP_IMPERSONATE?.trim() &&
+    (await supportsAutomaticChromeImpersonation())
+  ) {
+    args.push("--impersonate", "chrome");
+  }
+
   if (platform === "twitch" && options?.includeCookies !== false) {
     const twitchCookies = await resolveTwitchCookiesPath();
     if (twitchCookies) args.push("--cookies", twitchCookies);
@@ -429,6 +459,27 @@ export async function getYtDlpDeploymentArgs(
   }
 
   return args;
+}
+
+async function supportsAutomaticChromeImpersonation(): Promise<boolean> {
+  if (!automaticImpersonationPromise) {
+    automaticImpersonationPromise = (async () => {
+      const invocation = await resolveYtDlpInvocation();
+      if (!invocation) return false;
+      try {
+        const { stdout, stderr } = await runCommand(invocation.command, [
+          ...invocation.prefixArgs,
+          "--list-impersonate-targets",
+        ]);
+        return /^Chrome(?:-\S+)?\s+.*curl_cffi\s*$/im.test(
+          `${stdout}\n${stderr}`
+        );
+      } catch {
+        return false;
+      }
+    })();
+  }
+  return automaticImpersonationPromise;
 }
 
 export function isLiveFromStartUnavailable(error: unknown): boolean {
@@ -459,6 +510,7 @@ export type YtDlpErrorKind =
   | "twitch_forbidden"
   | "twitch_live_from_start"
   | "ffmpeg_missing"
+  | "youtube_forbidden"
   | "unknown";
 
 export function classifyYtDlpError(error: unknown): YtDlpErrorKind {
@@ -493,6 +545,9 @@ export function classifyYtDlpError(error: unknown): YtDlpErrorKind {
   if (/video unavailable|livestream.*ended|stream.*ended|has been removed|is unavailable|not available/i.test(message)) {
     return "unavailable";
   }
+  if (isYoutubeStreamForbiddenError(message)) {
+    return "youtube_forbidden";
+  }
   return "unknown";
 }
 
@@ -525,6 +580,12 @@ export function formatYtDlpUserError(error: unknown): string {
       return (
         "FFmpeg was not found for Twitch HLS remux. Redeploy the latest image, " +
         "or set FFMPEG_PATH to the absolute ffmpeg binary path."
+      );
+    case "youtube_forbidden":
+      return (
+        "YouTube refused the media download (HTTP 403). Clipper tried its browser, " +
+        "token, and public-client fallbacks. Refresh the server's YouTube cookies " +
+        "and confirm the PO-token provider is healthy, or upload an authorized VOD."
       );
     default:
       return error instanceof Error
@@ -604,13 +665,14 @@ function sourceMaxHeight(): number {
 
 function sourceFormatChains(): string[] {
   const height = sourceMaxHeight();
+  // Avoid bare "best" / pre-merged progressive formats — YouTube CDN often
+  // returns HTTP 403 for those. Prefer separate video+audio (merged by ffmpeg).
   return [
-    `bestvideo[vcodec^=avc1][height<=${height}]+bestaudio[acodec^=mp4a]/best[ext=mp4][vcodec^=avc1][height<=${height}]`,
-    `bestvideo[vcodec^=avc1][height<=${height}]+bestaudio/best[ext=mp4][height<=${height}]`,
-    `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]`,
-    `best[height<=${height}][ext=mp4]/best[height<=${height}]`,
-    "bestvideo+bestaudio/best",
-    "best",
+    `bestvideo[vcodec^=avc1][height<=${height}]+bestaudio[acodec^=mp4a]/bestvideo[height<=${height}]+bestaudio`,
+    `bestvideo[vcodec^=avc1][height<=${height}]+bestaudio/bestvideo[height<=${height}]+bestaudio`,
+    `bestvideo[height<=${height}]+bestaudio`,
+    "bestvideo*+bestaudio/b",
+    "b",
   ];
 }
 
@@ -683,8 +745,9 @@ async function runYtDlpWithFormatFallback(
         return;
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
-        // Format changes cannot repair a missing token/client. Move directly
-        // to the next YouTube client instead of repeating the same failure.
+        // Format swaps cannot repair a missing PO token / empty format list.
+        // CDN 403s are often format-specific (e.g. progressive "best"), so keep
+        // trying other formats before moving to the next player client.
         if (platform === "youtube" && isYoutubePoTokenError(lastError)) break;
       }
     }
@@ -706,15 +769,16 @@ export function renderSourceMaxHeight(): number {
 export function renderSourceFormatChains(
   renderHeight = renderSourceMaxHeight()
 ): string[] {
+  // Avoid bare "best" progressive/pre-merged picks — they frequently 403 on CDN.
   return [
     // YouTube AVC is commonly capped at 1080p. Prefer VP9 first so a 1440p/4K
     // source remains genuinely sharp after a narrow 9:16 crop.
-    `bestvideo[vcodec^=vp9][height<=${renderHeight}]+bestaudio/best[vcodec^=vp9][height<=${renderHeight}]`,
-    `bestvideo[vcodec^=avc1][height<=${renderHeight}]+bestaudio[acodec^=mp4a]/best[ext=mp4][vcodec^=avc1][height<=${renderHeight}]`,
-    `bestvideo[vcodec^=avc1][height<=${renderHeight}]+bestaudio/best[ext=mp4][height<=${renderHeight}]`,
-    `bestvideo[height<=${renderHeight}]+bestaudio/best[height<=${renderHeight}]/best`,
-    "bestvideo+bestaudio/best",
-    "best",
+    `bestvideo[vcodec^=vp9][height<=${renderHeight}]+bestaudio/bestvideo[height<=${renderHeight}]+bestaudio`,
+    `bestvideo[vcodec^=avc1][height<=${renderHeight}]+bestaudio[acodec^=mp4a]/bestvideo[height<=${renderHeight}]+bestaudio`,
+    `bestvideo[vcodec^=avc1][height<=${renderHeight}]+bestaudio/bestvideo[height<=${renderHeight}]+bestaudio`,
+    `bestvideo[height<=${renderHeight}]+bestaudio`,
+    "bestvideo*+bestaudio/b",
+    "b",
   ];
 }
 

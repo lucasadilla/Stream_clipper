@@ -17,7 +17,7 @@ afterEach(() => {
 });
 
 describe("YouTube capture strategies", () => {
-  it("falls back from mweb token capture to live and no-token clients", () => {
+  it("falls back from mweb token capture to live and no-cookie clients", () => {
     process.env.YT_DLP_YOUTUBE_CLIENT = "mweb";
 
     const strategies = getYoutubeCaptureStrategies();
@@ -30,7 +30,7 @@ describe("YouTube capture strategies", () => {
       expect.arrayContaining([
         expect.objectContaining({ extractorArgs: "player_client=web_safari" }),
         expect.objectContaining({
-          extractorArgs: "player_client=android_vr",
+          extractorArgs: "player_client=android",
           includeCookies: false,
         }),
       ])
@@ -56,11 +56,20 @@ describe("YouTube capture strategies", () => {
     expect(classifyYtDlpError(error)).toBe("po_token_unavailable");
   });
 
+  it("turns a YouTube media CDN 403 into an actionable error", () => {
+    expect(
+      classifyYtDlpError(
+        new Error("ERROR: unable to download video data: HTTP Error 403: Forbidden")
+      )
+    ).toBe("youtube_forbidden");
+  });
+
   it("prefers a high-resolution VP9 final source before 1080p AVC", () => {
     const formats = renderSourceFormatChains(2160);
 
     expect(formats[0]).toContain("vcodec^=vp9");
     expect(formats[0]).toContain("height<=2160");
     expect(formats[1]).toContain("vcodec^=avc1");
+    expect(formats).not.toContain("best");
   });
 });

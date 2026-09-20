@@ -37,6 +37,32 @@ export async function triggerFileDownload(
   options?: FileDownloadOptions
 ): Promise<void> {
   if (options?.direct !== false) {
+    const absoluteUrl = toAbsoluteUrl(url);
+    const target = new URL(absoluteUrl);
+    if (target.origin === window.location.origin) {
+      const preflight = await fetch(absoluteUrl, {
+        method: "HEAD",
+        cache: "no-store",
+      });
+      if (
+        !preflight.ok &&
+        preflight.status !== 405 &&
+        preflight.status !== 501
+      ) {
+        let message = `Download failed (${preflight.status})`;
+        try {
+          const detail = await fetch(absoluteUrl, {
+            cache: "no-store",
+            headers: { Accept: "application/json" },
+          });
+          const data = (await detail.json()) as { error?: string };
+          if (data.error) message = data.error;
+        } catch {
+          // Keep the status-based fallback when the endpoint has no JSON body.
+        }
+        throw new Error(message);
+      }
+    }
     triggerDirectFileDownload(url, filename);
     return;
   }

@@ -10,6 +10,7 @@ import {
   preloadClipStudioFaceTracker,
 } from "@/lib/clipStudioPreload";
 import { OperationProgress } from "@/components/ui/operation-progress";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 export interface AgentClipCardData extends ClipSuggestionData {
   thumbnailUrl?: string | null;
@@ -37,6 +38,31 @@ const SORTS: Array<{ id: ClipSort; label: string }> = [
 
 const CARD_ACCENTS = ["#65d8c1", "#f0b75a", "#ff7d78"] as const;
 
+function ClipCardPlaceholder({
+  label,
+  announce = false,
+}: {
+  label: string;
+  announce?: boolean;
+}) {
+  return (
+    <div
+      className="overflow-hidden rounded-lg border border-white/[0.08] bg-[#0d0f12]"
+      aria-label={announce ? label : undefined}
+      aria-hidden={announce ? undefined : true}
+      role={announce ? "status" : undefined}
+    >
+      <div className="clipper-skeleton aspect-[9/16] w-full bg-white/[0.055]" />
+      <div className="h-[9.75rem] space-y-3 p-4">
+        <div className="clipper-skeleton h-4 w-4/5 rounded bg-white/[0.055]" />
+        <div className="clipper-skeleton h-3 w-full rounded bg-white/[0.055]" />
+        <div className="clipper-skeleton h-3 w-2/3 rounded bg-white/[0.055]" />
+      </div>
+      <span className="sr-only">{label}</span>
+    </div>
+  );
+}
+
 export function AgentClipPickGrid({
   clips,
   onOpenClip,
@@ -49,6 +75,7 @@ export function AgentClipPickGrid({
   playbackUrl,
 }: AgentClipPickGridProps) {
   const [sort, setSort] = useState<ClipSort>("best");
+  const reduceMotion = useReducedMotion();
 
   useEffect(() => {
     if (clips.length > 0) preloadClipStudioFaceTracker();
@@ -79,19 +106,30 @@ export function AgentClipPickGrid({
 
   if (suggesting && clips.length === 0) {
     return (
-      <div className="flex min-h-[26rem] items-center justify-center border-y border-[var(--color-card-border)] px-6">
-        <OperationProgress
-          title="Finding standout moments"
-          stages={[
-            "Reading the transcript…",
-            "Scoring hooks and payoffs…",
-            "Checking clip boundaries…",
-            "Writing accurate titles…",
-            "Ranking the strongest moments…",
-          ]}
-          resetKey={`clip-search:${sessionId ?? "session"}`}
-          className="max-w-md"
-        />
+      <div className="mx-auto w-full max-w-[96rem] space-y-6 pb-8" aria-busy="true">
+        <div className="flex min-h-24 items-end justify-between gap-8 border-b border-white/[0.09] pb-5">
+          <OperationProgress
+            title="Finding standout moments"
+            stages={[
+              "Reading the transcript…",
+              "Scoring hooks and payoffs…",
+              "Checking clip boundaries…",
+              "Writing accurate titles…",
+              "Ranking the strongest moments…",
+            ]}
+            resetKey={`clip-search:${sessionId ?? "session"}`}
+            className="max-w-md"
+          />
+          <div className="clipper-skeleton hidden h-10 w-72 rounded-md bg-white/[0.055] sm:block" />
+        </div>
+        <div
+          className="grid justify-center gap-4"
+          style={{ gridTemplateColumns: "repeat(auto-fit, 16rem)" }}
+        >
+          {Array.from({ length: 4 }, (_, index) => (
+            <ClipCardPlaceholder key={index} label="Finding a clip" />
+          ))}
+        </div>
       </div>
     );
   }
@@ -188,28 +226,42 @@ export function AgentClipPickGrid({
         </div>
       </div>
 
-      <div
+      <motion.div
         className="grid justify-center gap-4"
         style={{ gridTemplateColumns: "repeat(auto-fit, 16rem)" }}
       >
-        {sortedClips.map((clip, index) => {
-          const duration = clip.endTimeSeconds - clip.startTimeSeconds;
-          const confidence = Math.round(clip.confidence * 100);
-          const cardAccent = CARD_ACCENTS[index % CARD_ACCENTS.length];
-          return (
-            <button
-              key={clip.id}
-              type="button"
-              onPointerEnter={() => warmClip(clip)}
-              onFocus={() => warmClip(clip)}
-              onTouchStart={() => warmClip(clip)}
-              onClick={() => {
-                warmClip(clip);
-                onOpenClip(clip.id);
-              }}
-              className="group flex h-full min-w-0 origin-center flex-col overflow-hidden rounded-lg border border-t-2 border-[#292d31] bg-[#0d0f12] text-left shadow-[0_12px_32px_rgba(0,0,0,0.24)] transition-[border-color,background-color,transform,box-shadow] duration-300 ease-out hover:-translate-y-1.5 hover:scale-[1.015] hover:border-[#596168] hover:bg-[#111419] hover:shadow-[0_24px_52px_rgba(0,0,0,0.48)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#65d8c1] motion-reduce:hover:translate-y-0 motion-reduce:hover:scale-100"
-              style={{ borderTopColor: cardAccent }}
-            >
+        <AnimatePresence initial={false} mode="popLayout">
+          {sortedClips.map((clip, index) => {
+            const duration = clip.endTimeSeconds - clip.startTimeSeconds;
+            const confidence = Math.round(clip.confidence * 100);
+            const cardAccent = CARD_ACCENTS[index % CARD_ACCENTS.length];
+            return (
+              <motion.div
+                layout={reduceMotion ? false : "position"}
+                initial={
+                  reduceMotion ? false : { opacity: 0, scale: 0.98, y: 10 }
+                }
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={reduceMotion ? undefined : { opacity: 0, scale: 0.98 }}
+                transition={{
+                  duration: reduceMotion ? 0 : 0.2,
+                  ease: "easeOut",
+                }}
+                key={clip.id}
+                className="h-full"
+              >
+                <button
+                  type="button"
+                  onPointerEnter={() => warmClip(clip)}
+                  onFocus={() => warmClip(clip)}
+                  onTouchStart={() => warmClip(clip)}
+                  onClick={() => {
+                    warmClip(clip);
+                    onOpenClip(clip.id);
+                  }}
+                  className="group flex h-full w-full min-w-0 origin-center flex-col overflow-hidden rounded-lg border border-t-2 border-[#292d31] bg-[#0d0f12] text-left shadow-[0_12px_32px_rgba(0,0,0,0.24)] transition-[border-color,background-color,transform,box-shadow] duration-300 ease-out hover:-translate-y-1.5 hover:scale-[1.015] hover:border-[#596168] hover:bg-[#111419] hover:shadow-[0_24px_52px_rgba(0,0,0,0.48)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#65d8c1] motion-reduce:hover:translate-y-0 motion-reduce:hover:scale-100"
+                  style={{ borderTopColor: cardAccent }}
+                >
               <div className="relative aspect-[9/16] w-full shrink-0 overflow-hidden border-b border-white/[0.08] bg-[#050607]">
                 <div
                   className="absolute inset-0 animate-pulse bg-[#15191d] motion-reduce:animate-none"
@@ -284,10 +336,24 @@ export function AgentClipPickGrid({
                   />
                 </div>
               </div>
-            </button>
-          );
-        })}
-      </div>
+                </button>
+              </motion.div>
+            );
+          })}
+          {(getMoreLoading || suggesting) && (
+            <motion.div
+              key="clip-search-placeholder"
+              layout={reduceMotion ? false : "position"}
+              initial={reduceMotion ? false : { opacity: 0, scale: 0.98 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={reduceMotion ? undefined : { opacity: 0, scale: 0.98 }}
+              transition={{ duration: reduceMotion ? 0 : 0.18 }}
+            >
+              <ClipCardPlaceholder label="Finding another clip" announce />
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </motion.div>
     </div>
   );
 }
