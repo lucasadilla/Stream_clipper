@@ -26,31 +26,47 @@ function configuredExecutablePath(envName: string, fallback: string): string {
   return configured;
 }
 
+function homebrewFfmpegFullPath(): string | null {
+  if (process.platform !== "darwin") return null;
+  for (const candidate of [
+    "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
+    "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
+  ]) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function isStockHomebrewFfmpeg(binaryPath: string): boolean {
+  return (
+    binaryPath === "ffmpeg" ||
+    binaryPath === "/opt/homebrew/bin/ffmpeg" ||
+    binaryPath === "/usr/local/bin/ffmpeg" ||
+    /\/Cellar\/ffmpeg\//.test(binaryPath) ||
+    /\/opt\/homebrew\/opt\/ffmpeg\/bin\/ffmpeg$/.test(binaryPath) ||
+    /\/usr\/local\/opt\/ffmpeg\/bin\/ffmpeg$/.test(binaryPath)
+  );
+}
+
 export function getFfmpegPath(): string {
   const configured = configuredExecutablePath("FFMPEG_PATH", "");
-  if (configured) return configured;
-
   // The standard Homebrew FFmpeg formula omits libass. Prefer ffmpeg-full when
-  // installed so burned captions work locally without per-machine .env edits.
-  if (process.platform === "darwin") {
-    for (const candidate of [
-      "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
-      "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
-    ]) {
-      if (existsSync(candidate)) return candidate;
-    }
+  // installed so burned captions work even if .env sets FFMPEG_PATH=ffmpeg.
+  const full = homebrewFfmpegFullPath();
+  if (full && (!configured || isStockHomebrewFfmpeg(configured))) {
+    return full;
   }
-  return "ffmpeg";
+  return configured || "ffmpeg";
 }
 
 export function getFfprobePath(): string {
   const configured = configuredExecutablePath("FFPROBE_PATH", "");
-  if (configured) return configured;
   const ffmpegPath = getFfmpegPath();
   if (path.basename(ffmpegPath) === "ffmpeg" && ffmpegPath !== "ffmpeg") {
     const sibling = path.join(path.dirname(ffmpegPath), "ffprobe");
     if (existsSync(sibling)) return sibling;
   }
+  if (configured && configured !== "ffprobe") return configured;
   return "ffprobe";
 }
 
@@ -694,6 +710,100 @@ export async function extractFrames(
     .map((f) => path.join(outputDir, f));
 }
 
+export interface VisualScanFrame {
+  filePath: string;
+  timestampSeconds: number;
+}
+
+/**
+ * Extract tiny lossless grayscale frames for inexpensive local visual-change
+ * measurement. PGM keeps decoding dependency-free and the caller can delete
+ * the temporary scan directory as soon as the metrics are computed.
+ */
+export async function extractVisualScanFrames(
+  inputPath: string,
+  outputDir: string,
+  options: {
+    startTimeSeconds?: number;
+    endTimeSeconds?: number;
+    intervalSeconds?: number;
+    width?: number;
+  } = {}
+): Promise<VisualScanFrame[]> {
+  const startTimeSeconds = Math.max(0, options.startTimeSeconds ?? 0);
+  const endTimeSeconds = options.endTimeSeconds;
+  const intervalSeconds = Math.max(0.1, options.intervalSeconds ?? 2);
+  const width = Math.max(48, Math.round(options.width ?? 160));
+  const fs = await import("fs/promises");
+  await fs.mkdir(outputDir, { recursive: true });
+  const stale = await fs.readdir(outputDir).catch(() => [] as string[]);
+  await Promise.all(
+    stale
+      .filter((name) => /^scan_\d+\.pgm$/i.test(name))
+      .map((name) => fs.unlink(path.join(outputDir, name)).catch(() => {}))
+  );
+
+  const pattern = path.join(outputDir, "scan_%06d.pgm");
+  const args = ["-y", "-ss", String(startTimeSeconds), "-i", inputPath];
+  if (endTimeSeconds != null && endTimeSeconds > startTimeSeconds) {
+    args.push("-t", String(endTimeSeconds - startTimeSeconds));
+  }
+  args.push(
+    "-an",
+    "-sn",
+    "-dn",
+    "-vf",
+    `fps=1/${intervalSeconds},scale=${width}:-2:flags=fast_bilinear,format=gray`,
+    "-c:v",
+    "pgm",
+    pattern
+  );
+  await runCommand(getFfmpegPath(), args);
+
+  const files = (await fs.readdir(outputDir))
+    .filter((name) => /^scan_\d+\.pgm$/i.test(name))
+    .sort();
+  return files.map((name, index) => ({
+    filePath: path.join(outputDir, name),
+    timestampSeconds: startTimeSeconds + index * intervalSeconds,
+  }));
+}
+
+/** Create a small, silent candidate segment suitable for one targeted model call. */
+export async function extractVisualAnalysisVideo(
+  inputPath: string,
+  outputPath: string,
+  startTimeSeconds: number,
+  endTimeSeconds: number
+): Promise<void> {
+  const durationSeconds = Math.max(0.5, endTimeSeconds - startTimeSeconds);
+  await runCommand(getFfmpegPath(), [
+    "-y",
+    "-ss",
+    String(Math.max(0, startTimeSeconds)),
+    "-t",
+    String(durationSeconds),
+    "-i",
+    inputPath,
+    "-an",
+    "-sn",
+    "-dn",
+    "-vf",
+    "scale=640:-2:flags=fast_bilinear",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "veryfast",
+    "-crf",
+    "30",
+    "-pix_fmt",
+    "yuv420p",
+    "-movflags",
+    "+faststart",
+    outputPath,
+  ]);
+}
+
 export interface RenderShortOptions {
   inputPath: string;
   outputPath: string;
@@ -752,14 +862,6 @@ async function hasSubtitleFilter(): Promise<boolean> {
     subtitleFilterAvailable = false;
   }
   return subtitleFilterAvailable;
-}
-
-function captionRendererUnavailableError(): Error {
-  return new Error(
-    "Burned captions were requested, but this FFmpeg build does not include the " +
-      "subtitles (libass) filter. Install an FFmpeg build with libass support. " +
-      "The Railway Docker image includes and verifies this capability."
-  );
 }
 
 function renderPreset(): string {
@@ -1036,16 +1138,22 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
       accurateSeek = false;
     }
 
-    const captionsSupported = srtPath ? await hasSubtitleFilter() : false;
+    let activeSrtPath = srtPath;
+    if (activeSrtPath && !(await hasSubtitleFilter())) {
+      // Local Homebrew ffmpeg often lacks libass. Prefer ffmpeg-full (auto-
+      // selected when installed); otherwise export without burned captions
+      // rather than failing the whole render after the encode already ran.
+      console.warn(
+        "[ffmpeg] Skipping burned captions — this FFmpeg build has no subtitles filter. Install ffmpeg-full for caption burn-in."
+      );
+      activeSrtPath = undefined;
+    }
 
-    if (format === "native" && srtPath) {
-      if (!captionsSupported) {
-        throw captionRendererUnavailableError();
-      }
+    if (format === "native" && activeSrtPath) {
       await encodeWithFilters({
         inputPath: encodeInput,
         outputPath,
-        vf: subtitleFilter(srtPath, subtitleFormat, outputHeight, captionAppearance),
+        vf: subtitleFilter(activeSrtPath, subtitleFormat, outputHeight, captionAppearance),
         outputHeight,
         withAudio: true,
         previewQuality,
@@ -1077,11 +1185,8 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
       }
     }
 
-    if (srtPath && !captionsSupported) {
-      throw captionRendererUnavailableError();
-    }
-    if (srtPath) {
-      vf += `,${subtitleFilter(srtPath, subtitleFormat, height, captionAppearance)}`;
+    if (activeSrtPath) {
+      vf += `,${subtitleFilter(activeSrtPath, subtitleFormat, height, captionAppearance)}`;
     }
 
     await encodeWithFilters({
@@ -1173,8 +1278,12 @@ export async function renderSequence(options: RenderSequenceOptions): Promise<vo
   );
   if (totalDuration <= 0) throw new Error("Sequence duration is invalid");
 
-  if (options.srtPath && !(await hasSubtitleFilter())) {
-    throw captionRendererUnavailableError();
+  let srtPath = options.srtPath;
+  if (srtPath && !(await hasSubtitleFilter())) {
+    console.warn(
+      "[ffmpeg] Skipping burned captions — this FFmpeg build has no subtitles filter. Install ffmpeg-full for caption burn-in."
+    );
+    srtPath = undefined;
   }
 
   const overlays = options.mediaOverlays ?? [];
@@ -1246,9 +1355,9 @@ export async function renderSequence(options: RenderSequenceOptions): Promise<vo
   );
 
   let videoLabel = "vcat";
-  if (options.srtPath) {
+  if (srtPath) {
     filters.push(
-      `[${videoLabel}]${subtitleFilter(options.srtPath, options.format, height, options.captionAppearance)}[vsub]`
+      `[${videoLabel}]${subtitleFilter(srtPath, options.format, height, options.captionAppearance)}[vsub]`
     );
     videoLabel = "vsub";
   }

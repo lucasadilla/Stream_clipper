@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   hasIncompleteSpeechEnding,
   refineClipToCompleteSpeech,
+  refineClipToVisualEvents,
   speechEndingNeedsContinuation,
 } from "@/lib/clipBoundaries";
 
@@ -151,5 +152,33 @@ describe("automatic clip speech boundaries", () => {
     expect(result.start).toBeCloseTo(0);
     expect(result.end).toBeCloseTo(5.35);
     expect(result.endingComplete).toBe(true);
+  });
+});
+
+describe("visual clip boundaries", () => {
+  it("preserves visible setup and reaction around the selected range", () => {
+    const result = refineClipToVisualEvents({
+      start: 20,
+      end: 35,
+      maximumDurationSeconds: 40,
+      events: [
+        { timeSeconds: 17, type: "setup", confidence: 0.9 },
+        { timeSeconds: 36, type: "outcome", confidence: 0.92 },
+        { timeSeconds: 38, type: "reaction", confidence: 0.88 },
+      ],
+    });
+    expect(result.start).toBeCloseTo(16.5);
+    expect(result.end).toBeCloseTo(39.1);
+    expect(result.adjusted).toBe(true);
+  });
+
+  it("ignores low-confidence visual claims", () => {
+    const result = refineClipToVisualEvents({
+      start: 20,
+      end: 35,
+      maximumDurationSeconds: 40,
+      events: [{ timeSeconds: 40, type: "reaction", confidence: 0.3 }],
+    });
+    expect(result).toMatchObject({ start: 20, end: 35, adjusted: false });
   });
 });

@@ -1,9 +1,11 @@
+/* eslint-disable @typescript-eslint/no-require-imports */
 /**
  * Production entrypoint for Railway/Docker.
  * Syncs the Prisma schema (additive tables/columns like FaceAnalysisJob)
  * before starting Next.js so deploys don't require a manual db push.
  */
 const { spawnSync, spawn } = require("child_process");
+const fs = require("fs");
 const path = require("path");
 
 function run(command, args) {
@@ -16,10 +18,57 @@ function run(command, args) {
   return result.status ?? 1;
 }
 
+function startBundledPotProvider() {
+  const providerUrl = process.env.YT_DLP_POT_PROVIDER_URL?.trim();
+  if (!providerUrl) return null;
+
+  let hostname;
+  try {
+    hostname = new URL(providerUrl).hostname;
+  } catch {
+    console.warn("[start] YT_DLP_POT_PROVIDER_URL is invalid; skipping bundled provider.");
+    return null;
+  }
+  if (hostname !== "127.0.0.1" && hostname !== "localhost" && hostname !== "::1") {
+    return null;
+  }
+
+  const entry =
+    process.env.YT_DLP_POT_PROVIDER_ENTRY?.trim() ||
+    "/opt/bgutil-ytdlp-pot-provider/build/main.js";
+  if (!fs.existsSync(entry)) {
+    console.warn(
+      `[start] YouTube PO-token provider entry was not found at ${entry}. Direct capture will use yt-dlp fallbacks.`
+    );
+    return null;
+  }
+
+  console.info("[start] Starting YouTube PO-token provider on 127.0.0.1:4416...");
+  const provider = spawn(process.execPath, [entry, "--host", "127.0.0.1"], {
+    stdio: "inherit",
+    env: process.env,
+    cwd: path.dirname(path.dirname(entry)),
+    shell: false,
+  });
+  provider.on("error", (error) => {
+    console.error("[start] PO-token provider failed to start:", error);
+  });
+  provider.on("exit", (code, signal) => {
+    if (code !== 0 || signal) {
+      console.error(
+        `[start] PO-token provider exited (${signal || `code ${code}`}). YouTube capture will use fallback clients.`
+      );
+    }
+  });
+  return provider;
+}
+
 if (!process.env.DATABASE_URL?.trim()) {
   console.error("[start] DATABASE_URL is required");
   process.exit(1);
 }
+
+const potProvider = startBundledPotProvider();
 
 if (!process.env.DIRECT_URL?.trim()) {
   console.warn(
@@ -51,11 +100,13 @@ const next = spawn("npx", ["next", "start"], {
 });
 
 next.on("exit", (code, signal) => {
+  if (potProvider && potProvider.exitCode === null) potProvider.kill("SIGTERM");
   if (signal) process.kill(process.pid, signal);
   process.exit(code ?? 1);
 });
 
 next.on("error", (err) => {
+  if (potProvider && potProvider.exitCode === null) potProvider.kill("SIGTERM");
   console.error("[start] failed to launch next start:", err);
   process.exit(1);
 });

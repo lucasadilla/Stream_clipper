@@ -5,6 +5,7 @@ import {
   getAuthorizedPlatformExport,
   SessionAccessError,
 } from "@/services/platformExportAccessService";
+import { inspectDeliverableVideo } from "@/services/deliverableVideoService";
 
 export const runtime = "nodejs";
 
@@ -16,6 +17,15 @@ export async function GET(
     const { exportId } = await params;
     const item = await getAuthorizedPlatformExport(request, exportId);
     if (item.status !== "completed" || !item.outputPath) return errorResponse("Export not ready", 404);
+    const inspection = await inspectDeliverableVideo(item.outputPath, {
+      relativeToStorage: true,
+    });
+    if (!inspection.ok) {
+      return errorResponse(
+        inspection.reason ?? "Export video is unavailable",
+        inspection.sizeBytes === 0 ? 404 : 409
+      );
+    }
     return serveStorageFileInline(item.outputPath, request);
   } catch (error) {
     if (error instanceof SessionAccessError) return errorResponse(error.message, error.status);

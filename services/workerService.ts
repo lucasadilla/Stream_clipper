@@ -36,6 +36,7 @@ import {
   reclaimStaleFaceAnalysisJobs,
 } from "@/services/faceAnalysisService";
 import { processOneStreamAutomation } from "@/services/streamAutomationService";
+import { analyzePendingVisualWindow } from "@/services/visualAnalysisService";
 
 const WORKER_ID = `worker-${process.pid}-${randomUUID().slice(0, 8)}`;
 
@@ -312,6 +313,21 @@ async function processOneTranscription(): Promise<boolean> {
           where: { id: sessionId },
           data: { lastTranscriptionError: null },
         });
+        if (
+          process.env.VISUAL_ANALYSIS_ENABLED?.trim().toLowerCase() !== "false" &&
+          typeof result.transcribedThrough === "number" &&
+          result.transcribedThrough > 0
+        ) {
+          await analyzePendingVisualWindow(
+            sessionId,
+            result.transcribedThrough
+          ).catch((error) => {
+            console.warn(
+              "[worker] incremental visual scan skipped:",
+              error instanceof Error ? error.message : error
+            );
+          });
+        }
       }
       return true;
     } catch (error) {

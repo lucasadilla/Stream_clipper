@@ -19,14 +19,20 @@ import {
   sanitizeRankedClipTitle,
   type RankedCandidate,
 } from "@/services/clipRankingService";
-import { refineClipToCompleteSpeech } from "@/lib/clipBoundaries";
 import {
+  refineClipToCompleteSpeech,
+  refineClipToVisualEvents,
+} from "@/lib/clipBoundaries";
+import {
+  applyVisualContextToNarrativePlan,
   narrativePlanQualityBonus,
   narrativePlanSummary,
   planNarrativeClip,
   type NarrativeBeat,
   type NarrativePlan,
 } from "@/lib/narrativeBeats";
+import type { StructuredVisualContext } from "@/lib/visualAnalysis";
+import { buildCandidateVisualContexts } from "@/services/visualContextService";
 
 export const CLIP_SUGGESTION_VERSION = 6;
 
@@ -51,6 +57,7 @@ type ClipCandidate = {
   endingComplete?: boolean;
   narrativePlan?: NarrativePlan;
   narrativeSource?: "deterministic" | "ai";
+  visualContext?: StructuredVisualContext;
 };
 
 function rankingCandidateId(candidate: ClipCandidate, index: number): string {
@@ -322,6 +329,8 @@ function sourceBonus(source: string, profile: ClipContentProfile): number {
       return profile.audioWeight;
     case "transcript_density":
       return profile.transcriptWeight;
+    case "visual_event":
+      return profile.eventWeight;
     default:
       return 0;
   }
@@ -346,7 +355,14 @@ export async function autoSuggestClips(
   );
   const transcriptContextStart = Math.max(0, fromSeconds - 90);
 
-  const [windows, audioEvents, existingClips, transcriptChunks, session] =
+  const [
+    windows,
+    audioEvents,
+    visualEvents,
+    existingClips,
+    transcriptChunks,
+    session,
+  ] =
     await Promise.all([
       prisma.eventWindow.findMany({
         where: {
@@ -367,6 +383,17 @@ export async function autoSuggestClips(
         },
         orderBy: { score: "desc" },
         take: 30,
+      }),
+      prisma.visualEvent.findMany({
+        where: {
+          streamSessionId,
+          type: { in: ["scene_change", "high_motion", "interface_change"] },
+          score: { gte: 4 },
+          endTimeSeconds: { gte: fromSeconds },
+          startTimeSeconds: { lte: throughSeconds },
+        },
+        orderBy: { score: "desc" },
+        take: 60,
       }),
       prisma.clipSuggestion.findMany({
         where: { streamSessionId, status: { not: "rejected" } },
@@ -568,6 +595,55 @@ export async function autoSuggestClips(
     });
   }
 
+  // Independent visual discovery keeps silent gameplay, demonstrations, and
+  // on-screen outcomes from depending on transcript/audio/chat triggers.
+  for (const visual of visualEvents) {
+    const momentRange = clipLengthFromMoment(
+      visual.startTimeSeconds,
+      visual.endTimeSeconds,
+      visual.type === "high_motion" ? 7 : 5
+    );
+    const { start, end } = clampClipRange(
+      momentRange.start,
+      momentRange.end,
+      profile
+    );
+    const transcript = transcriptSnippetFromChunks(
+      transcriptChunks,
+      start,
+      end
+    );
+    const title = buildSpecificClipTitle({
+      startTimeSeconds: start,
+      endTimeSeconds: end,
+      transcriptText: transcript,
+      eventSummary: visual.summary,
+    });
+    const reason = buildSpecificClipReason({
+      startTimeSeconds: start,
+      endTimeSeconds: end,
+      transcriptText: transcript,
+      eventSummary: visual.summary,
+    });
+    const transcriptWorth = scoreTranscriptClipWorthiness(transcript);
+    candidates.push({
+      start,
+      end,
+      title,
+      reason,
+      confidence: Math.min(0.9, 0.38 + visual.score / 18),
+      source: "visual_event",
+      contentType,
+      focusTimeSeconds:
+        (visual.startTimeSeconds + visual.endTimeSeconds) / 2,
+      context: [transcript, visual.summary].filter(Boolean).join(" | "),
+      worth:
+        sourceBonus("visual_event", profile) +
+        visual.score * 2.2 +
+        transcriptWorth,
+    });
+  }
+
   // Strong transcript hooks — prefer these over even sampling.
   {
     const scored = newTranscriptChunks
@@ -707,6 +783,65 @@ export async function autoSuggestClips(
     id: rankingCandidateId(candidate, index),
     candidate,
   }));
+  const visualContexts = await buildCandidateVisualContexts({
+    streamSessionId,
+    candidates: aiCandidateEntries.map(({ id, candidate }) => ({
+      id,
+      startTimeSeconds: candidate.start,
+      endTimeSeconds: candidate.end,
+      focusTimeSeconds: candidate.focusTimeSeconds,
+      signalScore: candidate.worth,
+      context: candidate.context,
+      contentType,
+    })),
+  }).catch((error) => {
+    console.warn(
+      "[suggest-clips] visual context unavailable; continuing with existing signals:",
+      error instanceof Error ? error.message : error
+    );
+    return null;
+  });
+  if (visualContexts) {
+    for (const { id, candidate } of aiCandidateEntries) {
+      const visualContext = visualContexts.contexts.get(id);
+      if (!visualContext) continue;
+      candidate.visualContext = visualContext;
+      const rankingContext = visualContexts.rankingContext.get(id);
+      if (rankingContext) {
+        candidate.context = [candidate.context, rankingContext]
+          .filter(Boolean)
+          .join(" | ");
+      }
+      if (candidate.narrativePlan) {
+        const priorBonus = narrativePlanQualityBonus(candidate.narrativePlan);
+        candidate.narrativePlan = applyVisualContextToNarrativePlan(
+          candidate.narrativePlan,
+          visualContext
+        );
+        candidate.worth +=
+          narrativePlanQualityBonus(candidate.narrativePlan) - priorBonus;
+      }
+      if (visualContext.sufficient) {
+        const visualBoundary = refineClipToVisualEvents({
+          start: candidate.start,
+          end: candidate.end,
+          events: visualContext.events,
+          maximumDurationSeconds: narrativeMaximumSeconds,
+        });
+        candidate.start = visualBoundary.start;
+        candidate.end = visualBoundary.end;
+        candidate.boundaryAdjusted =
+          candidate.boundaryAdjusted || visualBoundary.adjusted;
+        if (candidate.narrativePlan) {
+          candidate.narrativePlan = {
+            ...candidate.narrativePlan,
+            startTimeSeconds: candidate.start,
+            endTimeSeconds: candidate.end,
+          };
+        }
+      }
+    }
+  }
   const aiCandidatesById = new Map(
     aiCandidateEntries.map((entry) => [entry.id, entry.candidate])
   );
@@ -727,6 +862,7 @@ export async function autoSuggestClips(
       targetMinSeconds: Math.min(profile.targetMinSeconds, 18),
       maximumDurationSeconds: narrativeMaximumSeconds,
       transcriptChunks: candidate.narrativePlan?.contextChunks,
+      visualContext: candidate.visualContext,
     })),
   });
   if (aiRanking?.length) {
@@ -798,10 +934,20 @@ export async function autoSuggestClips(
       c.end = Math.min(c.end, throughSeconds);
       if (c.end - c.start < MIN_CLIP_SECONDS) continue;
     }
+    const verifiedVisual = Boolean(
+      c.visualContext?.sufficient && c.visualContext.confidence >= 0.62
+    );
     const visualSignal =
-      (contentType === "gaming" || contentType === "gameplay_only") &&
-      (c.source === "event_window" || c.source === "audio_event");
-    if (c.narrativePlan?.rejectionReason === "housekeeping_only") continue;
+      c.source === "visual_event" ||
+      verifiedVisual ||
+      ((contentType === "gaming" || contentType === "gameplay_only") &&
+        (c.source === "event_window" || c.source === "audio_event"));
+    if (
+      c.narrativePlan?.rejectionReason === "housekeeping_only" &&
+      !verifiedVisual
+    ) {
+      continue;
+    }
     if (c.narrativePlan?.rejectionReason && !visualSignal) continue;
     if (
       c.source === "even_sample" &&
@@ -822,7 +968,7 @@ export async function autoSuggestClips(
     if (!boundary.endingComplete) continue;
     c.start = boundary.start;
     c.end = boundary.end;
-    c.boundaryAdjusted = boundary.adjusted;
+    c.boundaryAdjusted = c.boundaryAdjusted || boundary.adjusted;
     c.endingComplete = boundary.endingComplete;
     if (c.narrativePlan) {
       c.narrativePlan = {
@@ -874,6 +1020,7 @@ export async function autoSuggestClips(
             clickabilityScore: candidate.clickabilityScore,
             boundaryAdjusted: candidate.boundaryAdjusted,
             endingComplete: candidate.endingComplete,
+            visualContext: candidate.visualContext,
             narrativeEngineVersion: 2,
             narrativeSource: candidate.narrativeSource,
             narrative: candidate.narrativePlan
@@ -886,6 +1033,7 @@ export async function autoSuggestClips(
                   focusChunkId: candidate.narrativePlan.focusChunkId,
                   arcType: candidate.narrativePlan.arcType,
                   beats: candidate.narrativePlan.beats,
+                  visualBeats: candidate.narrativePlan.visualBeats,
                   scores: candidate.narrativePlan.scores,
                   endingComplete: candidate.narrativePlan.endingComplete,
                   accepted: candidate.narrativePlan.accepted,

@@ -16,8 +16,6 @@ import {
 } from "@/lib/verticalLayout";
 import {
   generateProfessionalReframePlan,
-  REFRAME_STYLES,
-  type ReframeStyle,
 } from "@/lib/professionalReframe";
 
 export const runtime = "nodejs";
@@ -83,10 +81,7 @@ export async function GET(
     const usableTracks = result.tracks.filter(
       (track) => track.points.length >= 3
     );
-    const requestedStyle = request.nextUrl.searchParams.get("style");
-    const style = REFRAME_STYLES.includes(requestedStyle as ReframeStyle)
-      ? (requestedStyle as ReframeStyle)
-      : "professional";
+    const style = "professional" as const;
     const lockSubject = request.nextUrl.searchParams.get("lockSubject") === "true";
     const requestedStartParam = request.nextUrl.searchParams.get("startSeconds");
     const requestedEndParam = request.nextUrl.searchParams.get("endSeconds");

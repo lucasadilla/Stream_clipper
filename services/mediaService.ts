@@ -203,6 +203,24 @@ export async function processVideoIncremental(streamSessionId: string) {
     }
   }
 
+  let visual: unknown;
+  if (
+    process.env.VISUAL_ANALYSIS_ENABLED?.trim().toLowerCase() !== "false" &&
+    typeof transcription.transcribedThrough === "number" &&
+    transcription.transcribedThrough > 0
+  ) {
+    const { analyzePendingVisualWindow } = await import(
+      "@/services/visualAnalysisService"
+    );
+    visual = await analyzePendingVisualWindow(
+      streamSessionId,
+      transcription.transcribedThrough
+    ).catch((error) => ({
+      skipped: true,
+      reason: error instanceof Error ? error.message : String(error),
+    }));
+  }
+
   return {
     skipped: transcription.skipped,
     reason: transcription.reason,
@@ -211,6 +229,7 @@ export async function processVideoIncremental(streamSessionId: string) {
     recordedSeconds: transcription.recordedSeconds,
     audioSecondsProcessed: transcription.audioSecondsProcessed,
     chunksProcessed: transcription.chunksProcessed,
+    visual,
   };
 }
 

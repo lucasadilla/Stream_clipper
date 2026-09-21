@@ -459,6 +459,15 @@ describe("parseVerticalLayoutRequest", () => {
     expect(parsed!.faceSelection.mode).toBe("auto");
   });
 
+  it("normalizes legacy camera styles to professional", () => {
+    const parsed = parseVerticalLayoutRequest({
+      layout: "subject_aware_crop",
+      reframe: { style: "dynamic" },
+    });
+    expect(parsed).not.toBeNull();
+    expect(parsed!.reframe?.style).toBe("professional");
+  });
+
   it("rejects invalid manual rects", () => {
     const parsed = parseVerticalLayoutRequest({
       layout: "facecam_pip",

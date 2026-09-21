@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { getLatestCompletedFinalRenderJob } from "@/services/renderSelectionService";
+import { inspectDeliverableVideo } from "@/services/deliverableVideoService";
 
 export interface ClipSharePayload {
   id: string;
@@ -40,7 +41,13 @@ export async function getClipSharePayload(
   if (!clip) return null;
 
   const renderJob = await getLatestCompletedFinalRenderJob(clip.id);
-  const hasVideo = Boolean(renderJob?.outputPath);
+  const hasVideo = renderJob?.outputPath
+    ? (
+        await inspectDeliverableVideo(renderJob.outputPath, {
+          relativeToStorage: true,
+        })
+      ).ok
+    : false;
 
   return {
     id: clip.id,
@@ -67,5 +74,9 @@ export async function getLatestRenderOutputPath(
   clipSuggestionId: string
 ): Promise<string | null> {
   const job = await getLatestCompletedFinalRenderJob(clipSuggestionId);
-  return job?.outputPath ?? null;
+  if (!job?.outputPath) return null;
+  const inspection = await inspectDeliverableVideo(job.outputPath, {
+    relativeToStorage: true,
+  });
+  return inspection.ok ? job.outputPath : null;
 }

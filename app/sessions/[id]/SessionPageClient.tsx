@@ -10,25 +10,14 @@ import {
   readSessionBootstrap,
   writeSessionBootstrap,
 } from "@/lib/sessionBootstrap";
-import { OperationProgress } from "@/components/ui/operation-progress";
+import { EditorWorkspaceSkeleton } from "@/components/EditorWorkspaceSkeleton";
 
 const SessionWorkspace = dynamic(
   () =>
     import("@/components/SessionWorkspace").then((mod) => mod.SessionWorkspace),
   {
     ssr: false,
-    loading: () => (
-      <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
-        <div className="h-12 border-b border-[var(--color-card-border)]" />
-        <div className="flex flex-1 items-center justify-center px-6">
-          <OperationProgress
-            title="Opening timeline"
-            stages={["Loading editor code…", "Restoring timeline state…"]}
-            className="max-w-sm"
-          />
-        </div>
-      </div>
-    ),
+    loading: () => <EditorWorkspaceSkeleton mode="timeline" />,
   }
 );
 
@@ -37,34 +26,30 @@ const AgentWorkspace = dynamic(
     import("@/components/AgentWorkspace").then((mod) => mod.AgentWorkspace),
   {
     ssr: false,
-    loading: () => (
-      <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
-        <div className="h-12 border-b border-[var(--color-card-border)]" />
-        <div className="flex flex-1 items-center justify-center px-6">
-          <OperationProgress
-            title="Opening Agent Mode"
-            stages={["Loading editor code…", "Restoring clip suggestions…"]}
-            className="max-w-sm"
-          />
-        </div>
-      </div>
-    ),
+    loading: () => <EditorWorkspaceSkeleton mode="agent" />,
   }
 );
 
 export function SessionPageClient({ sessionId }: { sessionId: string }) {
-  const [mode, setMode] = useState<SessionMode | null>(() =>
-    readSessionBootstrap(sessionId)?.mode ?? null
-  );
+  // Keep the server and first browser render identical. Session storage is
+  // restored immediately after hydration instead of inside state initializers.
+  const [mode, setMode] = useState<SessionMode | null>(null);
   const [session, setSession] = useState<
     (SessionData & { mode?: string }) | null
-  >(() => readSessionBootstrap(sessionId) as SessionData | null);
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [modeSwitching, setModeSwitching] = useState(false);
   const [modeError, setModeError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+
+    const bootstrap = readSessionBootstrap(sessionId);
+    if (bootstrap) {
+      setMode(bootstrap.mode);
+      setSession(bootstrap as SessionData);
+    }
+
     void fetchJson<{
       session?: SessionData & { mode?: string };
       error?: string;
@@ -163,18 +148,7 @@ export function SessionPageClient({ sessionId }: { sessionId: string }) {
   }
 
   if (!mode) {
-    return (
-      <div className="editor-shell min-h-screen flex flex-col bg-[var(--color-background)]">
-        <div className="h-12 border-b border-[var(--color-card-border)]" />
-        <div className="flex flex-1 items-center justify-center px-6">
-          <OperationProgress
-            title="Loading session"
-            stages={["Fetching session details…", "Checking media availability…"]}
-            className="max-w-sm"
-          />
-        </div>
-      </div>
-    );
+    return <EditorWorkspaceSkeleton mode="timeline" />;
   }
 
   return (

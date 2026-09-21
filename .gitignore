@@ -20,6 +20,7 @@
 # Environment
 .env
 .env*.local
+.local/
 
 # Storage (uploaded media)
 /storage/uploads/**

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import posthog from "posthog-js";
 import { fetchJson } from "@/lib/apiClient";
 import { normalizeUserStreamUrl, parseStreamUrl } from "@/lib/streamPlatform";
@@ -16,6 +17,7 @@ import {
 } from "@/lib/sessionBootstrap";
 
 export function StreamUrlInput() {
+  const router = useRouter();
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -85,7 +87,7 @@ export function StreamUrlInput() {
       if (!data.session?.id) throw new Error("Failed to create session");
       posthog.capture("stream_url_submitted", { mode });
       writeSessionBootstrap({ ...data.session, mode });
-      window.location.assign(`/sessions/${data.session.id}`);
+      router.push(`/sessions/${data.session.id}`);
       return;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");

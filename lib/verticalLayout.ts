@@ -275,7 +275,10 @@ export const verticalLayoutRequestSchema = z.object({
     .optional(),
   reframe: z
     .object({
-      style: z.enum(REFRAME_STYLES).default("professional"),
+      style: z
+        .enum(REFRAME_STYLES)
+        .default("professional")
+        .transform(() => "professional" as const),
       lockSubject: z.boolean().default(false),
       lockedTrackId: z.string().optional(),
       manualKeyframes: z
