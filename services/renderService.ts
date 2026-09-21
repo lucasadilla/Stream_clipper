@@ -400,6 +400,8 @@ export async function executeRenderJob(
       {
         purpose: preview ? "preview" : "final",
         onStage: (progress, step) => updateJobProgress(jobId, progress, step),
+        onWarning: (step, message) =>
+          appendRenderJobLog(jobId, step, message, "warn"),
       }
     );
   } catch (error) {
@@ -413,6 +415,10 @@ export async function executeRenderJob(
     where: { id: clipSource.sourceMediaId },
   });
   if (!renderSource) throw new Error("Clip source not found");
+  await prisma.renderJob.update({
+    where: { id: jobId },
+    data: { sourceMediaId: renderSource.id },
+  });
 
   const renderStart = clipSource.renderStart;
   const renderEnd = clipSource.renderEnd;
@@ -431,6 +437,7 @@ export async function executeRenderJob(
   const inputProbe = await probeMedia(inputPath).catch(() => null);
   const nativeDimensions = nativeOutputDimensions(inputProbe);
   let subtitlePath: string | undefined;
+  let burnedCaptionCueCount = 0;
   const outputHeight = preview
     ? PREVIEW_HEIGHT
     : format === "vertical"
@@ -687,6 +694,7 @@ export async function executeRenderJob(
       if (includeCaptions && shiftedCues.length === 0 && !preview) {
         throw new Error("Captions are enabled, but no caption cues overlap this clip.");
       }
+      burnedCaptionCueCount = includeCaptions ? shiftedCues.length : 0;
 
       const overlayCues = textOverlays.flatMap((overlay) => {
         const segment = sequenceSegments.find((item) => item.id === overlay.segmentId);
@@ -724,6 +732,13 @@ export async function executeRenderJob(
       ) {
         subtitlePath = path.join(rendersDir, `clip-${clipId}${preview ? "-preview" : ""}.ass`);
         await fs.writeFile(subtitlePath, assContent, "utf8");
+        await appendRenderJobLog(
+          jobId,
+          "captions_ready",
+          `Prepared ${shiftedCues.length} timed caption cue${
+            shiftedCues.length === 1 ? "" : "s"
+          } for burn-in`
+        );
       }
     } else if (preview || !includeCaptions) {
       // Previews never fail on missing captions.
@@ -733,6 +748,12 @@ export async function executeRenderJob(
           "Wait until captions appear in the selected timeline range, then render again."
       );
     }
+  }
+
+  if (includeCaptions && !preview && (!subtitlePath || burnedCaptionCueCount === 0)) {
+    throw new Error(
+      "Captions are enabled, but the final burn-in track could not be prepared."
+    );
   }
 
   const facecam =
@@ -826,6 +847,16 @@ export async function executeRenderJob(
           }
         : undefined,
     });
+  }
+
+  if (subtitlePath) {
+    await appendRenderJobLog(
+      jobId,
+      "captions_burned",
+      `Burned ${burnedCaptionCueCount} timed caption cue${
+        burnedCaptionCueCount === 1 ? "" : "s"
+      } into the video`
+    );
   }
 
   await completeRenderJob({

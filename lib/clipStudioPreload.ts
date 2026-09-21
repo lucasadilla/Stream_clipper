@@ -44,19 +44,20 @@ function captionKey(sessionId: string, startSeconds: number, endSeconds: number)
 export function loadClipStudioCaptions(
   sessionId: string,
   startSeconds: number,
-  endSeconds: number
+  endSeconds: number,
+  options?: { forceRefresh?: boolean }
 ): Promise<ClipStudioCaptionBundle> {
   const window = getClipStudioCaptionWindow(startSeconds, endSeconds);
   const key = captionKey(sessionId, startSeconds, endSeconds);
   const cached = captionCache.get(key);
-  if (cached && cached.expiresAt > Date.now()) {
+  if (!options?.forceRefresh && cached && cached.expiresAt > Date.now()) {
     return Promise.resolve(cached.bundle);
   }
 
   const existing = captionRequests.get(key);
-  if (existing) return existing;
+  if (!options?.forceRefresh && existing) return existing;
 
-  const request = Promise.all([
+  const request: Promise<ClipStudioCaptionBundle> = Promise.all([
     fetchJson<{ transcriptChunks?: TranscriptChunkInput[] }>(
       `/api/sessions/${sessionId}/events?start=${encodeURIComponent(
         window.startSeconds
@@ -73,13 +74,17 @@ export function loadClipStudioCaptions(
         coverageStartSeconds: window.startSeconds,
         coverageEndSeconds: window.endSeconds,
       } satisfies ClipStudioCaptionBundle;
-      captionCache.set(key, {
-        expiresAt: Date.now() + CACHE_TTL_MS,
-        bundle,
-      });
+      if (!captionRequests.has(key) || captionRequests.get(key) === request) {
+        captionCache.set(key, {
+          expiresAt: Date.now() + CACHE_TTL_MS,
+          bundle,
+        });
+      }
       return bundle;
     })
-    .finally(() => captionRequests.delete(key));
+    .finally(() => {
+      if (captionRequests.get(key) === request) captionRequests.delete(key);
+    });
 
   captionRequests.set(key, request);
   return request;

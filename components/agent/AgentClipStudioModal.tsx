@@ -1040,7 +1040,8 @@ export function AgentClipStudioModal({
       void loadClipStudioCaptions(
         sessionId,
         clip.startTimeSeconds,
-        clip.endTimeSeconds
+        clip.endTimeSeconds,
+        { forceRefresh: true }
       )
       .then((bundle) => {
         if (cancelled) return;
@@ -1228,7 +1229,8 @@ export function AgentClipStudioModal({
     const bundle = await loadClipStudioCaptions(
       sessionId,
       clip.startTimeSeconds,
-      clip.endTimeSeconds
+      clip.endTimeSeconds,
+      { forceRefresh: true }
     );
     const edits = { ...bundle.edits, ...platformCaptionEditsRef.current };
     setPlatformCaptionChunks(bundle.chunks);

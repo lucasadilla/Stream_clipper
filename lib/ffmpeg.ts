@@ -874,25 +874,20 @@ async function encodeWithFilters(options: {
     "error",
   ];
 
-  // Fast coarse seek before input when we don't need frame accuracy.
-  if (
-    options.startSeconds != null &&
-    options.startSeconds > 0 &&
-    !options.accurateSeek
-  ) {
+  const hasInputSeek =
+    options.startSeconds != null && options.startSeconds > 0;
+
+  // Seeking after `-i` keeps the decoded frames on the source media clock.
+  // That makes an ASS track authored at clip time zero invisible for clips
+  // taken later in a VOD. Input seeking is still frame accurate while
+  // transcoding (FFmpeg decodes/discards to the requested timestamp), and it
+  // gives every downstream filter the same zero-based clip clock.
+  if (hasInputSeek) {
     args.push("-ss", String(options.startSeconds));
+    if (options.accurateSeek) args.push("-accurate_seek");
   }
 
   args.push("-i", options.inputPath);
-
-  // Frame-accurate seek after input (decodes up to the exact timestamp).
-  if (
-    options.startSeconds != null &&
-    options.startSeconds > 0 &&
-    options.accurateSeek
-  ) {
-    args.push("-ss", String(options.startSeconds));
-  }
   if (options.durationSeconds != null && options.durationSeconds > 0) {
     args.push("-t", String(options.durationSeconds));
   }
@@ -900,11 +895,7 @@ async function encodeWithFilters(options: {
   // After an accurate seek, reset PTS so burned ASS (authored at t=0 = clip
   // start) stays locked to the speech — same clock as a pre-cut segment.
   let vf = options.vf;
-  if (
-    options.accurateSeek &&
-    options.startSeconds != null &&
-    options.startSeconds > 0
-  ) {
+  if (hasInputSeek) {
     vf = `setpts=PTS-STARTPTS,${vf}`;
   }
 
@@ -935,11 +926,7 @@ async function encodeWithFilters(options: {
   }
 
   if (options.withAudio) {
-    if (
-      options.accurateSeek &&
-      options.startSeconds != null &&
-      options.startSeconds > 0
-    ) {
+    if (hasInputSeek) {
       args.push("-af", "asetpts=PTS-STARTPTS");
     }
     args.push("-c:a", "aac", "-b:a", profile.audioBitrate);

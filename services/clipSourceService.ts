@@ -393,14 +393,21 @@ function isOriginalUpload(
   return stem !== sourceVideoId.toLowerCase();
 }
 
-function renderSourceFetchTimeoutMs(): number {
+export function renderSourceFetchTimeoutMs(clipDurationSeconds = 0): number {
   const configured = Number.parseInt(
     process.env.RENDER_SOURCE_FETCH_TIMEOUT_MS?.trim() ?? "",
     10
   );
   return Number.isFinite(configured)
-    ? Math.min(180_000, Math.max(15_000, configured))
-    : 45_000;
+    ? Math.min(600_000, Math.max(30_000, configured))
+    : Math.min(
+        300_000,
+        Math.max(120_000, 60_000 + Math.ceil(clipDurationSeconds) * 1_500)
+      );
+}
+
+export function renderSourceAttemptTimeoutMs(totalTimeoutMs: number): number {
+  return Math.min(120_000, Math.max(60_000, Math.floor(totalTimeoutMs / 2)));
 }
 
 async function highQualityRemoteClipSource(options: {
@@ -447,6 +454,8 @@ async function highQualityRemoteClipSource(options: {
     const tempPath = `${outputPath}.${process.pid}-${Date.now()}.tmp.mp4`;
     const fs = await import("fs/promises");
     try {
+      const clipDurationSeconds = segmentEnd - segmentStart;
+      const timeoutMs = renderSourceFetchTimeoutMs(clipDurationSeconds);
       await downloadClipSegmentFromStream(
         options.streamUrl,
         formatYtDlpTime(segmentStart),
@@ -454,7 +463,8 @@ async function highQualityRemoteClipSource(options: {
         tempPath,
         {
           liveFromStart: options.liveFromStart,
-          timeoutMs: renderSourceFetchTimeoutMs(),
+          timeoutMs,
+          attemptTimeoutMs: renderSourceAttemptTimeoutMs(timeoutMs),
         }
       );
       probe = await probeMedia(tempPath);
@@ -546,6 +556,7 @@ export async function ensureClipSourceForRender(
   options: {
     purpose?: "preview" | "final";
     onStage?: (progress: number, step: string) => void | Promise<void>;
+    onWarning?: (step: string, message: string) => void | Promise<void>;
   } = {}
 ): Promise<{
   sourceMediaId: string;
@@ -695,9 +706,15 @@ export async function ensureClipSourceForRender(
       } catch (error) {
         // Direct segment retrieval can be blocked by a platform while the local
         // proxy remains usable. Preserve reliability and render from the proxy.
+        const message =
+          error instanceof Error ? error.message : String(error);
+        await options.onWarning?.(
+          "source_fallback",
+          `High-resolution source unavailable; using the local edit copy. ${message}`
+        );
         console.warn(
           "[render] High-resolution source unavailable; using local capture:",
-          error instanceof Error ? error.message : String(error)
+          message
         );
       }
     }

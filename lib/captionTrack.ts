@@ -354,6 +354,57 @@ function wordsWithinChunk(
     .sort((a, b) => a.start - b.start || a.end - b.end);
 }
 
+function hasUnreliableWordTiming(
+  words: WhisperWord[],
+  text: string,
+  chunkStart: number,
+  chunkEnd: number
+): boolean {
+  if (words.length < 3) return false;
+  const tokenCount = text.replace(/\n/g, " ").split(/\s+/).filter(Boolean).length;
+  if (tokenCount < 3) return false;
+
+  const durations = words
+    .map((word) => Math.max(0, word.end - word.start))
+    .filter((duration) => duration > 0)
+    .sort((a, b) => a - b);
+  if (durations.length < 3) return false;
+
+  const medianDuration = durations[Math.floor(durations.length / 2)]!;
+  const timedDuration = durations.reduce((sum, duration) => sum + duration, 0);
+  const chunkDuration = Math.max(0.1, chunkEnd - chunkStart);
+  const minimumPlausibleSpeech = Math.min(
+    chunkDuration,
+    Math.max(0.8, tokenCount * 0.14)
+  );
+
+  return medianDuration < 0.07 && timedDuration < minimumPlausibleSpeech * 0.4;
+}
+
+function recoveredSpeechWindow(
+  words: WhisperWord[],
+  text: string,
+  chunkStart: number,
+  chunkEnd: number
+): { start: number; end: number } {
+  const tokenCount = text.replace(/\n/g, " ").split(/\s+/).filter(Boolean).length;
+  const chunkDuration = Math.max(0.1, chunkEnd - chunkStart);
+  const duration = Math.min(
+    chunkDuration,
+    Math.max(1.2, tokenCount * 0.28, text.length / 18)
+  );
+  const centers = words
+    .map((word) => (word.start + word.end) / 2)
+    .sort((a, b) => a - b);
+  const center = centers[Math.floor(centers.length / 2)] ??
+    chunkStart + chunkDuration / 2;
+  const start = Math.max(
+    chunkStart,
+    Math.min(chunkEnd - duration, center - duration / 2)
+  );
+  return { start, end: Math.min(chunkEnd, start + duration) };
+}
+
 /** Build a sorted caption timeline from transcript chunks (independent of video layer). */
 export function buildCaptionTrack(
   chunks: TranscriptChunkInput[],
@@ -374,7 +425,32 @@ export function buildCaptionTrack(
         chunk.endTimeSeconds
       );
       if (words.length > 0) {
-        cues.push(...cuesFromWords(words, chunk.id, maxChars));
+        if (
+          hasUnreliableWordTiming(
+            words,
+            cleanText,
+            chunk.startTimeSeconds,
+            chunk.endTimeSeconds
+          )
+        ) {
+          const recovered = recoveredSpeechWindow(
+            words,
+            cleanText,
+            chunk.startTimeSeconds,
+            chunk.endTimeSeconds
+          );
+          cues.push(
+            ...cuesFromUntimedText(
+              cleanText,
+              `${chunk.id}-recovered`,
+              recovered.start,
+              recovered.end,
+              maxChars
+            )
+          );
+        } else {
+          cues.push(...cuesFromWords(words, chunk.id, maxChars));
+        }
         continue;
       }
     }
@@ -432,8 +508,20 @@ export function lookupCueAtTime(
   // Prefer the latest-started cue that covers this instant — matches what
   // viewers expect when Whisper segments overlap (editor shows one line).
   let best: CaptionCue | null = null;
+  let previous: CaptionCue | null = null;
   for (const cue of track) {
-    if (timeSeconds < cue.startTimeSeconds) break;
+    if (timeSeconds < cue.startTimeSeconds) {
+      if (
+        !best &&
+        previous &&
+        timeSeconds - previous.endTimeSeconds >= 0 &&
+        timeSeconds - previous.endTimeSeconds <= 0.12
+      ) {
+        return previous;
+      }
+      break;
+    }
+    previous = cue;
     if (timeSeconds < cue.endTimeSeconds) {
       if (
         !best ||
@@ -462,7 +550,7 @@ export function resolveCaptionOverlaps<
     endTimeSeconds: number;
     words?: CaptionWord[];
   },
->(cues: T[], minGapSeconds = 0.04): T[] {
+>(cues: T[], minGapSeconds = 0.001): T[] {
   if (cues.length <= 1) return cues;
 
   const sorted = [...cues].sort(

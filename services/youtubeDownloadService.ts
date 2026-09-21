@@ -196,7 +196,13 @@ export function networkYtDlpArgs(): string[] {
 }
 
 export interface YoutubeCaptureStrategy {
-  id: "configured" | "provider" | "live-hls" | "tv" | "public-no-cookie";
+  id:
+    | "configured"
+    | "default"
+    | "provider"
+    | "live-hls"
+    | "tv"
+    | "public-no-cookie";
   extractorArgs: string | null;
   includeCookies: boolean;
 }
@@ -213,6 +219,14 @@ export function getYoutubeCaptureStrategies(): YoutubeCaptureStrategy[] {
       extractorArgs: configuredClient
         ? `player_client=${configuredClient}`
         : null,
+      includeCookies: true,
+    },
+    // Explicitly remove a configured client override as the next strategy.
+    // Current yt-dlp defaults can expose seekable high-resolution HLS formats
+    // (for example visionOS) that mweb-only configurations do not return.
+    {
+      id: "default",
+      extractorArgs: null,
       includeCookies: true,
     },
     {
@@ -620,29 +634,47 @@ async function runYtDlpWithFormatFallback(
   formats = sourceFormatChains(),
   options?: {
     timeoutMs?: number;
+    attemptTimeoutMs?: number;
     maxAttempts?: number;
     retriesPerFormat?: number;
+    preferDefaultClient?: boolean;
   }
 ): Promise<void> {
   let lastError: Error | null = null;
   const deadline = options?.timeoutMs
     ? Date.now() + Math.max(1_000, options.timeoutMs)
     : null;
-  let attempts = 0;
   const platform = detectDownloadPlatform(url);
-  const strategies =
+  const availableStrategies =
     platform === "youtube"
       ? getYoutubeCaptureStrategies()
       : [{ id: "configured", extractorArgs: null, includeCookies: true } as const];
+  const strategies =
+    platform === "youtube" && options?.preferDefaultClient
+      ? [
+          ...availableStrategies.filter(
+            (strategy) => strategy.extractorArgs === null
+          ),
+          ...availableStrategies.filter(
+            (strategy) => strategy.extractorArgs !== null
+          ),
+        ]
+      : availableStrategies;
 
   for (const strategy of strategies) {
+    let strategyAttempts = 0;
     for (const format of formats) {
-      if (options?.maxAttempts && attempts >= options.maxAttempts) break;
+      if (
+        options?.maxAttempts &&
+        strategyAttempts >= options.maxAttempts
+      ) {
+        break;
+      }
       const remainingMs = deadline ? deadline - Date.now() : undefined;
       if (remainingMs !== undefined && remainingMs <= 0) {
         throw new Error("yt-dlp source download timed out");
       }
-      attempts += 1;
+      strategyAttempts += 1;
       const args = withYoutubeExtractorArgs(
         baseArgs,
         platform === "youtube" ? strategy.extractorArgs : undefined
@@ -667,12 +699,19 @@ async function runYtDlpWithFormatFallback(
       const outputPath = outputIndex >= 0 ? args[outputIndex + 1] : undefined;
       if (outputPath) await fs.unlink(outputPath).catch(() => {});
 
+      const attemptTimeoutMs = options?.attemptTimeoutMs
+        ? Math.min(
+            options.attemptTimeoutMs,
+            remainingMs ?? options.attemptTimeoutMs
+          )
+        : remainingMs;
+
       try {
         await runYtDlp(args, url, {
           platform,
           includeCookies: strategy.includeCookies,
           retries: options?.retriesPerFormat,
-          timeoutMs: remainingMs,
+          timeoutMs: attemptTimeoutMs,
         });
         if (outputPath && !(await canDecodeVideoFrame(outputPath))) {
           await fs.unlink(outputPath).catch(() => {});
@@ -707,8 +746,14 @@ export function renderSourceFormatChains(
   renderHeight = renderSourceMaxHeight()
 ): string[] {
   return [
-    // YouTube AVC is commonly capped at 1080p. Prefer VP9 first so a 1440p/4K
-    // source remains genuinely sharp after a narrow 9:16 crop.
+    // Short-range exports need seekable HLS first. YouTube's DASH URLs can
+    // return 403 when FFmpeg opens them for --download-sections, while the HLS
+    // variants seek directly to the requested media chunks. Prefer VP9 HLS so
+    // a 1440p/4K source stays sharp after a narrow 9:16 crop, then fall back to
+    // AVC HLS and finally ordinary DASH/progressive formats.
+    `bestvideo[protocol^=m3u8][vcodec^=vp9][height<=${renderHeight}]+bestaudio[protocol^=m3u8]`,
+    `bestvideo[protocol^=m3u8][vcodec^=avc1][height<=${renderHeight}]+bestaudio[protocol^=m3u8]`,
+    `bestvideo[protocol^=m3u8][height<=${renderHeight}]+bestaudio[protocol^=m3u8]`,
     `bestvideo[vcodec^=vp9][height<=${renderHeight}]+bestaudio/best[vcodec^=vp9][height<=${renderHeight}]`,
     `bestvideo[vcodec^=avc1][height<=${renderHeight}]+bestaudio[acodec^=mp4a]/best[ext=mp4][vcodec^=avc1][height<=${renderHeight}]`,
     `bestvideo[vcodec^=avc1][height<=${renderHeight}]+bestaudio/best[ext=mp4][height<=${renderHeight}]`,
@@ -883,7 +928,11 @@ export async function downloadClipSegmentFromStream(
   startTime: string,
   endTime: string,
   outputPath: string,
-  options?: { liveFromStart?: boolean; timeoutMs?: number }
+  options?: {
+    liveFromStart?: boolean;
+    timeoutMs?: number;
+    attemptTimeoutMs?: number;
+  }
 ) {
   const available = await isYtDlpAvailable();
   if (!available) {
@@ -919,8 +968,10 @@ export async function downloadClipSegmentFromStream(
       formatFallbacks,
       {
         timeoutMs: remainingMs,
+        attemptTimeoutMs: options?.attemptTimeoutMs,
         maxAttempts: options?.timeoutMs ? 4 : undefined,
         retriesPerFormat: options?.timeoutMs ? 1 : undefined,
+        preferDefaultClient: true,
       }
     );
   };

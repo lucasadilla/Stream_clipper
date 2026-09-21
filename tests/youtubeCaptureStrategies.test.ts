@@ -28,6 +28,7 @@ describe("YouTube capture strategies", () => {
     });
     expect(strategies).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({ id: "default", extractorArgs: null }),
         expect.objectContaining({ extractorArgs: "player_client=web_safari" }),
         expect.objectContaining({
           extractorArgs: "player_client=android_vr",
@@ -60,7 +61,9 @@ describe("YouTube capture strategies", () => {
     const formats = renderSourceFormatChains(2160);
 
     expect(formats[0]).toContain("vcodec^=vp9");
+    expect(formats[0]).toContain("protocol^=m3u8");
     expect(formats[0]).toContain("height<=2160");
     expect(formats[1]).toContain("vcodec^=avc1");
+    expect(formats[1]).toContain("protocol^=m3u8");
   });
 });

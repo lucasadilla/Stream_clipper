@@ -4,6 +4,7 @@ import { DEFAULT_CAPTION_APPEARANCE } from "@/lib/captionAppearance";
 import { applyCaptionEdits, remapCueWords } from "@/lib/captionEdits";
 import {
   buildCaptionTrack,
+  lookupCueAtTime,
   resolveCaptionOverlaps,
   type CaptionCue,
 } from "@/lib/captionTrack";
@@ -313,5 +314,37 @@ describe("caption text cleanup", () => {
       { id: "b", startTimeSeconds: 1.5, endTimeSeconds: 3, text: "second" },
     ]);
     expect(cues[0]!.endTimeSeconds).toBeLessThan(cues[1]!.startTimeSeconds);
+  });
+
+  it("recovers captions when provider word clocks are implausibly short", () => {
+    const words = Array.from({ length: 20 }, (_, index) => ({
+      start: 10 + index * 0.03,
+      end: 10.02 + index * 0.03,
+      word: `word${index}`,
+    }));
+    const cues = buildCaptionTrack([
+      {
+        id: "broken-timing",
+        startTimeSeconds: 5,
+        endTimeSeconds: 25,
+        text: words.map((word) => word.word).join(" "),
+        rawJson: { words },
+      },
+    ]);
+
+    const visibleDuration = cues.reduce(
+      (sum, cue) => sum + cue.endTimeSeconds - cue.startTimeSeconds,
+      0
+    );
+    expect(visibleDuration).toBeGreaterThanOrEqual(5);
+    expect(cues.every((cue) => cue.words === undefined)).toBe(true);
+  });
+
+  it("does not flash blank between adjacent preview cues", () => {
+    const cues: CaptionCue[] = [
+      { id: "a", startTimeSeconds: 1, endTimeSeconds: 2, text: "first" },
+      { id: "b", startTimeSeconds: 2.04, endTimeSeconds: 3, text: "second" },
+    ];
+    expect(lookupCueAtTime(cues, 2.02)?.id).toBe("a");
   });
 });
