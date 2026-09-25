@@ -34,7 +34,7 @@ import {
 import type { StructuredVisualContext } from "@/lib/visualAnalysis";
 import { buildCandidateVisualContexts } from "@/services/visualContextService";
 
-export const CLIP_SUGGESTION_VERSION = 6;
+export const CLIP_SUGGESTION_VERSION = 7;
 
 const MIN_SCORE = 6;
 const OVERLAP_RATIO = 0.45;
@@ -416,7 +416,12 @@ export async function autoSuggestClips(
       }),
       prisma.streamSession.findUnique({
         where: { id: streamSessionId },
-        select: { title: true, description: true, channelTitle: true },
+        select: {
+          title: true,
+          description: true,
+          channelTitle: true,
+          metadataJson: true,
+        },
       }),
     ]);
 
@@ -849,6 +854,13 @@ export async function autoSuggestClips(
     streamTitle: session?.title,
     streamDescription: session?.description,
     channelTitle: session?.channelTitle,
+    editorialRequest:
+      session?.metadataJson && typeof session.metadataJson === "object"
+        ? String(
+            (session.metadataJson as Record<string, unknown>)
+              .onboardingAgentPrompt ?? ""
+          ) || null
+        : null,
     contentType,
     candidates: aiCandidateEntries.map(({ id, candidate }) => ({
       id,
@@ -897,12 +909,19 @@ export async function autoSuggestClips(
           narrativePlan,
           narrativeSource: "ai" as const,
           worth:
-            candidate.worth * 0.25 +
-            ranked.interestScore * 0.55 +
-            (narrativePlan?.scores.total ?? 0) * 0.2,
+            candidate.worth * 0.2 +
+            ranked.interestScore * 0.45 +
+            (narrativePlan?.scores.total ?? 0) * 0.2 +
+            (ranked.clickabilityScore ?? 70) * 0.15,
           confidence: Math.max(
             candidate.confidence,
-            Math.min(0.98, ranked.interestScore / 100)
+            Math.min(
+              0.98,
+              (ranked.interestScore * 0.62 +
+                (narrativePlan?.scores.total ?? ranked.interestScore) * 0.23 +
+                (ranked.clickabilityScore ?? 70) * 0.15) /
+                100
+            )
           ),
         },
       ];

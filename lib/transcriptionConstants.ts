@@ -10,7 +10,8 @@ export const TRANSCRIPTION_PARALLEL = 4;
 
 /** Agent mode favors first-result speed and catch-up throughput. */
 export const AGENT_TRANSCRIPTION_CHUNK_SECONDS = 90;
-export const AGENT_TRANSCRIPTION_BUDGET_SECONDS = 1080;
+/** Keep under the /transcribe route maxDuration (300s) so each wave returns and the UI can advance. */
+export const AGENT_TRANSCRIPTION_BUDGET_SECONDS = 240;
 export const AGENT_TRANSCRIPTION_PARALLEL = 6;
 
 /** Contiguous gap groups processed per sync (each group is one ffmpeg seek). */

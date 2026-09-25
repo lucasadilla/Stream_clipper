@@ -4,10 +4,12 @@ import { fetchJson } from "@/lib/apiClient";
 import type { CaptionEditsMap } from "@/lib/captionEdits";
 import type { TranscriptChunkInput } from "@/lib/captionTrack";
 import { loadBrowserFaceDetector } from "@/lib/browserFaceTracking";
+import type { SpeakerContext } from "@/lib/speakerContext";
 
 export interface ClipStudioCaptionBundle {
   chunks: TranscriptChunkInput[];
   edits: CaptionEditsMap;
+  speakerContext: SpeakerContext | null;
   coverageStartSeconds: number;
   coverageEndSeconds: number;
 }
@@ -57,20 +59,26 @@ export function loadClipStudioCaptions(
   const existing = captionRequests.get(key);
   if (!options?.forceRefresh && existing) return existing;
 
-  const request: Promise<ClipStudioCaptionBundle> = Promise.all([
-    fetchJson<{ transcriptChunks?: TranscriptChunkInput[] }>(
-      `/api/sessions/${sessionId}/events?start=${encodeURIComponent(
-        window.startSeconds
-      )}&end=${encodeURIComponent(window.endSeconds)}`
-    ),
-    fetchJson<{ edits?: CaptionEditsMap }>(
-      `/api/sessions/${sessionId}/captions`
-    ),
-  ])
-    .then(([events, captions]) => {
+  // Resolve speaker identity first so the following transcript read observes
+  // the cached word-level assignments written by SpeakerContextService.
+  const request: Promise<ClipStudioCaptionBundle> = fetchJson<{
+    context?: SpeakerContext;
+  }>(`/api/sessions/${sessionId}/speakers`)
+    .then(async (speakers) => {
+      const [events, captions] = await Promise.all([
+        fetchJson<{ transcriptChunks?: TranscriptChunkInput[] }>(
+          `/api/sessions/${sessionId}/events?start=${encodeURIComponent(
+            window.startSeconds
+          )}&end=${encodeURIComponent(window.endSeconds)}`
+        ),
+        fetchJson<{ edits?: CaptionEditsMap }>(
+          `/api/sessions/${sessionId}/captions`
+        ),
+      ]);
       const bundle = {
         chunks: events.ok ? events.data.transcriptChunks ?? [] : [],
         edits: captions.ok ? captions.data.edits ?? {} : {},
+        speakerContext: speakers.ok ? speakers.data.context ?? null : null,
         coverageStartSeconds: window.startSeconds,
         coverageEndSeconds: window.endSeconds,
       } satisfies ClipStudioCaptionBundle;

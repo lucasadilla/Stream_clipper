@@ -1,6 +1,41 @@
 import Stripe from "stripe";
+import { createHmac, timingSafeEqual } from "crypto";
 
 export const BILLING_ACCOUNT_COOKIE = "stream_clipper_billing_account";
+
+function billingCookieSecret(): string {
+  const secret =
+    process.env.AUTH_SECRET?.trim() || process.env.NEXTAUTH_SECRET?.trim();
+  if (secret) return secret;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("AUTH_SECRET is required to protect billing sessions");
+  }
+  return "clipper-local-billing-secret";
+}
+
+function billingCookieSignature(accountId: string): string {
+  return createHmac("sha256", billingCookieSecret())
+    .update(accountId)
+    .digest("base64url");
+}
+
+export function serializeBillingAccountCookie(accountId: string): string {
+  return `${accountId}.${billingCookieSignature(accountId)}`;
+}
+
+export function parseBillingAccountCookie(
+  value: string | null | undefined
+): string | null {
+  if (!value) return null;
+  const separator = value.lastIndexOf(".");
+  if (separator <= 0) return null;
+  const accountId = value.slice(0, separator);
+  const supplied = value.slice(separator + 1);
+  const expected = billingCookieSignature(accountId);
+  const a = Buffer.from(supplied);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b) ? accountId : null;
+}
 
 /** Required for Stripe Managed Payments (merchant of record). */
 export const STRIPE_API_VERSION = "2026-02-25.preview" as const;

@@ -5,16 +5,26 @@ import {
   sanitizeCaptionText,
   wrapCaptionText,
 } from "@/lib/captionStyles";
-import { distributeTextAcrossSpan } from "@/lib/transcriptTiming";
+import { distributeTextAcrossSpan, repairCollapsedWordTimings } from "@/lib/transcriptTiming";
 import {
   directCaptionTrack,
   type CaptionCueDirection,
 } from "@/lib/captionDirector";
+import {
+  alignWordsToSpeakerContext,
+  speakerColorForId,
+  speakerDisplayName,
+  type SpeakerContext,
+} from "@/lib/speakerContext";
 
 export interface CaptionWord {
   start: number;
   end: number;
   word: string;
+  speakerId?: string;
+  speakerConfidence?: number;
+  overlappingSpeakerIds?: string[];
+  alignmentConfidence?: number;
 }
 
 export interface CaptionCue {
@@ -24,6 +34,12 @@ export interface CaptionCue {
   text: string;
   /** Per-word timings when available (for karaoke preview/export). */
   words?: CaptionWord[];
+  /** Stable source-level speaker metadata used by preview and ASS rendering. */
+  speakerId?: string;
+  speakerConfidence?: number;
+  speakerColor?: string;
+  speakerLabel?: string;
+  overlappingSpeakerIds?: string[];
   /** Editorial role, emphasis, and motion shared by preview and export. */
   direction?: CaptionCueDirection;
 }
@@ -85,10 +101,9 @@ export interface TranscriptChunkInput {
   rawJson?: unknown;
 }
 
-interface WhisperWord {
-  start: number;
-  end: number;
-  word: string;
+interface WhisperWord extends CaptionWord {
+  /** Provider-local label retained for diagnostics. */
+  speaker?: string;
 }
 
 /** True when any chunk carries usable word-level timestamps. */
@@ -117,7 +132,8 @@ function chunkMeta(rawJson: unknown): {
 function cuesFromWords(
   words: WhisperWord[],
   chunkId: string,
-  maxChars: number
+  maxChars: number,
+  speakerContext?: SpeakerContext
 ): CaptionCue[] {
   const cues: CaptionCue[] = [];
   let lineWords: WhisperWord[] = [];
@@ -126,6 +142,40 @@ function cuesFromWords(
   const MAX_SILENCE_GAP_SECONDS = 0.42;
   const MAX_WORDS_PER_CUE = 7;
   const MAX_CUE_CHARS = Math.floor(maxChars * 1.55);
+
+  const speakerMetadata = (cueWords: WhisperWord[]) => {
+    const scores = new Map<string, number>();
+    for (const word of cueWords) {
+      if (!word.speakerId) continue;
+      const duration = Math.max(0.01, word.end - word.start);
+      scores.set(
+        word.speakerId,
+        (scores.get(word.speakerId) ?? 0) +
+          duration * (word.speakerConfidence ?? 0.6)
+      );
+    }
+    const ranked = [...scores.entries()].sort((a, b) => b[1] - a[1]);
+    const speakerId = ranked[0]?.[0];
+    if (!speakerId) return {};
+    const attributed = cueWords.filter((word) => word.speakerId === speakerId);
+    const confidence = attributed.length
+      ? attributed.reduce(
+          (sum, word) => sum + (word.speakerConfidence ?? 0.5),
+          0
+        ) / attributed.length
+      : 0;
+    const speaker = speakerContext?.speakers.find((item) => item.id === speakerId);
+    const overlappingSpeakerIds = [...new Set(
+      cueWords.flatMap((word) => word.overlappingSpeakerIds ?? [])
+    )].filter((id) => id !== speakerId);
+    return {
+      speakerId,
+      speakerConfidence: confidence,
+      speakerColor: speaker?.color ?? speakerColorForId(speakerId),
+      ...(speaker ? { speakerLabel: speakerDisplayName(speaker) } : {}),
+      ...(overlappingSpeakerIds.length ? { overlappingSpeakerIds } : {}),
+    };
+  };
 
   const flush = () => {
     if (lineWords.length === 0) return;
@@ -143,7 +193,18 @@ function cuesFromWords(
         start: w.start,
         end: w.end,
         word: w.word.trim(),
+        ...(w.speakerId ? { speakerId: w.speakerId } : {}),
+        ...(typeof w.speakerConfidence === "number"
+          ? { speakerConfidence: w.speakerConfidence }
+          : {}),
+        ...(w.overlappingSpeakerIds?.length
+          ? { overlappingSpeakerIds: [...w.overlappingSpeakerIds] }
+          : {}),
+        ...(typeof w.alignmentConfidence === "number"
+          ? { alignmentConfidence: w.alignmentConfidence }
+          : {}),
       })),
+      ...speakerMetadata(lineWords),
     });
     lineWords = [];
     lineLen = 0;
@@ -165,12 +226,20 @@ function cuesFromWords(
     const phraseEnded = previous
       ? /[,;:]["')\]]?$/.test(previous.word.trim()) && lineWords.length >= 3
       : false;
+    const speakerChanged = Boolean(
+      previous?.speakerId &&
+        cleanWord.speakerId &&
+        previous.speakerId !== cleanWord.speakerId &&
+        (previous.speakerConfidence ?? 0) >= 0.55 &&
+        (cleanWord.speakerConfidence ?? 0) >= 0.55
+    );
     if (
       lineWords.length > 0 &&
       (crossesPause ||
         tooLong ||
         sentenceEnded ||
         phraseEnded ||
+        speakerChanged ||
         lineWords.length >= MAX_WORDS_PER_CUE)
     ) {
       flush();
@@ -196,6 +265,9 @@ function cuesFromWords(
     if (
       tailWords.length === 1 &&
       previousWords.length <= 5 &&
+      (!tail.speakerId ||
+        !previous.speakerId ||
+        tail.speakerId === previous.speakerId) &&
       tail.endTimeSeconds - previous.startTimeSeconds <= 2.8 &&
       combinedText.length <= maxChars * 2
     ) {
@@ -290,6 +362,21 @@ function mergeCaptionPair(
     endTimeSeconds: second.endTimeSeconds,
     text: wrapCaptionText(`${first.text} ${second.text}`, maxChars),
     ...(combinedWords ? { words: combinedWords } : {}),
+    ...(first.speakerId || second.speakerId
+      ? {
+          speakerId: first.speakerId ?? second.speakerId,
+          speakerConfidence:
+            first.speakerConfidence ?? second.speakerConfidence,
+          speakerColor: first.speakerColor ?? second.speakerColor,
+          speakerLabel: first.speakerLabel ?? second.speakerLabel,
+          overlappingSpeakerIds: [
+            ...new Set([
+              ...(first.overlappingSpeakerIds ?? []),
+              ...(second.overlappingSpeakerIds ?? []),
+            ]),
+          ],
+        }
+      : {}),
   };
 }
 
@@ -305,6 +392,9 @@ function mergeOrphanCaptionCues(
   const tokenCount = (cue: CaptionCue) =>
     cue.text.replace(/\n/g, " ").split(/\s+/).filter(Boolean).length;
   const canFit = (first: CaptionCue, second: CaptionCue) =>
+    (!first.speakerId ||
+      !second.speakerId ||
+      first.speakerId === second.speakerId) &&
     second.startTimeSeconds - first.endTimeSeconds <= 0.18 &&
     second.endTimeSeconds - first.startTimeSeconds <= 2.8 &&
     `${first.text} ${second.text}`.replace(/\n/g, " ").length <= maxChars * 1.7;
@@ -408,7 +498,8 @@ function recoveredSpeechWindow(
 /** Build a sorted caption timeline from transcript chunks (independent of video layer). */
 export function buildCaptionTrack(
   chunks: TranscriptChunkInput[],
-  format: RenderFormat = "native"
+  format: RenderFormat = "native",
+  options: { speakerContext?: SpeakerContext } = {}
 ): CaptionCue[] {
   const maxChars = maxCharsPerCaptionLine(format);
   const cues: CaptionCue[] = [];
@@ -419,8 +510,11 @@ export function buildCaptionTrack(
 
     const meta = chunkMeta(chunk.rawJson);
     if (meta?.words && meta.words.length > 0) {
+      const attributedWords = options.speakerContext
+        ? alignWordsToSpeakerContext(meta.words, options.speakerContext)
+        : meta.words;
       const words = wordsWithinChunk(
-        meta.words,
+        repairCollapsedWordTimings(attributedWords),
         chunk.startTimeSeconds,
         chunk.endTimeSeconds
       );
@@ -449,7 +543,14 @@ export function buildCaptionTrack(
             )
           );
         } else {
-          cues.push(...cuesFromWords(words, chunk.id, maxChars));
+          cues.push(
+            ...cuesFromWords(
+              words,
+              chunk.id,
+              maxChars,
+              options.speakerContext
+            )
+          );
         }
         continue;
       }
@@ -490,12 +591,24 @@ export function buildCaptionTrack(
   }
 
   return directCaptionTrack(
-    resolveCaptionOverlaps(
+    holdCaptionsForReading(resolveCaptionOverlaps(
       mergeOrphanCaptionCues(cues, maxChars)
         .filter((c) => c.text.trim().length > 0)
         .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds)
-    )
+    ))
   );
+}
+
+/** Keep short phrases readable, without moving spoken-word timestamps. */
+export function holdCaptionsForReading(cues: CaptionCue[]): CaptionCue[] {
+  return cues.map((cue, index) => {
+    const nextStart = cues[index + 1]?.startTimeSeconds ?? Infinity;
+    const naturalEnd = cue.endTimeSeconds;
+    const heldEnd = Math.min(naturalEnd + 0.45,
+      Math.max(naturalEnd + 0.2, cue.startTimeSeconds + 0.7));
+    const end = nextStart - naturalEnd <= 0.35 ? nextStart : heldEnd;
+    return { ...cue, endTimeSeconds: Math.min(nextStart, end) };
+  });
 }
 
 /** Binary search for the active cue at `timeSeconds`. */

@@ -1,6 +1,11 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
 import { errorResponse, jsonResponse } from "@/lib/utils";
+import { getBillingAccountIdFromRequest } from "@/services/billingService";
+import {
+  ensureSessionBillingAccess,
+  SessionAccessError,
+} from "@/services/sessionAccessService";
 
 export async function GET(
   request: NextRequest,
@@ -8,6 +13,10 @@ export async function GET(
 ) {
   try {
     const { sessionId } = await params;
+    await ensureSessionBillingAccess(
+      sessionId,
+      getBillingAccountIdFromRequest(request)
+    );
     const queryStartedAt = new Date();
     const afterValue = request.nextUrl.searchParams.get("after");
     const afterDate = afterValue ? new Date(afterValue) : null;
@@ -73,6 +82,9 @@ export async function GET(
       cursor: new Date(queryStartedAt.getTime() - 5_000).toISOString(),
     });
   } catch (error) {
+    if (error instanceof SessionAccessError) {
+      return errorResponse(error.message, error.status);
+    }
     const message = error instanceof Error ? error.message : "Failed to fetch events";
     return errorResponse(message, 500);
   }

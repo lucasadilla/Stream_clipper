@@ -5,11 +5,18 @@ import { errorResponse } from "@/lib/utils";
 import { getLatestCompletedFinalRenderJob } from "@/services/renderSelectionService";
 import { failRenderJob } from "@/services/renderService";
 import { inspectDeliverableVideo } from "@/services/deliverableVideoService";
+import { videoDownloadFilename } from "@/lib/downloadFilename";
+import { getBillingAccountIdFromRequest } from "@/services/billingService";
+import {
+  ensureSessionBillingAccess,
+  SessionAccessError,
+} from "@/services/sessionAccessService";
+import { getPostHogClient } from "@/lib/posthog-server";
 
 export const runtime = "nodejs";
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ clipSuggestionId: string }> }
 ) {
   try {
@@ -19,6 +26,10 @@ export async function GET(
       where: { id: clipSuggestionId },
     });
     if (!clip) return errorResponse("Clip not found", 404);
+    await ensureSessionBillingAccess(
+      clip.streamSessionId,
+      getBillingAccountIdFromRequest(request)
+    );
 
     const job = await getLatestCompletedFinalRenderJob(clipSuggestionId);
 
@@ -35,9 +46,23 @@ export async function GET(
       return errorResponse(message, inspection.sizeBytes === 0 ? 404 : 409);
     }
 
-    const safeName = `${clip.title.slice(0, 40).replace(/[^\w\s-]/g, "") || "short"}.mp4`;
-    return serveStorageFile(job.outputPath, safeName);
+    const billingAccountId = getBillingAccountIdFromRequest(request);
+    if (billingAccountId) {
+      getPostHogClient().capture({
+        distinctId: billingAccountId,
+        event: "first_clip_downloaded",
+        properties: {
+          clip_id: clip.id,
+          $insert_id: `${billingAccountId}:first_clip_downloaded`,
+        },
+      });
+    }
+
+    return serveStorageFile(job.outputPath, videoDownloadFilename(clip.title), request);
   } catch (error) {
+    if (error instanceof SessionAccessError) {
+      return errorResponse(error.message, error.status);
+    }
     const message = error instanceof Error ? error.message : "Download failed";
     return errorResponse(message, 500);
   }

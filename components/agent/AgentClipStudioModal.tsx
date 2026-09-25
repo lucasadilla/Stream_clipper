@@ -11,8 +11,6 @@ import {
 import { createPortal } from "react-dom";
 import Image from "next/image";
 import {
-  Check,
-  Copy,
   Download,
   Link2,
   LockKeyhole,
@@ -66,7 +64,8 @@ import {
   type SocialPlatform,
 } from "@/lib/social/types";
 import { renderClip } from "@/lib/clipActions";
-import { triggerFileDownload } from "@/lib/clientDownload";
+import { prepareFileDownload } from "@/lib/clientDownload";
+import { videoDownloadFilename } from "@/lib/downloadFilename";
 import { clipThumbnailApiUrl } from "@/lib/downloadUrls";
 import { fetchJson } from "@/lib/apiClient";
 import { formatSeconds } from "@/lib/time";
@@ -87,7 +86,9 @@ import {
   updateClipStudioCaptionCache,
 } from "@/lib/clipStudioPreload";
 import type { PostRenderQualityReview } from "@/lib/postRenderCritic";
+import type { SpeakerContext } from "@/lib/speakerContext";
 import { OperationProgress } from "@/components/ui/operation-progress";
+import { SpeakerManager } from "@/components/SpeakerManager";
 import {
   directCaptionTrack,
   type CaptionDirectionPlan,
@@ -121,10 +122,8 @@ const PREVIEW_PLATFORMS: PlatformKey[] = [
   "youtube_shorts",
   "tiktok",
   "instagram_reels",
-  "instagram_feed",
   "facebook_reels",
   "x",
-  "youtube_landscape",
 ];
 const ALL_PLATFORM_KEYS = Object.keys(PLATFORM_PRESETS) as PlatformKey[];
 
@@ -399,6 +398,7 @@ export function AgentClipStudioModal({
   const [platformCaptionChunks, setPlatformCaptionChunks] = useState<
     TranscriptChunkInput[]
   >([]);
+  const [speakerContext, setSpeakerContext] = useState<SpeakerContext | null>(null);
   const [platformCaptionEdits, setPlatformCaptionEdits] =
     useState<CaptionEditsMap>({});
   const platformCaptionEditsRef = useRef<CaptionEditsMap>({});
@@ -431,12 +431,29 @@ export function AgentClipStudioModal({
     useState<PostRenderQualityReview | null>(null);
   const [packing, setPacking] = useState(false);
   const [publishing, setPublishing] = useState(false);
-  const [copyingPackage, setCopyingPackage] = useState(false);
   const [downloadingPlatform, setDownloadingPlatform] =
     useState<PlatformKey | null>(null);
   const [platformDownloadUrls, setPlatformDownloadUrls] = useState<
     Partial<Record<PlatformKey, string>>
   >({});
+  const [platformCaptions, setPlatformCaptions] = useState<Partial<Record<PlatformKey, boolean>>>({});
+  const platformCaptionsEnabled = platformCaptions[previewPlatform] ?? includeCaptions;
+
+  useEffect(() => {
+    if (!open) return;
+    let saved: Record<string, unknown> = {};
+    try { saved = JSON.parse(localStorage.getItem(`clip-platform-captions:${clip.id}`) || "{}"); } catch { /* Use defaults. */ }
+    setPlatformCaptions(Object.fromEntries(PREVIEW_PLATFORMS.map((platform) => [
+      platform, typeof saved?.[platform] === "boolean" ? saved[platform] : includeCaptionsRef.current,
+    ])));
+  }, [open, clip.id]);
+
+  function changePlatformCaptions(platform: PlatformKey, enabled: boolean) {
+    const next = { ...platformCaptions, [platform]: enabled };
+    setPlatformCaptions(next);
+    setPlatformDownloadUrls((current) => ({ ...current, [platform]: undefined }));
+    try { localStorage.setItem(`clip-platform-captions:${clip.id}`, JSON.stringify(next)); } catch { /* Keep the in-session choice. */ }
+  }
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionOk, setActionOk] = useState<string | null>(null);
   includeCaptionsRef.current = includeCaptions;
@@ -597,7 +614,6 @@ export function AgentClipStudioModal({
     setRenderStage("queued");
     setPlatformDownloadUrls({});
     setDownloadingPlatform(null);
-    setCopyingPackage(false);
     setActionError(null);
     setActionOk(null);
     const initialCopies = platformCopiesForClip({
@@ -1042,6 +1058,7 @@ export function AgentClipStudioModal({
       .then((bundle) => {
         if (cancelled) return;
         setPlatformCaptionChunks(bundle.chunks);
+        setSpeakerContext(bundle.speakerContext);
         setPlatformCaptionEdits((current) => {
           const merged = clipChanged
             ? bundle.edits
@@ -1078,7 +1095,7 @@ export function AgentClipStudioModal({
         const body = (await response.json()) as {
           status?: "refined" | "cached" | "skipped";
         };
-        if (!response.ok || body.status !== "refined") return;
+        if (!response.ok || (body.status !== "refined" && body.status !== "cached")) return;
 
         invalidateClipStudioCaptionCache(sessionId);
         const currentRange = clipRangeRef.current;
@@ -1089,6 +1106,7 @@ export function AgentClipStudioModal({
         );
         if (controller.signal.aborted) return;
         setPlatformCaptionChunks(bundle.chunks);
+        setSpeakerContext(bundle.speakerContext);
         setPlatformCaptionEdits(bundle.edits);
         platformCaptionEditsRef.current = bundle.edits;
         setCaptionDirectionPlan(null);
@@ -1157,6 +1175,11 @@ export function AgentClipStudioModal({
     includeCaptions,
     captionAppearance,
     captionDirectionPlan,
+    platformCaptionEdits,
+    lookPreset,
+    faceJobId,
+    manualReframeKeyframes,
+    lockSubject,
     clip.startTimeSeconds,
     clip.endTimeSeconds,
   ]);
@@ -1203,7 +1226,9 @@ export function AgentClipStudioModal({
         )
       : 1;
   const platformCaptionCues = useMemo(() => {
-    const track = buildCaptionTrack(platformCaptionChunks, "vertical");
+    const track = buildCaptionTrack(platformCaptionChunks, "vertical", {
+      speakerContext: speakerContext ?? undefined,
+    });
     return directCaptionTrack(
       applyCaptionEdits(track, platformCaptionEdits).filter(
         (cue) =>
@@ -1215,13 +1240,14 @@ export function AgentClipStudioModal({
   }, [
     platformCaptionChunks,
     platformCaptionEdits,
+    speakerContext,
     clip.startTimeSeconds,
     clip.endTimeSeconds,
     captionDirectionPlan,
   ]);
 
-  const resolveRenderCaptionCues = useCallback(async () => {
-    if (!includeCaptions) return undefined;
+  const resolveRenderCaptionCues = useCallback(async (enabled = includeCaptions) => {
+    if (!enabled) return undefined;
     const bundle = await loadClipStudioCaptions(
       sessionId,
       clip.startTimeSeconds,
@@ -1230,10 +1256,16 @@ export function AgentClipStudioModal({
     );
     const edits = { ...bundle.edits, ...platformCaptionEditsRef.current };
     setPlatformCaptionChunks(bundle.chunks);
+    setSpeakerContext(bundle.speakerContext);
     setPlatformCaptionEdits(edits);
     platformCaptionEditsRef.current = edits;
     return directCaptionTrack(
-      applyCaptionEdits(buildCaptionTrack(bundle.chunks, "vertical"), edits).filter(
+      applyCaptionEdits(
+        buildCaptionTrack(bundle.chunks, "vertical", {
+          speakerContext: bundle.speakerContext ?? undefined,
+        }),
+        edits
+      ).filter(
         (cue) =>
           cue.endTimeSeconds > clip.startTimeSeconds &&
           cue.startTimeSeconds < clip.endTimeSeconds
@@ -1510,6 +1542,7 @@ export function AgentClipStudioModal({
   }, [faceJobId, lockSubject, lookPreset, reframeStyle, saveLayout]);
 
   async function handleRenderDownload() {
+    const preparedDownload = prepareFileDownload();
     setRendering(true);
     setActionError(null);
     setActionOk(null);
@@ -1548,13 +1581,14 @@ export function AgentClipStudioModal({
       );
       setDownloadUrl(result.downloadUrl);
       setQualityReview(result.qualityReview);
-      await triggerFileDownload(
+      await preparedDownload.start(
         result.downloadUrl,
-        `${clip.title.slice(0, 40) || "short"}.mp4`
+        videoDownloadFilename(clip.title)
       );
-      setActionOk("Download started.");
+      setActionOk("Download started. If your browser asks, allow downloads from this site.");
       onClipChange({ ...clip, status: "rendered" });
     } catch (err) {
+      preparedDownload.cancel();
       setActionError(err instanceof Error ? err.message : "Render failed");
     } finally {
       setRendering(false);
@@ -1570,7 +1604,9 @@ export function AgentClipStudioModal({
       await persistCurrentClipRange();
       setRenderProgress(8);
       setRenderStage("captions");
-      const renderCaptionCues = await resolveRenderCaptionCues();
+      const renderCaptionCues = await resolveRenderCaptionCues(
+        includeCaptions || Object.values(platformCaptions).some(Boolean)
+      );
       const selection = buildVerticalSelection(
         lookPreset,
         faceJobId,
@@ -1609,31 +1645,6 @@ export function AgentClipStudioModal({
     }
   }
 
-  function activePackageText(): string {
-    const copy = platformCopies[previewPlatform];
-    return [
-      copy.title,
-      previewPlatform === "x" ? copy.postText : copy.caption,
-      copy.description,
-      copy.hashtags.join(" "),
-      copy.tags.length > 0 ? copy.tags.join(", ") : null,
-      copy.pinnedComment ? `Pinned comment: ${copy.pinnedComment}` : null,
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-  }
-
-  async function handleCopyActivePackage() {
-    try {
-      await navigator.clipboard.writeText(activePackageText());
-      setCopyingPackage(true);
-      setActionError(null);
-      window.setTimeout(() => setCopyingPackage(false), 1400);
-    } catch {
-      setActionError("Could not copy the post package.");
-    }
-  }
-
   async function preparePlatformDownload(platform: PlatformKey): Promise<string> {
     const existing = platformDownloadUrls[platform];
     if (existing) return existing;
@@ -1649,6 +1660,7 @@ export function AgentClipStudioModal({
         platforms: [platform],
         includeCaptions,
         burnSubtitles: includeCaptions,
+        captionOptions: platformCaptions,
         generateCopy: true,
         copyOverrides: { [platform]: platformCopies[platform] },
       }),
@@ -1661,7 +1673,7 @@ export function AgentClipStudioModal({
       throw new Error(body.error ?? "Could not prepare this platform export.");
     }
 
-    for (let attempt = 0; attempt < 300; attempt += 1) {
+    for (let attempt = 0; attempt < 1500; attempt += 1) {
       const packResponse = await fetch(
         `/api/platform-export-packs/${body.pack.id}`,
         { cache: "no-store" }
@@ -1703,17 +1715,22 @@ export function AgentClipStudioModal({
   }
 
   async function handlePlatformPreviewDownload() {
+    const preparedDownload = prepareFileDownload();
     setDownloadingPlatform(previewPlatform);
     setActionError(null);
     setActionOk(null);
     try {
       const url = await preparePlatformDownload(previewPlatform);
-      await triggerFileDownload(
+      await preparedDownload.start(
         url,
-        `${clip.title.slice(0, 40) || "clip"}-${previewPlatform}.mp4`
+        videoDownloadFilename(
+          platformCopies[previewPlatform].title || clip.title,
+          previewPlatform
+        )
       );
       setActionOk(`${PLATFORM_PRESETS[previewPlatform].name} download started.`);
     } catch (error) {
+      preparedDownload.cancel();
       setActionError(
         error instanceof Error ? error.message : "Platform download failed."
       );
@@ -1823,6 +1840,7 @@ export function AgentClipStudioModal({
           platforms: selectedPlatforms,
           includeCaptions,
           burnSubtitles: includeCaptions,
+          captionOptions: platformCaptions,
           generateCopy: true,
           copyOverrides: platformCopies,
         }),
@@ -1870,6 +1888,7 @@ export function AgentClipStudioModal({
             platforms: neededExports,
             includeCaptions,
             burnSubtitles: includeCaptions,
+            captionOptions: platformCaptions,
             generateCopy: true,
             copyOverrides: platformCopies,
           }),
@@ -2162,6 +2181,19 @@ export function AgentClipStudioModal({
                 )}
               </section>
 
+              <SpeakerManager
+                sessionId={sessionId}
+                context={speakerContext}
+                rangeStart={clip.startTimeSeconds}
+                rangeEnd={clip.endTimeSeconds}
+                cues={platformCaptionCues}
+                onChange={(next) => {
+                  setSpeakerContext(next);
+                  setPlatformDownloadUrls({});
+                  setDownloadUrl(null);
+                }}
+              />
+
               <AgentClipEditor
                 sessionId={sessionId}
                 clip={clip}
@@ -2229,7 +2261,6 @@ export function AgentClipStudioModal({
                 onChange={(platform) => {
                   resetPreviewPlayback();
                   setPreviewPlatform(platform);
-                  setCopyingPackage(false);
                   setActionError(null);
                   setActionOk(null);
                 }}
@@ -2241,7 +2272,7 @@ export function AgentClipStudioModal({
                     platform={previewPlatform}
                     lookPresetId={lookPreset}
                     frameUrl={thumbUrl}
-                    includeCaptions={includeCaptions}
+                    includeCaptions={platformCaptionsEnabled}
                     captionCue={activePlatformCaptionCue}
                     captionTime={previewTime}
                     captionAppearance={captionAppearance}
@@ -2363,18 +2394,13 @@ export function AgentClipStudioModal({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void handleCopyActivePackage()}
-                    className="inline-flex h-10 items-center gap-2 border border-[var(--color-card-border)] px-3 text-xs font-semibold text-[var(--color-foreground)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-                  >
-                    {copyingPackage ? (
-                      <Check className="h-4 w-4 text-[var(--color-accent)]" />
-                    ) : (
-                      <Copy className="h-4 w-4" />
-                    )}
-                    {copyingPackage ? "Copied" : "Copy package"}
-                  </button>
+                  <label className="flex items-center gap-2 text-xs">
+                    <input type="checkbox" checked={platformCaptionsEnabled}
+                      disabled={Boolean(downloadingPlatform) || rendering || publishing || packing}
+                      onChange={(event) => changePlatformCaptions(previewPlatform, event.target.checked)}
+                      className="accent-[var(--color-accent)]" />
+                    Captions for {previewMeta.name}
+                  </label>
                   <button
                     type="button"
                     disabled={Boolean(downloadingPlatform) || rendering || publishing}
@@ -2387,7 +2413,7 @@ export function AgentClipStudioModal({
                       ? `Preparing ${renderProgress}%`
                       : platformDownloadUrls[previewPlatform]
                         ? "Download again"
-                        : "Download video"}
+                        : `Download ${previewMeta.name} (${previewMeta.outputs[0].label})`}
                   </button>
                   {activePlatformAccount ? (
                     <button
@@ -2438,23 +2464,28 @@ export function AgentClipStudioModal({
               <div className="rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-4">
                 <h3 className="text-sm font-semibold">Download</h3>
                 <p className="mt-1 text-xs text-[var(--color-muted)]">
-                  Render a vertical Short with your look (
+                  Download a general 9:16 video in high quality with your look (
                   {getContentLookPreset(lookPreset).label}
                   ){includeCaptions ? " and burned captions" : ""}.
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
+                  <label className="flex items-center gap-2 text-xs">
+                    <input type="checkbox" checked={includeCaptions}
+                      disabled={rendering || packing || publishing || Boolean(downloadingPlatform)}
+                      onChange={(event) => onIncludeCaptionsChange(event.target.checked)}
+                      className="accent-[var(--color-accent)]" />
+                    Captions for general download
+                  </label>
                   <Button
                     type="button"
-                    disabled={rendering}
+                    disabled={rendering || packing || publishing || Boolean(downloadingPlatform)}
                     onClick={() => void handleRenderDownload()}
                   >
                     {rendering
                       ? renderStage === "quality_check"
                         ? "Reviewing export..."
                         : `Rendering... ${renderProgress}%`
-                      : downloadUrl
-                        ? "Download again"
-                        : "Render & download"}
+                      : "Render & download"}
                   </Button>
                 </div>
                 {rendering && (
@@ -2470,7 +2501,8 @@ export function AgentClipStudioModal({
                         : renderStage === "captions"
                           ? "Loading every caption in the final clip range..."
                           : renderStage === "prepare_source" ||
-                              renderStage === "download_source"
+                              renderStage === "download_source" ||
+                              renderStage.startsWith("download_source_attempt_")
                             ? "Preparing the highest-quality source media..."
                             : renderStage === "cached_source" ||
                                 renderStage === "local_hd_source" ||
@@ -2499,7 +2531,7 @@ export function AgentClipStudioModal({
                     const p = PLATFORM_PRESETS[key];
                     const checked = selectedPlatforms.includes(key);
                     return (
-                      <label
+                      <div
                         key={key}
                         className={cn(
                           "flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-xs",
@@ -2508,14 +2540,24 @@ export function AgentClipStudioModal({
                             : "border-[var(--color-card-border)]"
                         )}
                       >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => togglePlatform(key)}
-                          className="accent-[var(--color-accent)]"
-                        />
-                        {p.name}
-                      </label>
+                        <label className="flex flex-1 items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => togglePlatform(key)}
+                            className="accent-[var(--color-accent)]"
+                          />
+                          {p.name}
+                        </label>
+                        <label className="flex items-center gap-1.5">
+                          <input type="checkbox" checked={platformCaptions[key] ?? includeCaptions}
+                            aria-label={`Captions for ${p.name}`}
+                            disabled={packing || rendering || publishing || Boolean(downloadingPlatform)}
+                            onChange={(event) => changePlatformCaptions(key, event.target.checked)}
+                            className="accent-[var(--color-accent)]" />
+                          Captions
+                        </label>
+                      </div>
                     );
                   })}
                 </div>

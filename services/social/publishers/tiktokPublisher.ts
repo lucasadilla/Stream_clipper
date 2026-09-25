@@ -276,7 +276,7 @@ function resolvePrivacy(
   return allowed[0]!;
 }
 
-function useInbox(request: PublishRequest): boolean {
+function publishesToInbox(request: PublishRequest): boolean {
   return request.settings.tiktokMode === "inbox";
 }
 
@@ -517,7 +517,7 @@ export const tiktokPublisher: SocialPublisher = {
         severity: "error",
       });
     }
-    if (forcesPrivateUploads("tiktok") && !useInbox(request)) {
+    if (forcesPrivateUploads("tiktok") && !publishesToInbox(request)) {
       warnings.push({
         code: "private_only",
         message:
@@ -525,7 +525,7 @@ export const tiktokPublisher: SocialPublisher = {
         severity: "warning",
       });
     }
-    if (useInbox(request)) {
+    if (publishesToInbox(request)) {
       warnings.push({
         code: "inbox_mode",
         message:
@@ -566,7 +566,7 @@ export const tiktokPublisher: SocialPublisher = {
       const videoSize = fileStat.size;
       const chunkSize = Math.min(CHUNK, videoSize);
       const totalChunkCount = Math.max(1, Math.ceil(videoSize / chunkSize));
-      const inbox = useInbox(request);
+      const inbox = publishesToInbox(request);
 
       let publishId: string;
       let uploadUrl: string;

@@ -43,6 +43,10 @@ export function CaptionCueText({
   const wordReveal = animation === "wordReveal" && timedWords.length > 0;
   const renderTimedWords =
     timedWords.length > 0 && (wordReveal || appearance.karaokeEnabled);
+  const speakerColor =
+    cue.speakerColor && (cue.speakerConfidence ?? 1) >= 0.45
+      ? cue.speakerColor
+      : appearance.color;
 
   if (renderTimedWords) {
     return tokens.map((token, index) => {
@@ -66,7 +70,7 @@ export function CaptionCueText({
               color:
                 appearance.karaokeEnabled && active
                   ? appearance.highlightColor
-                  : appearance.color,
+                  : speakerColor,
               opacity: revealed ? 1 : 0,
               transform: wordReveal
                 ? revealed
@@ -94,5 +98,12 @@ export function CaptionCueText({
     });
   }
 
-  return applyCaptionCapitalization(cue.text, appearance.capitalization);
+  return (
+    <span
+      style={{ color: speakerColor }}
+      aria-label={cue.speakerLabel ? `${cue.speakerLabel}: ${cue.text}` : undefined}
+    >
+      {applyCaptionCapitalization(cue.text, appearance.capitalization)}
+    </span>
+  );
 }

@@ -6,6 +6,17 @@ import {
 } from "@/lib/postRenderCritic";
 
 describe("post-render quality critic", () => {
+  it("does not give an upscaled 360p source a perfect quality score", () => {
+    const review = buildTechnicalQualityReview({
+      durationSeconds: 30, expectedDurationSeconds: 30, width: 1080, height: 1920,
+      fps: 30, videoCodec: "h264", audioCodec: "aac", fileSizeBytes: 90_000_000,
+      format: "vertical", expectsAudio: true, expectsCaptions: true,
+      sourceDimensions: { width: 640, height: 360 },
+    });
+    expect(review.verdict).toBe("review");
+    expect(review.scores.clarity).toBe(40);
+    expect(review.issues[0].title).toContain("Source video");
+  });
   it("samples the opening, ending, and both sides of edit boundaries", () => {
     const times = buildCriticSampleTimes(30, [10], 6);
 

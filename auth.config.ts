@@ -18,7 +18,6 @@ export const authConfig = {
           Google({
             clientId: process.env.AUTH_GOOGLE_ID,
             clientSecret: process.env.AUTH_GOOGLE_SECRET,
-            allowDangerousEmailAccountLinking: true,
           }),
         ]
       : []),
@@ -27,7 +26,6 @@ export const authConfig = {
           Twitch({
             clientId: process.env.AUTH_TWITCH_ID,
             clientSecret: process.env.AUTH_TWITCH_SECRET,
-            allowDangerousEmailAccountLinking: true,
           }),
         ]
       : []),
@@ -36,7 +34,6 @@ export const authConfig = {
           KickProvider({
             clientId: process.env.AUTH_KICK_ID,
             clientSecret: process.env.AUTH_KICK_SECRET,
-            allowDangerousEmailAccountLinking: true,
           }),
         ]
       : []),

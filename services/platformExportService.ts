@@ -29,6 +29,8 @@ import { renderPlatformVideo } from "@/services/platformRenderService";
 import { validateCompletedPlatformExport } from "@/services/platformValidationService";
 import { getTranscriptChunksForRange } from "@/services/transcriptService";
 import { getLatestCompletedFinalRenderJob } from "@/services/renderSelectionService";
+import { parseRenderJobParams } from "@/services/renderService";
+import { assertDeliverableVideo } from "@/services/deliverableVideoService";
 
 const PLATFORM_WORKER_ID = `platform-${process.pid}-${randomUUID().slice(0, 8)}`;
 const STALE_EXPORT_MS = 15 * 60 * 1000;
@@ -180,48 +182,75 @@ export async function createPlatformExportPack(
   );
   if (platforms.length === 0) throw new Error("Choose at least one platform");
 
-  return prisma.platformExportPack.create({
-    data: {
-      clipSuggestionId: clip.id,
-      streamSessionId: clip.streamSessionId,
-      name: `${clip.title} - Platform Export Pack`,
-      exports: {
-        create: platforms.map((platform) => {
-          const copyOverride = input.copyOverrides?.[platform];
-          return {
-            clipSuggestionId: clip.id,
-            streamSessionId: clip.streamSessionId,
-            renderJobId: renderJob.id,
-            platform,
-            presetName: PLATFORM_PRESETS[platform].name,
-            ...(copyOverride ? copyData(copyOverride) : {}),
-            exportSettings: toJsonValue(
-              platformSettings(platform, {
-                outputId: input.outputOptions?.[platform],
-                includeCaptions: input.includeCaptions,
-                burnSubtitles: input.burnSubtitles,
-                generateCopy: copyOverride ? false : input.generateCopy,
-                useCopyOverride: Boolean(copyOverride),
-                xQuoteCard: input.xQuoteCard,
-                xQuoteLayout: input.xQuoteLayout,
-              })
-            ),
-          };
-        }),
+  const sourceParams = parseRenderJobParams(renderJob.params);
+  if (!sourceParams) throw new Error("Render the clip again before creating platform exports");
+
+  // Every destination is encoded from the original media with its own framing
+  // and caption choice. Never try to remove burned text from a finished MP4.
+  return prisma.$transaction(async (tx) => {
+    const exports = [];
+    for (const platform of platforms) {
+      const copyOverride = input.copyOverrides?.[platform];
+      const captions = input.captionOptions?.[platform];
+      const settings = platformSettings(platform, {
+        outputId: input.outputOptions?.[platform],
+        includeCaptions: captions ?? input.includeCaptions,
+        burnSubtitles: captions ?? input.burnSubtitles,
+        generateCopy: copyOverride ? false : input.generateCopy,
+        useCopyOverride: Boolean(copyOverride),
+        xQuoteCard: input.xQuoteCard,
+        xQuoteLayout: input.xQuoteLayout,
+      });
+      const targetParams = {
+        ...sourceParams,
+        preview: false,
+        format: "vertical",
+        includeCaptions: settings.burnSubtitles,
+        platformTarget: { platform, outputId: settings.outputId },
+        ...(sourceParams.verticalLayout ? { verticalLayout: {
+          ...sourceParams.verticalLayout,
+          captions: { ...sourceParams.verticalLayout.captions, enabled: settings.burnSubtitles },
+        } } : {}),
+      };
+      const targetJob = await tx.renderJob.create({ data: {
+        streamSessionId: clip.streamSessionId,
+        clipSuggestionId: clip.id,
+        sourceMediaId: renderJob.sourceMediaId,
+        status: "queued",
+        layout: renderJob.layout,
+        includeCaptions: settings.burnSubtitles,
+        params: toJsonValue(targetParams),
+      } });
+      exports.push({
+        clipSuggestionId: clip.id,
+        streamSessionId: clip.streamSessionId,
+        renderJobId: targetJob.id,
+        platform,
+        presetName: PLATFORM_PRESETS[platform].name,
+        ...(copyOverride ? copyData(copyOverride) : {}),
+        exportSettings: toJsonValue(settings),
+      });
+    }
+    return tx.platformExportPack.create({
+      data: {
+        clipSuggestionId: clip.id,
+        streamSessionId: clip.streamSessionId,
+        name: `${clip.title} - Platform Export Pack`,
+        exports: { create: exports },
       },
-    },
-    include: {
-      clipSuggestion: {
-        select: {
-          id: true,
-          title: true,
-          reason: true,
-          startTimeSeconds: true,
-          endTimeSeconds: true,
+      include: {
+        clipSuggestion: {
+          select: {
+            id: true,
+            title: true,
+            reason: true,
+            startTimeSeconds: true,
+            endTimeSeconds: true,
+          },
         },
+        exports: { include: { renderJob: { select: { progress: true } } } },
       },
-      exports: true,
-    },
+    });
   });
 }
 
@@ -238,7 +267,7 @@ export async function getPlatformExportPack(packId: string) {
           endTimeSeconds: true,
         },
       },
-      exports: true,
+      exports: { include: { renderJob: { select: { progress: true } } } },
     },
   });
 }
@@ -272,7 +301,9 @@ export function serializePlatformExportPack(
         platform: item.platform,
         presetName: item.presetName,
         status: item.status,
-        progress: item.progress,
+        progress: item.status === "queued"
+          ? Math.round((item.renderJob?.progress ?? 0) * 0.4)
+          : Math.max(40, item.progress),
         title: item.title,
         caption: item.caption,
         postText: item.postText,
@@ -342,7 +373,10 @@ export async function reclaimStalePlatformExports(): Promise<number> {
 
 export async function claimNextPlatformExport(): Promise<string | null> {
   const candidates = await prisma.platformExport.findMany({
-    where: { status: "queued" },
+    where: { status: "queued", OR: [
+      { renderJobId: null },
+      { renderJob: { status: { in: ["completed", "failed"] } } },
+    ] },
     orderBy: { createdAt: "asc" },
     take: 8,
     select: { id: true, exportPackId: true },
@@ -422,7 +456,7 @@ export async function executePlatformExport(platformExportId: string) {
     ? await prisma.renderJob.findUnique({ where: { id: platformExport.renderJobId } })
     : null;
   if (!renderJob?.outputPath || !fileExists(renderJob.outputPath)) {
-    throw new Error("The rendered clip file is no longer available");
+    throw new Error(renderJob?.errorMessage || "The rendered clip file is no longer available");
   }
 
   const outputDir = path.join(
@@ -449,6 +483,20 @@ export async function executePlatformExport(platformExportId: string) {
     data: { progress: 40, lockedAt: new Date() },
   });
 
+  let lastEncodeProgress = 39;
+  let progressQueue = Promise.resolve();
+  const reportEncodeProgress = (progress: number) => {
+    const next = 40 + Math.floor(Math.min(1, Math.max(0, progress)) * 50);
+    if (next <= lastEncodeProgress) return;
+    lastEncodeProgress = next;
+    progressQueue = progressQueue.then(() =>
+      prisma.platformExport.updateMany({
+        where: { id: platformExportId, status: "processing" },
+        data: { progress: next, lockedAt: new Date() },
+      }).then(() => undefined)
+    );
+  };
+
   const renderResult = await renderPlatformVideo({
     platform,
     inputPath: resolveStoragePath(renderJob.outputPath),
@@ -458,9 +506,17 @@ export async function executePlatformExport(platformExportId: string) {
     subtitlePath: settings.burnSubtitles ? subtitlePath : null,
     quoteText: copy.quoteText,
     sourceIncludesCaptions: renderJob.includeCaptions,
+    onProgress: reportEncodeProgress,
   });
+  await progressQueue;
 
+  await assertDeliverableVideo(outputPath);
   const [probe, stat] = await Promise.all([probeMedia(outputPath), fs.stat(outputPath)]);
+  if (probe.width !== settings.width || probe.height !== settings.height) {
+    throw new Error(
+      `${platform} export produced ${probe.width}x${probe.height}; expected ${settings.width}x${settings.height}.`
+    );
+  }
   const validationWarnings = [
     ...renderResult.warnings,
     ...validateCompletedPlatformExport({
@@ -548,9 +604,13 @@ export async function getPlatformExportFile(exportId: string) {
       streamSessionId: true,
       platform: true,
       presetName: true,
+      title: true,
       status: true,
       outputPath: true,
       thumbnailPath: true,
+      clipSuggestion: {
+        select: { title: true },
+      },
     },
   });
 }

@@ -1,4 +1,5 @@
 import { triggerFileDownload } from "@/lib/clientDownload";
+import { videoDownloadFilename } from "@/lib/downloadFilename";
 import { clipDownloadUrl, renderJobDownloadUrl } from "@/lib/downloadUrls";
 import { formatSeconds } from "@/lib/time";
 import type { RenderFormat } from "@/lib/renderFormat";
@@ -42,6 +43,13 @@ export class RenderAbortedError extends Error {
   }
 }
 
+export class RenderJobFailedError extends Error {
+  constructor(message = "Render failed") {
+    super(message);
+    this.name = "RenderJobFailedError";
+  }
+}
+
 function isAbortError(err: unknown): boolean {
   if (err instanceof RenderAbortedError) return true;
   if (!err || typeof err !== "object") return false;
@@ -51,7 +59,7 @@ function isAbortError(err: unknown): boolean {
 
 export { isAbortError };
 
-async function pollRenderJob(
+export async function pollRenderJob(
   jobId: string,
   onProgress?: (update: RenderProgressUpdate) => void,
   signal?: AbortSignal
@@ -60,7 +68,7 @@ async function pollRenderJob(
   qualityReview: PostRenderQualityReview | null;
 }> {
   const started = Date.now();
-  const timeoutMs = 10 * 60 * 1000;
+  const timeoutMs = 30 * 60 * 1000;
   let consecutiveErrors = 0;
 
   while (Date.now() - started < timeoutMs) {
@@ -103,10 +111,16 @@ async function pollRenderJob(
         };
       }
       if (status === "failed") {
-        throw new Error(data.job.errorMessage ?? "Render failed");
+        throw new RenderJobFailedError(
+          data.job.errorMessage ?? "Render failed"
+        );
       }
     } catch (err) {
       if (isAbortError(err) || signal?.aborted) throw new RenderAbortedError();
+      // A failed job is a final server result, not a temporary polling error.
+      // Retrying it used to reset the retry counter on every successful GET,
+      // leaving the UI polling forever after the worker had already failed.
+      if (err instanceof RenderJobFailedError) throw err;
       consecutiveErrors += 1;
       // Dev recompile / brief network blips should not kill a long encode.
       if (consecutiveErrors >= 8) throw err;
@@ -213,7 +227,6 @@ export async function saveAndRenderClip(
     onProgress
   );
   const url = result.downloadUrl ?? clipDownloadUrl(clip.id);
-  const suffix = format === "native" ? "-native" : "-vertical";
-  await triggerFileDownload(url, `${clip.title || "clip"}${suffix}.mp4`);
+  await triggerFileDownload(url, videoDownloadFilename(clip.title));
   return clip;
 }

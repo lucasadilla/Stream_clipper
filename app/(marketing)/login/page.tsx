@@ -109,6 +109,7 @@ function LoginPageInner() {
   async function handleOAuth(providerId: string) {
     setLoading(true);
     setError(null);
+    posthog.capture("signup_started", { method: providerId });
     try {
       await withTimeout(
         signIn(providerId, { callbackUrl: "/welcome" }),
@@ -139,6 +140,9 @@ function LoginPageInner() {
         });
         posthog.capture("user_signed_in", {
           unlimited_access: synced.data.account.unlimitedAccess ?? false,
+        });
+        posthog.capture(mode === "signup" ? "signup_completed" : "login_completed", {
+          method: "email",
         });
         setAccount(synced.data.account);
         router.push("/welcome");
@@ -182,6 +186,7 @@ function LoginPageInner() {
     setError(null);
     try {
       if (mode === "signup") {
+        posthog.capture("signup_started", { method: "email" });
         const { ok, data } = await fetchJson<{ error?: string }>(
           "/api/auth/register",
           {
@@ -246,16 +251,16 @@ function LoginPageInner() {
             Clipper / account
           </p>
           <h1 className="marketing-display-title mt-4 font-semibold text-white">
-            Sign in
+            Welcome to Clipper
           </h1>
           <p className="mt-5 text-lg leading-8 text-white/74 sm:text-xl sm:leading-9">
-            Use Google, Twitch, Kick, or email and password — same as other
-            sites. Optionally enter a Creator Program code during signup.
+            Sign in to start turning your streams into clips. Your chosen
+            stream and workflow will be waiting for you.
           </p>
           <ul className="mt-8 space-y-3 text-sm leading-6 text-[var(--color-muted)]">
-            <li>OAuth or email/password — your choice</li>
-            <li>Creator codes unlock beta seats for select creators</li>
-            <li>After sign-in you can subscribe to Creator, Pro, or Studio</li>
+            <li>Continue with Google or email</li>
+            <li>Secure checkout through Stripe</li>
+            <li>No processing begins before you choose a plan</li>
           </ul>
         </div>
 

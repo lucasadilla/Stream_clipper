@@ -9,13 +9,22 @@ import {
 import { extractAudioSegment } from "@/lib/ffmpeg";
 import { buildTranscriptionContext } from "@/lib/transcriptionContext";
 import type { TranscriptWord } from "@/lib/transcriptionTypes";
+import { alignWordsToSpeakerContext } from "@/lib/speakerContext";
 import { ensureDir, getUploadDir } from "@/lib/storage";
 import { toJsonValue } from "@/lib/utils";
-import { transcribeWhisperAudio } from "@/services/whisperTranscription";
+import { transcribeClipAccurately } from "@/services/accurateClipTranscriptionService";
 import { resolveSourceForTranscription } from "@/services/transcriptionSyncService";
+import { ensureSpeakerContext } from "@/services/speakerContextService";
 
-const REFINEMENT_VERSION = "candidate-transcript-v1";
+const REFINEMENT_VERSION = "candidate-transcript-v2";
 const inFlight = new Map<string, Promise<ClipTranscriptRefinementResult>>();
+
+interface RefinementSource {
+  inputPath: string;
+  timelineOffsetSeconds: number;
+  startTimeSeconds?: number;
+  endTimeSeconds?: number;
+}
 
 export interface ClipTranscriptRefinementResult {
   status: "refined" | "cached" | "skipped";
@@ -55,7 +64,8 @@ export function isClipTranscriptRefinementConfigured(): boolean {
 }
 
 async function runRefinement(
-  clipSuggestionId: string
+  clipSuggestionId: string,
+  source?: RefinementSource
 ): Promise<ClipTranscriptRefinementResult> {
   const model = getClipTranscriptionRefinementModel();
   if (!process.env.OPENAI_API_KEY?.trim() || !model) {
@@ -93,8 +103,13 @@ async function runRefinement(
     return { status: "skipped", reason: "clip_not_found", updatedChunks: 0 };
   }
 
+  const clipStart = source?.startTimeSeconds ?? clip.startTimeSeconds;
+  const clipEnd = source?.endTimeSeconds ?? clip.endTimeSeconds;
+
   const cached = clipMarker(clip.rawAiJson);
-  if (cached && cached.model === model) {
+  const sourceKey = source?.inputPath ?? "preview";
+  if (cached && cached.model === model && (!source || cached.sourceKey === sourceKey) &&
+    cached.start === clipStart && cached.end === clipEnd) {
     return {
       status: "cached",
       updatedChunks: Number(cached.updatedChunks ?? 0),
@@ -103,12 +118,12 @@ async function runRefinement(
   }
 
   const sourceMedia = clip.streamSession.sourceMedia[0];
-  if (!sourceMedia) {
+  if (!sourceMedia && !source) {
     return { status: "skipped", reason: "source_not_ready", updatedChunks: 0 };
   }
-  const sourcePath = await resolveSourceForTranscription(
+  const sourcePath = source?.inputPath ?? await resolveSourceForTranscription(
     clip.streamSessionId,
-    sourceMedia,
+    sourceMedia!,
     { isLive: clip.streamSession.liveStatus === "live" }
   );
   if (!sourcePath) {
@@ -118,21 +133,24 @@ async function runRefinement(
   const originalChunks = await prisma.transcriptChunk.findMany({
     where: {
       streamSessionId: clip.streamSessionId,
-      startTimeSeconds: { lt: clip.endTimeSeconds },
-      endTimeSeconds: { gt: clip.startTimeSeconds },
+      startTimeSeconds: { lt: clipEnd },
+      endTimeSeconds: { gt: clipStart },
     },
     orderBy: { startTimeSeconds: "asc" },
   });
-  if (originalChunks.length === 0) {
-    return { status: "skipped", reason: "no_transcript", updatedChunks: 0 };
-  }
+  // Capture the source-level speaker timeline before the higher-quality text
+  // pass replaces words. Whisper improves wording/timing but does not diarize;
+  // re-aligning here prevents final renders from losing speaker identity.
+  const speakerContext = await ensureSpeakerContext(clip.streamSessionId).catch(
+    () => null
+  );
 
   const chatMessages = await prisma.chatMessage.findMany({
     where: {
       streamSessionId: clip.streamSessionId,
       videoTimeSeconds: {
-        gte: Math.max(0, clip.startTimeSeconds - 180),
-        lte: clip.endTimeSeconds + 30,
+        gte: Math.max(0, clipStart - 180),
+        lte: clipEnd + 30,
       },
     },
     orderBy: { publishedAt: "desc" },
@@ -149,8 +167,9 @@ async function runRefinement(
   });
 
   const padding = 2;
-  const audioStart = Math.max(0, clip.startTimeSeconds - padding);
-  const audioEnd = clip.endTimeSeconds + padding;
+  const sourceOffset = source?.timelineOffsetSeconds ?? 0;
+  const audioStart = Math.max(sourceOffset, clipStart - padding);
+  const audioEnd = clipEnd + padding;
   const audioDir = path.join(getUploadDir(clip.streamSessionId), "audio");
   await ensureDir(audioDir);
   const audioPath = path.join(
@@ -162,26 +181,42 @@ async function runRefinement(
     await extractAudioSegment(
       sourcePath,
       audioPath,
-      audioStart,
+      audioStart - sourceOffset,
       audioEnd - audioStart,
       { accurateSeek: true }
     );
-    const refined = await transcribeWhisperAudio(audioPath, audioStart, {
-      prompt: context.prompt,
-      language: context.language,
-      keyterms: context.keyterms,
-      providerOrder: ["openai"],
-      qualityModel: model,
+    const refined = await transcribeClipAccurately({
+      sourcePath: audioPath,
+      sourceStart: 0,
+      timelineStart: audioStart,
+      duration: audioEnd - audioStart,
+      tempDir: audioDir,
+      options: {
+        // Keep context out of Whisper's timing pass: it can repeat hints in
+        // quiet windows. The correction model accepts recording context.
+        qualityPrompt: [
+          "A livestream with a creator addressing viewers as chat, with occasional donation messages.",
+          context.language ? `Spoken language: ${context.language}.` : "",
+          clip.streamSession.channelTitle ? `Creator: ${clip.streamSession.channelTitle}.` : "",
+        ].filter(Boolean).join(" "),
+        language: context.language,
+        keyterms: context.keyterms,
+        providerOrder: ["openai"],
+        qualityModel: model,
+      },
     });
-    const words = refined
+    const refinedWords = refined
       .flatMap((segment) => segment.words ?? [])
       .filter((word) => {
         const midpoint = (word.start + word.end) / 2;
         return (
-          midpoint >= clip.startTimeSeconds && midpoint < clip.endTimeSeconds
+          midpoint >= clipStart && midpoint < clipEnd
         );
       })
       .sort((a, b) => a.start - b.start);
+    const words = speakerContext
+      ? alignWordsToSpeakerContext(refinedWords, speakerContext)
+      : refinedWords;
     const timingModel =
       refined.find((segment) => segment.timingModel)?.timingModel ??
       "whisper-1";
@@ -194,21 +229,30 @@ async function runRefinement(
       };
     }
 
-    const updates = originalChunks.flatMap((chunk) => {
+    const updates = originalChunks.flatMap((chunk, index) => {
+      const bucketStart = index === 0 ? clipStart : chunk.startTimeSeconds;
+      const bucketEnd = originalChunks[index + 1]?.startTimeSeconds ?? clipEnd;
       const chunkWords = words.filter((word) => {
         const midpoint = (word.start + word.end) / 2;
         return (
-          midpoint >= chunk.startTimeSeconds && midpoint < chunk.endTimeSeconds
+          midpoint >= bucketStart && midpoint < bucketEnd
         );
       });
-      const text = joinWords(chunkWords);
-      if (!text) return [];
       const previousRaw = objectValue(chunk.rawJson);
+      const outsideWords = Array.isArray(previousRaw.words)
+        ? (previousRaw.words as TranscriptWord[]).filter((word) => {
+            const midpoint = (word.start + word.end) / 2;
+            return midpoint < clipStart || midpoint >= clipEnd;
+          }) : [];
+      const combinedWords = [...outsideWords, ...chunkWords].sort((a, b) => a.start - b.start);
+      const text = joinWords(combinedWords);
       return [
         prisma.transcriptChunk.update({
           where: { id: chunk.id },
           data: {
             text,
+            startTimeSeconds: Math.min(chunk.startTimeSeconds, combinedWords[0]?.start ?? chunk.startTimeSeconds),
+            endTimeSeconds: Math.max(chunk.endTimeSeconds, combinedWords[combinedWords.length - 1]?.end ?? chunk.endTimeSeconds),
             rawJson: toJsonValue({
               ...previousRaw,
               rawTranscript:
@@ -216,7 +260,7 @@ async function runRefinement(
                 previousRaw.canonicalTranscript ??
                 chunk.text,
               canonicalTranscript: text,
-              words: chunkWords,
+              words: combinedWords,
               provider: "openai",
               model,
               timingModel,
@@ -231,6 +275,22 @@ async function runRefinement(
       ];
     });
 
+    if (originalChunks.length === 0) {
+      for (const segment of refined) {
+        const segmentWords = (segment.words ?? []).filter((word) =>
+          (word.start + word.end) / 2 >= clipStart &&
+          (word.start + word.end) / 2 < clipEnd);
+        if (!segmentWords.length) continue;
+        updates.push(prisma.transcriptChunk.create({ data: {
+          streamSessionId: clip.streamSessionId,
+          startTimeSeconds: segmentWords[0]!.start,
+          endTimeSeconds: segmentWords[segmentWords.length - 1]!.end,
+          text: joinWords(segmentWords),
+          rawJson: toJsonValue({ words: segmentWords, provider: "openai", model, timingModel }),
+        } }));
+      }
+    }
+
     if (updates.length > 0) await prisma.$transaction(updates);
     const rawAiJson = objectValue(clip.rawAiJson);
     await prisma.clipSuggestion.update({
@@ -244,6 +304,9 @@ async function runRefinement(
             status: "completed",
             model,
             updatedChunks: updates.length,
+            sourceKey,
+            start: clipStart,
+            end: clipEnd,
             refinedAt: new Date().toISOString(),
           },
         }),
@@ -261,17 +324,19 @@ async function runRefinement(
 }
 
 export async function refineClipTranscript(
-  clipSuggestionId: string
+  clipSuggestionId: string,
+  source?: RefinementSource
 ): Promise<ClipTranscriptRefinementResult> {
-  const existing = inFlight.get(clipSuggestionId);
+  const key = `${clipSuggestionId}:${source?.inputPath ?? "preview"}:${source?.startTimeSeconds ?? ""}:${source?.endTimeSeconds ?? ""}`;
+  const existing = inFlight.get(key);
   if (existing) return existing;
-  const promise = runRefinement(clipSuggestionId);
-  inFlight.set(clipSuggestionId, promise);
+  const promise = runRefinement(clipSuggestionId, source);
+  inFlight.set(key, promise);
   try {
     return await promise;
   } finally {
-    if (inFlight.get(clipSuggestionId) === promise) {
-      inFlight.delete(clipSuggestionId);
+    if (inFlight.get(key) === promise) {
+      inFlight.delete(key);
     }
   }
 }

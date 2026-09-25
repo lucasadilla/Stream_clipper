@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { z } from "zod";
 import { jsonResponse } from "@/lib/utils";
 import {
-  requireAuthUserId,
+  requirePaidAuthUserId,
   SessionAccessError,
 } from "@/services/social/socialAccessService";
 import {
@@ -51,7 +51,7 @@ function failure(error: unknown) {
 
 export async function GET(request: NextRequest) {
   try {
-    const userId = await requireAuthUserId(request);
+    const userId = await requirePaidAuthUserId(request);
     return jsonResponse(await getStreamAutomationSettings(userId));
   } catch (error) {
     return failure(error);
@@ -60,7 +60,7 @@ export async function GET(request: NextRequest) {
 
 export async function PUT(request: NextRequest) {
   try {
-    const userId = await requireAuthUserId(request);
+    const userId = await requirePaidAuthUserId(request);
     const input = updateSchema.parse(await request.json());
     const automation = await saveStreamAutomationSettings(userId, input);
     return jsonResponse({ automation });
@@ -71,7 +71,7 @@ export async function PUT(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
-    const userId = await requireAuthUserId(request);
+    const userId = await requirePaidAuthUserId(request);
     const automation = await disableStreamAutomation(userId);
     return jsonResponse({ automation });
   } catch (error) {

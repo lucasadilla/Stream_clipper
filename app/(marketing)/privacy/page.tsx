@@ -54,7 +54,7 @@ export default function PrivacyPage() {
           Publish clips to third-party platforms when you explicitly connect an
           account and start a publish action
         </li>
-        <li>Process subscriptions, trials, and Creator Beta access</li>
+        <li>Process subscriptions and enforce plan allowances</li>
         <li>Prevent abuse, debug issues, and measure product usage</li>
         <li>Communicate about the Service (security, billing, product updates)</li>
       </ul>

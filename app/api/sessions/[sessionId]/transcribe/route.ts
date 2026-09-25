@@ -95,6 +95,18 @@ export async function POST(
       session.sourceMedia[0]?.isLiveRecording === true;
 
     const agentPriority = session.mode === "agent";
+    if (billingAccountId) {
+      getPostHogClient().capture({
+        distinctId: billingAccountId,
+        event: "first_stream_processing_started",
+        properties: {
+          session_id: sessionId,
+          workflow: session.mode,
+          is_live: isLive,
+          $insert_id: `${billingAccountId}:first_stream_processing_started`,
+        },
+      });
+    }
     const result = await syncTranscription(sessionId, {
       isLive,
       ...(agentPriority
@@ -123,6 +135,28 @@ export async function POST(
           is_live: isLive,
         },
       });
+      if (!result.skipped && !result.error) {
+        const processedStreams = await prisma.streamSession.count({
+          where: {
+            billingAccountId,
+            transcriptChunks: {
+              some: {
+                text: { notIn: ["", "[silence]", "[processing error]"] },
+              },
+            },
+          },
+        });
+        if (processedStreams >= 2) {
+          getPostHogClient().capture({
+            distinctId: billingAccountId,
+            event: "second_stream_processed",
+            properties: {
+              session_id: sessionId,
+              $insert_id: `${billingAccountId}:second_stream_processed`,
+            },
+          });
+        }
+      }
     }
     if (!agentPriority) {
       return jsonResponse({ success: true, cleared, ...result });

@@ -23,6 +23,7 @@ import { ensureClipSuggestionThumbnails } from "@/services/clipThumbnailService"
 import { prepareSuggestedClips } from "@/services/clipAutoPrepareService";
 import { reclaimEphemeralStorage } from "@/services/storageReclaimService";
 import { prepareCaptionDirections } from "@/services/captionDirectorService";
+import { getPostHogClient } from "@/lib/posthog-server";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -197,6 +198,19 @@ export async function POST(
         ),
       },
     });
+
+    if (billingAccountId && result.created > 0) {
+      getPostHogClient().capture({
+        distinctId: billingAccountId,
+        event: "first_clip_generated",
+        properties: {
+          session_id: sessionId,
+          workflow: session.mode,
+          clips_created: result.created,
+          $insert_id: `${billingAccountId}:first_clip_generated`,
+        },
+      });
+    }
 
     return jsonResponse({
       created: result.created,

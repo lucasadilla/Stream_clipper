@@ -238,7 +238,7 @@ export async function POST(
     if (billingAccountId) {
       getPostHogClient().capture({
         distinctId: billingAccountId,
-        event: "clip_rendered",
+        event: "clip_render_started",
         properties: {
           format: format,
           duration_seconds: outputDuration,

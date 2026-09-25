@@ -2,21 +2,31 @@
 
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { Clapperboard, Loader2, Sparkles, X } from "lucide-react";
+import { Clapperboard, Loader2, Radio, Sparkles, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import type { SessionMode } from "@/lib/sessionMode";
 import { Button } from "@/components/ui/button";
 
+export type ClippingEntryMode = SessionMode | "autopilot";
+
 interface ClippingModeModalProps {
   open: boolean;
   loading?: boolean;
-  selectedMode?: SessionMode | null;
+  selectedMode?: ClippingEntryMode | null;
+  agentPrompt?: string;
+  onAgentPromptChange?: (value: string) => void;
+  preview?: {
+    title: string;
+    creator: string | null;
+    thumbnailUrl: string | null;
+    platform: "youtube" | "twitch" | "kick";
+  } | null;
   onClose: () => void;
-  onSelect: (mode: SessionMode) => void;
+  onSelect: (mode: ClippingEntryMode) => void;
 }
 
 const MODES: Array<{
-  id: SessionMode;
+  id: ClippingEntryMode;
   label: string;
   tagline: string;
   description: string;
@@ -37,16 +47,28 @@ const MODES: Array<{
       "Auto clips for VODs and live — as moments happen, or after the stream ends.",
     icon: Sparkles,
   },
+  {
+    id: "autopilot",
+    label: "Autopilot",
+    tagline: "Hands-free",
+    description:
+      "Connect your channel once, then let Clipper monitor, create, and publish.",
+    icon: Radio,
+  },
 ];
 
 export function ClippingModeModal({
   open,
   loading,
   selectedMode = null,
+  agentPrompt = "",
+  onAgentPromptChange,
+  preview,
   onClose,
   onSelect,
 }: ClippingModeModalProps) {
   const [mounted, setMounted] = useState(false);
+  const [pendingMode, setPendingMode] = useState<ClippingEntryMode | null>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -54,6 +76,7 @@ export function ClippingModeModal({
 
   useEffect(() => {
     if (!open) return;
+    setPendingMode(null);
     const previous = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => {
@@ -121,12 +144,33 @@ export function ClippingModeModal({
             One active session at a time. Starting a new one replaces your
             current workspace.
           </p>
+          {preview ? (
+            <div className="mt-4 flex items-center gap-3 border-t border-[var(--color-card-border)] pt-4">
+              {preview.thumbnailUrl ? (
+                // The bounded preview endpoint returns remote creator artwork.
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={preview.thumbnailUrl}
+                  alt=""
+                  className="h-12 w-20 shrink-0 object-cover"
+                />
+              ) : null}
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold text-white">
+                  {preview.title}
+                </p>
+                <p className="mt-1 truncate text-xs text-white/42">
+                  {preview.creator || preview.platform}
+                </p>
+              </div>
+            </div>
+          ) : null}
         </div>
 
-        <div className="grid gap-3 p-4 sm:grid-cols-2 sm:p-5">
+        <div className="grid gap-3 p-4 sm:grid-cols-3 sm:p-5">
           {MODES.map((mode) => {
             const Icon = mode.icon;
-            const selected = selectedMode === mode.id;
+            const selected = (loading ? selectedMode : pendingMode) === mode.id;
             const dimmed = Boolean(loading && selectedMode && !selected);
 
             return (
@@ -134,7 +178,7 @@ export function ClippingModeModal({
                 key={mode.id}
                 type="button"
                 disabled={loading}
-                onClick={() => onSelect(mode.id)}
+                onClick={() => setPendingMode(mode.id)}
                 className={cn(
                   "group flex flex-col gap-3 border border-[var(--color-card-border)] bg-[#020302] p-4 text-left transition-colors",
                   "hover:border-[var(--color-accent)] hover:bg-[#071007]",
@@ -182,15 +226,30 @@ export function ClippingModeModal({
                       : "text-white/40 group-hover:text-[var(--color-accent)]"
                   )}
                 >
-                  {selected && loading ? "Starting…" : "Select"}
+                  {selected && loading ? "Starting…" : selected ? "Selected" : "Select"}
                 </span>
               </button>
             );
           })}
         </div>
 
+        {pendingMode === "agent" && !loading ? (
+          <div className="border-t border-[var(--color-card-border)] px-5 py-4">
+            <label htmlFor="agent-onboarding-prompt" className="text-xs font-semibold text-white">
+              Tell Clipper what you&apos;re looking for
+            </label>
+            <input
+              id="agent-onboarding-prompt"
+              value={agentPrompt}
+              onChange={(event) => onAgentPromptChange?.(event.target.value)}
+              placeholder="Find the funniest moments"
+              className="mt-2 h-11 w-full border border-[var(--color-card-border)] bg-[#020302] px-3 text-sm text-white placeholder:text-white/30 focus:border-[var(--color-accent)] focus:outline-none"
+            />
+          </div>
+        ) : null}
+
         {!loading ? (
-          <div className="flex justify-end border-t border-[var(--color-card-border)] px-4 py-3">
+          <div className="flex justify-end gap-2 border-t border-[var(--color-card-border)] px-4 py-3">
             <Button
               type="button"
               variant="ghost"
@@ -199,6 +258,14 @@ export function ClippingModeModal({
               className="text-[var(--color-muted)] hover:bg-[#0a1008] hover:text-white"
             >
               Cancel
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              disabled={!pendingMode}
+              onClick={() => pendingMode && onSelect(pendingMode)}
+            >
+              Continue
             </Button>
           </div>
         ) : null}

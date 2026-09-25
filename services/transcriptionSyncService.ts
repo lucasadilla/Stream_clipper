@@ -31,6 +31,7 @@ import type { TranscriptSegmentWithMeta } from "@/lib/transcriptionTypes";
 import { isProviderUnavailableError } from "@/services/whisperTranscription";
 import {
   isTranscriptionAvailable,
+  shouldUseDeepgramForWorkload,
   transcribeAudioWithRouter,
 } from "@/services/transcriptionRouterService";
 import { buildTranscriptionContext } from "@/lib/transcriptionContext";
@@ -40,6 +41,7 @@ import {
   clearCompanionAudioState,
   ensureCompanionAudioTrack,
 } from "@/services/companionAudioService";
+import { ensureSessionAudioSourceProfile } from "@/services/audioSourceAnalyzer";
 
 const MIN_SEGMENT_SECONDS = 3;
 /** Give a failing range this many tries before permanently skipping it. */
@@ -414,6 +416,9 @@ export async function persistTranscriptSegments(
             ...(seg.provider ? { provider: seg.provider } : {}),
             ...(seg.model ? { model: seg.model } : {}),
             ...(seg.timingModel ? { timingModel: seg.timingModel } : {}),
+            ...(seg.diarizationModel
+              ? { diarizationModel: seg.diarizationModel }
+              : {}),
             ...(typeof seg.confidence === "number"
               ? { confidence: seg.confidence }
               : {}),
@@ -823,6 +828,14 @@ async function runSyncTranscription(
     };
   }
 
+  await ensureSessionAudioSourceProfile(streamSessionId, inputPath).catch(
+    (error) =>
+      console.warn(
+        "[transcribe] audio source inspection skipped:",
+        error instanceof Error ? error.message : error
+      )
+  );
+
   const recorded = await resolveSourceRecordedSeconds(streamSessionId);
   if (!(await canAttemptTranscription(streamSessionId))) {
     return { skipped: true, reason: "too_short", recordedSeconds: recorded };
@@ -848,11 +861,15 @@ async function runSyncTranscription(
     options.budgetSeconds ??
     (isLive ? TRANSCRIPTION_BUDGET_LIVE_SECONDS : TRANSCRIPTION_BUDGET_VOD_SECONDS);
   const parallel = options.parallel ?? TRANSCRIPTION_PARALLEL;
+  const providerDefaultChunkSeconds =
+    !options.isLive && shouldUseDeepgramForWorkload("vod")
+      ? 180
+      : TRANSCRIPTION_CHUNK_SECONDS;
   const chunkSeconds = Math.min(
     180,
     Math.max(
       TRANSCRIPTION_CHUNK_SECONDS,
-      options.chunkSeconds ?? TRANSCRIPTION_CHUNK_SECONDS
+      options.chunkSeconds ?? providerDefaultChunkSeconds
     )
   );
 

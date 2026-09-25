@@ -1,6 +1,11 @@
 import { NextRequest } from "next/server";
 import { getChatMessages } from "@/services/chatIngestionService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
+import { getBillingAccountIdFromRequest } from "@/services/billingService";
+import {
+  ensureSessionBillingAccess,
+  SessionAccessError,
+} from "@/services/sessionAccessService";
 
 export async function GET(
   request: NextRequest,
@@ -8,6 +13,10 @@ export async function GET(
 ) {
   try {
     const { sessionId } = await params;
+    await ensureSessionBillingAccess(
+      sessionId,
+      getBillingAccountIdFromRequest(request)
+    );
     const sp = request.nextUrl.searchParams;
     const limit = parseInt(sp.get("limit") ?? "300", 10);
     const aroundRaw = sp.get("around");
@@ -34,6 +43,9 @@ export async function GET(
     });
     return jsonResponse({ messages });
   } catch (error) {
+    if (error instanceof SessionAccessError) {
+      return errorResponse(error.message, error.status);
+    }
     const message = error instanceof Error ? error.message : "Failed to fetch chat";
     return errorResponse(message, 500);
   }

@@ -20,7 +20,8 @@ export function selectLatestFinalRenderJob<
 >(jobs: readonly T[]): T | null {
   return (
     jobs.find(
-      (job) => Boolean(job.outputPath) && !isPreviewRenderJobParams(job.params)
+      (job) => Boolean(job.outputPath) && !isPreviewRenderJobParams(job.params) &&
+        !(job.params && typeof job.params === "object" && "platformTarget" in job.params && job.params.platformTarget)
     ) ?? null
   );
 }

@@ -7,7 +7,7 @@ import type {
   TranscriptWord,
 } from "@/lib/transcriptionTypes";
 import { TRANSCRIPT_MERGE_MAX_SECONDS } from "@/lib/aiCostConstants";
-import { distributeTextAcrossSpan } from "@/lib/transcriptTiming";
+import { distributeTextAcrossSpan, repairCollapsedWordTimings } from "@/lib/transcriptTiming";
 import {
   isValidCaptionText,
   sanitizeCaptionText,
@@ -61,6 +61,8 @@ export interface WhisperTranscriptionOptions {
   providerOrder?: WhisperProvider[];
   /** Override the optional text-quality model; null explicitly disables it. */
   qualityModel?: string | null;
+  /** Recording context for the correction model, separate from Whisper's prompt. */
+  qualityPrompt?: string;
 }
 
 const WHISPER_RETRIES = 3;
@@ -233,7 +235,8 @@ async function transcribeViaOpenAiDirect(
       response_format: "json",
       temperature: 0,
       ...(language && !latestContextModel ? { language } : {}),
-      ...(prompt ? { prompt } : {}),
+      ...((options.qualityPrompt ?? prompt)?.trim()
+        ? { prompt: (options.qualityPrompt ?? prompt)!.trim().slice(-1_500) } : {}),
     };
     const extraContext = latestContextModel
       ? {
@@ -340,7 +343,6 @@ function alignCorrectedWords(
 
   const firstStart = original[0]!.start;
   const lastEnd = original[m - 1]!.end;
-  const totalSpan = Math.max(0.01, lastEnd - firstStart);
   const words = correctedTokens.map((word, index) => {
     const mapped = targetToSource[index];
     if (mapped != null) {
@@ -376,12 +378,34 @@ function alignCorrectedWords(
       };
     }
 
-    const start = firstStart + (totalSpan * index) / n;
-    return { word, start, end: firstStart + (totalSpan * (index + 1)) / n };
+    // No silence exists between these anchors. Keep the insertion local;
+    // distributing it across the whole recording reorders the sentence.
+    return { word, start: left, end: left };
   });
 
+  // Share an adjacent anchor's duration with insertions that have no gap.
+  // The transcript stays in lexical order and keeps distant anchors intact.
+  for (let index = 0; index < n; index++) {
+    if (targetToSource[index] != null || words[index]!.end > words[index]!.start) continue;
+    const runStart = index;
+    while (index + 1 < n && targetToSource[index + 1] == null) index++;
+    const previous = runStart > 0 ? runStart - 1 : null;
+    const next = index + 1 < n ? index + 1 : null;
+    const startIndex = previous ?? runStart;
+    const endIndex = previous != null ? index : next ?? index;
+    const start = words[startIndex]!.start;
+    const end = previous != null ? words[previous]!.end : words[endIndex]!.end;
+    const span = Math.max(0.01, end - start);
+    const count = endIndex - startIndex + 1;
+    for (let slot = 0; slot < count; slot++) {
+      words[startIndex + slot] = { ...words[startIndex + slot]!,
+        start: start + span * slot / count,
+        end: start + span * (slot + 1) / count };
+    }
+  }
+
   return {
-    words: words.sort((a, b) => a.start - b.start),
+    words,
     confidence: exactOrFuzzy / Math.max(m, n),
   };
 }
@@ -394,13 +418,13 @@ function joinWordTokens(tokens: string[]): string {
     .trim();
 }
 
-function reconcileAccurateTextWithTimings(
+export function reconcileAccurateTextWithTimings(
   timing: WhisperVerboseResponse,
   accurateText: string | undefined,
   qualityModel: string
 ): WhisperVerboseResponse {
   const text = accurateText?.trim();
-  const originalWords = timing.words ?? [];
+  const originalWords = repairCollapsedWordTimings(timing.words ?? []);
   if (!text || originalWords.length === 0) return timing;
 
   const correctedTokens = text.split(/\s+/).filter(Boolean);
@@ -410,21 +434,9 @@ function reconcileAccurateTextWithTimings(
   const aligned = alignCorrectedWords(originalWords, correctedTokens);
   if (aligned.confidence < 0.42) return timing;
 
-  const sourceSegments = timing.segments ?? [];
-  const segments = sourceSegments.flatMap((segment) => {
-    const words = aligned.words.filter((word) => {
-      const midpoint = (word.start + word.end) / 2;
-      return midpoint >= segment.start && midpoint < segment.end;
-    });
-    if (words.length === 0) return [];
-    return [
-      {
-        start: words[0]!.start,
-        end: words[words.length - 1]!.end,
-        text: joinWordTokens(words.map((word) => word.word)),
-      },
-    ];
-  });
+  // Corrected speech can land in gaps Whisper omitted. Rebuild the segment
+  // windows from ALL corrected words instead of filtering through old spans.
+  const segments = segmentsFromTimedWords(aligned.words);
 
   return {
     text,
@@ -435,6 +447,24 @@ function reconcileAccurateTextWithTimings(
     model: qualityModel,
     timingModel: timing.timingModel ?? getOpenAiWhisperModel(),
   };
+}
+
+export function segmentsFromTimedWords(words: WhisperWord[]) {
+  const groups: WhisperWord[][] = [];
+  for (const word of words) {
+    const group = groups[groups.length - 1];
+    if (!group || word.start - group[group.length - 1]!.end > 0.8 ||
+      word.end - group[0]!.start > 8) {
+      groups.push([word]);
+    } else {
+      group.push(word);
+    }
+  }
+  return groups.map((group) => ({
+    start: group[0]!.start,
+    end: Math.max(...group.map((word) => word.end)),
+    text: joinWordTokens(group.map((word) => word.word)),
+  }));
 }
 
 /** Transcribe a local audio file; segment times are offset by `timeOffsetSeconds`. */
@@ -498,7 +528,7 @@ export async function transcribeWhisperAudio(
   }
 
   const rawSegments = response.segments ?? [];
-  const rawWords = response.words ?? [];
+  const rawWords = repairCollapsedWordTimings(response.words ?? []);
 
   if (rawSegments.length > 0) {
     const segments = mergeAdjacentSegments(

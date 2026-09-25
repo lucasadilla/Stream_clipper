@@ -9,7 +9,7 @@ import {
 } from "@/services/sessionAccessService";
 
 export const runtime = "nodejs";
-export const maxDuration = 90;
+export const maxDuration = 300;
 
 export async function POST(
   request: NextRequest,

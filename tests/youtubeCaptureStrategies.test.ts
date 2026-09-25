@@ -3,16 +3,24 @@ import {
   classifyYtDlpError,
   getYoutubeCaptureStrategies,
   isYoutubePoTokenError,
+  preferredBestAudio,
   renderSourceFormatChains,
+  renderSourceFormatSort,
 } from "@/services/youtubeDownloadService";
 
 const originalClient = process.env.YT_DLP_YOUTUBE_CLIENT;
+const originalAudioLang = process.env.PREFERRED_AUDIO_LANGUAGE;
 
 afterEach(() => {
   if (originalClient === undefined) {
     delete process.env.YT_DLP_YOUTUBE_CLIENT;
   } else {
     process.env.YT_DLP_YOUTUBE_CLIENT = originalClient;
+  }
+  if (originalAudioLang === undefined) {
+    delete process.env.PREFERRED_AUDIO_LANGUAGE;
+  } else {
+    process.env.PREFERRED_AUDIO_LANGUAGE = originalAudioLang;
   }
 });
 
@@ -29,6 +37,7 @@ describe("YouTube capture strategies", () => {
     expect(strategies).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: "default", extractorArgs: null }),
+        expect.objectContaining({ id: "public-default", extractorArgs: null, includeCookies: false }),
         expect.objectContaining({ extractorArgs: "player_client=web_safari" }),
         expect.objectContaining({
           extractorArgs: "player_client=android",
@@ -65,14 +74,26 @@ describe("YouTube capture strategies", () => {
     ).toBe("youtube_forbidden");
   });
 
-  it("prefers a high-resolution VP9 final source before 1080p AVC", () => {
+  it("selects seekable high-quality HLS before DASH fallbacks", () => {
     const formats = renderSourceFormatChains(2160);
 
-    expect(formats[0]).toContain("vcodec^=vp9");
-    expect(formats[0]).toContain("protocol^=m3u8");
+    expect(formats[0]).toContain("fps>50");
     expect(formats[0]).toContain("height<=2160");
-    expect(formats[1]).toContain("vcodec^=avc1");
+    expect(formats[0]).toContain("protocol^=m3u8");
+    expect(formats[0]).toContain("format_note*=original");
     expect(formats[1]).toContain("protocol^=m3u8");
+    expect(formats[3]).toContain("bestaudio[format_note*=original]/bestaudio");
+    expect(formats.some((format) => format.includes("protocol^=m3u8"))).toBe(true);
     expect(formats).not.toContain("best");
+  });
+
+  it("prefers original audio and sorts language ahead of bitrate", () => {
+    expect(preferredBestAudio()).toBe(
+      "(bestaudio[format_note*=original]/bestaudio)"
+    );
+    expect(renderSourceFormatSort().startsWith("lang,")).toBe(true);
+
+    process.env.PREFERRED_AUDIO_LANGUAGE = "en";
+    expect(preferredBestAudio()).toContain("language^=en");
   });
 });

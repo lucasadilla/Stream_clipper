@@ -272,7 +272,7 @@ export async function saveStreamAutomationSettings(
     where: { userId },
   });
   if (!billing || !hasAppAccess(billing)) {
-    throw new Error("An active Clipper plan or Creator Beta access is required.");
+    throw new Error("An active Clipper subscription is required.");
   }
 
   const enabled = input.enabled === true;

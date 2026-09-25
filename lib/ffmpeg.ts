@@ -124,7 +124,7 @@ function parseCrf(value: string | undefined, fallback: number): string {
 
 /**
  * Encode settings for final exports vs previews.
- * Finals default to high quality (slow/medium + low CRF) so captions stay sharp.
+ * Finals use a near-transparent encode; source resolution is preserved upstream.
  */
 function exportEncodeProfile(options: {
   previewQuality?: boolean;
@@ -159,10 +159,12 @@ function exportEncodeProfile(options: {
   const preset =
     process.env.FFMPEG_CAPTION_PRESET?.trim() ||
     process.env.FFMPEG_EXPORT_PRESET?.trim() ||
-    (lowMemory ? "medium" : "slow");
+    // CRF controls visual quality. `medium` keeps the same near-lossless CRF
+    // while avoiding the very large CPU penalty of the slow preset.
+    "medium";
   const crf = parseCrf(
     process.env.FFMPEG_EXPORT_CRF,
-    lowMemory ? 16 : 14
+    10
   );
 
   return {
@@ -212,7 +214,11 @@ export interface MediaProbeResult {
 export function runCommand(
   command: string,
   args: string[],
-  options?: { timeoutMs?: number }
+  options?: {
+    timeoutMs?: number;
+    /** Receives complete stdout/stderr lines while the process is running. */
+    onOutputLine?: (line: string) => void;
+  }
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     // Never use shell — on Windows it breaks quoted paths and yt-dlp section globs (*time-time)
@@ -222,6 +228,8 @@ export function runCommand(
     });
     let stdout = "";
     let stderr = "";
+    let stdoutRemainder = "";
+    let stderrRemainder = "";
     let settled = false;
     const timeoutMs = options?.timeoutMs;
     const timer =
@@ -230,9 +238,18 @@ export function runCommand(
             if (settled) return;
             settled = true;
             try {
-              proc.kill("SIGKILL");
+              if (process.platform === "win32" && proc.pid) {
+                const killer = spawn(
+                  "taskkill",
+                  ["/pid", String(proc.pid), "/T", "/F"],
+                  { shell: false, windowsHide: true }
+                );
+                killer.on("error", () => {});
+              } else {
+                proc.kill("SIGKILL");
+              }
             } catch {
-              // ignore
+              // The process may have exited between the timeout and kill.
             }
             reject(
               new Error(
@@ -242,12 +259,43 @@ export function runCommand(
           }, timeoutMs)
         : null;
 
-    proc.stdout.on("data", (d) => (stdout += d.toString()));
-    proc.stderr.on("data", (d) => (stderr += d.toString()));
+    const emitLines = (chunk: string, stream: "stdout" | "stderr") => {
+      if (!options?.onOutputLine) return;
+      const pending = (stream === "stdout" ? stdoutRemainder : stderrRemainder) + chunk;
+      const lines = pending.split(/\r?\n/);
+      const remainder = lines.pop() ?? "";
+      if (stream === "stdout") stdoutRemainder = remainder;
+      else stderrRemainder = remainder;
+      for (const line of lines) {
+        try {
+          options.onOutputLine(line);
+        } catch {
+          // A telemetry callback must never crash or fail the media process.
+        }
+      }
+    };
+    proc.stdout.on("data", (d) => {
+      const chunk = d.toString();
+      stdout += chunk;
+      emitLines(chunk, "stdout");
+    });
+    proc.stderr.on("data", (d) => {
+      const chunk = d.toString();
+      stderr += chunk;
+      emitLines(chunk, "stderr");
+    });
     proc.on("close", (code) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (options?.onOutputLine) {
+        try {
+          if (stdoutRemainder) options.onOutputLine(stdoutRemainder);
+          if (stderrRemainder) options.onOutputLine(stderrRemainder);
+        } catch {
+          // Ignore progress-consumer failures after the command has finished.
+        }
+      }
       if (code === 0) resolve({ stdout, stderr });
       else
         reject(
@@ -263,6 +311,49 @@ export function runCommand(
       reject(err);
     });
   });
+}
+
+/** Parse FFmpeg's machine-readable `-progress` timestamp into seconds. */
+export function parseFfmpegProgressSeconds(line: string): number | null {
+  const match = /^out_time=(\d+):(\d+):(\d+(?:\.\d+)?)$/.exec(line.trim());
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const seconds = Number(match[3]);
+  const total = hours * 3600 + minutes * 60 + seconds;
+  return Number.isFinite(total) ? total : null;
+}
+
+export function ffmpegRenderTimeoutMs(durationSeconds: number): number {
+  const configured = Number.parseInt(
+    process.env.FFMPEG_RENDER_TIMEOUT_MS?.trim() ?? "",
+    10
+  );
+  if (Number.isFinite(configured)) {
+    return Math.min(30 * 60_000, Math.max(60_000, configured));
+  }
+  // Allow slower CPU hosts plenty of time while ensuring a wedged encoder can
+  // never hold a render worker forever.
+  return Math.min(
+    10 * 60_000,
+    Math.max(2 * 60_000, 60_000 + Math.ceil(durationSeconds) * 8_000)
+  );
+}
+
+export function ffmpegProgressHandler(
+  durationSeconds: number,
+  onProgress?: (progress: number) => void
+): ((line: string) => void) | undefined {
+  if (!onProgress || durationSeconds <= 0) return undefined;
+  let lastProgress = -1;
+  return (line: string) => {
+    const seconds = parseFfmpegProgressSeconds(line);
+    if (seconds == null) return;
+    const progress = Math.min(1, Math.max(0, seconds / durationSeconds));
+    if (progress <= lastProgress) return;
+    lastProgress = progress;
+    onProgress(progress);
+  };
 }
 
 export async function probeMedia(filePath: string): Promise<MediaProbeResult> {
@@ -645,6 +736,34 @@ export async function extractSoloTimelineFrame(
   await runCommand(getFfmpegPath(), args);
 }
 
+/** Crisp 9:16 still used when face-aware thumbnail selection is unavailable. */
+export async function extractPortraitThumbnailFrame(
+  inputPath: string,
+  outputPath: string,
+  timeSeconds: number,
+  width = 720,
+  height = 1280,
+  quality = 2
+): Promise<void> {
+  await runCommand(getFfmpegPath(), [
+    "-y",
+    "-ss",
+    String(Math.max(0, timeSeconds)),
+    "-i",
+    inputPath,
+    "-an",
+    "-sn",
+    "-dn",
+    "-frames:v",
+    "1",
+    "-vf",
+    `scale=${width}:${height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width}:${height},format=yuvj420p`,
+    "-q:v",
+    String(quality),
+    outputPath,
+  ]);
+}
+
 /**
  * Extract a strip of tiny timeline thumbnails in ONE ffmpeg pass.
  * Decodes keyframes only (`-skip_frame nokey`), so it runs ~70x faster than
@@ -823,6 +942,8 @@ export interface RenderShortOptions {
   verticalLayout?: ResolvedVerticalLayout;
   /** Faster encode preset for low-res preview renders. */
   previewQuality?: boolean;
+  /** Actual encoded media progress, from zero to one. */
+  onProgress?: (progress: number) => void;
 }
 
 function subtitleFilter(
@@ -873,9 +994,10 @@ export async function fastCutSegment(
   inputPath: string,
   outputPath: string,
   startSeconds: number,
-  durationSeconds: number
+  durationSeconds: number,
+  onProgress?: (progress: number) => void
 ): Promise<void> {
-  await runCommand(getFfmpegPath(), [
+  const args = [
     "-y",
     "-nostdin",
     "-loglevel",
@@ -894,8 +1016,15 @@ export async function fastCutSegment(
     "copy",
     "-avoid_negative_ts",
     "make_zero",
-    outputPath,
-  ]);
+  ];
+  if (onProgress) {
+    args.push("-stats_period", "0.25", "-progress", "pipe:2", "-nostats");
+  }
+  args.push(outputPath);
+  await runCommand(getFfmpegPath(), args, {
+    timeoutMs: ffmpegRenderTimeoutMs(durationSeconds),
+    onOutputLine: ffmpegProgressHandler(durationSeconds, onProgress),
+  });
 }
 
 /**
@@ -910,7 +1039,6 @@ export async function accurateCutSegment(
   startSeconds: number,
   durationSeconds: number
 ): Promise<void> {
-  const lowMemory = isFfmpegLowMemoryMode();
   await runCommand(getFfmpegPath(), [
     "-y",
     "-nostdin",
@@ -931,9 +1059,9 @@ export async function accurateCutSegment(
     "-preset",
     process.env.FFMPEG_CAPTION_PRESET?.trim() ||
       process.env.FFMPEG_EXPORT_PRESET?.trim() ||
-      (lowMemory ? "medium" : "slow"),
+      "slow",
     "-crf",
-    parseCrf(process.env.FFMPEG_EXPORT_CRF, lowMemory ? 16 : 14),
+    parseCrf(process.env.FFMPEG_EXPORT_CRF, 10),
     "-threads",
     String(getFfmpegThreadCount()),
     ...x264EncodeArgs(true),
@@ -946,7 +1074,7 @@ export async function accurateCutSegment(
     "-movflags",
     "+faststart",
     outputPath,
-  ]);
+  ], { timeoutMs: ffmpegRenderTimeoutMs(durationSeconds) });
 }
 
 async function encodeWithFilters(options: {
@@ -961,6 +1089,7 @@ async function encodeWithFilters(options: {
   startSeconds?: number;
   durationSeconds?: number;
   accurateSeek?: boolean;
+  onProgress?: (progress: number) => void;
 }): Promise<void> {
   const highQuality = Boolean(options.highQuality) && !options.previewQuality;
   const profile = exportEncodeProfile({
@@ -1036,8 +1165,16 @@ async function encodeWithFilters(options: {
     args.push("-an");
   }
 
+  const expectedDuration = Math.max(0, options.durationSeconds ?? 0);
+  if (options.onProgress) {
+    args.push("-stats_period", "0.25", "-progress", "pipe:2", "-nostats");
+  }
   args.push("-movflags", "+faststart", options.outputPath);
-  await runCommand(getFfmpegPath(), args);
+  await runCommand(getFfmpegPath(), args, {
+    timeoutMs:
+      expectedDuration > 0 ? ffmpegRenderTimeoutMs(expectedDuration) : undefined,
+    onOutputLine: ffmpegProgressHandler(expectedDuration, options.onProgress),
+  });
 }
 
 /** Downscale 4K+ cuts before vertical encode to avoid OOM on small containers. */
@@ -1086,6 +1223,7 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
     captionAppearance,
     verticalLayout,
     previewQuality,
+    onProgress,
   } = options;
 
   const verticalHeight = getRenderVerticalHeight();
@@ -1101,7 +1239,13 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
   const needsReencode = format === "vertical" || !!srtPath;
 
   if (!needsReencode) {
-    await fastCutSegment(inputPath, outputPath, startTimeSeconds, duration);
+    await fastCutSegment(
+      inputPath,
+      outputPath,
+      startTimeSeconds,
+      duration,
+      onProgress
+    );
     return;
   }
 
@@ -1161,6 +1305,7 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
         startSeconds: seekStart,
         durationSeconds: seekDuration,
         accurateSeek,
+        onProgress,
       });
       return;
     }
@@ -1200,6 +1345,7 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
       startSeconds: seekStart,
       durationSeconds: seekDuration,
       accurateSeek,
+      onProgress,
     });
   } finally {
     for (const file of tempFiles) {
@@ -1248,6 +1394,8 @@ export interface RenderSequenceOptions {
   denoiseAudio?: boolean;
   verticalBackground?: "crop" | "blur";
   mediaOverlays?: RenderSequenceMediaOverlay[];
+  /** Actual encoded media progress, from zero to one. */
+  onProgress?: (progress: number) => void;
 }
 
 function overlayPosition(
@@ -1423,6 +1571,12 @@ export async function renderSequence(options: RenderSequenceOptions): Promise<vo
   if (isFfmpegLowMemoryMode()) {
     args.push("-filter_threads", "1", "-filter_complex_threads", "1", "-max_muxing_queue_size", "1024");
   }
+  if (options.onProgress) {
+    args.push("-stats_period", "0.25", "-progress", "pipe:2", "-nostats");
+  }
   args.push("-t", String(totalDuration), "-movflags", "+faststart", options.outputPath);
-  await runCommand(getFfmpegPath(), args);
+  await runCommand(getFfmpegPath(), args, {
+    timeoutMs: ffmpegRenderTimeoutMs(totalDuration),
+    onOutputLine: ffmpegProgressHandler(totalDuration, options.onProgress),
+  });
 }

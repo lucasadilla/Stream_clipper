@@ -6,6 +6,7 @@ import {
   SessionAccessError,
 } from "@/services/sessionAccessService";
 import { getBillingAccountIdFromRequest } from "@/services/billingService";
+import { hasAppAccess } from "@/services/billingService";
 
 export { SessionAccessError };
 
@@ -105,4 +106,18 @@ export async function requireClipAccessForUser(
         : [],
     },
   };
+}
+
+export async function requirePaidAuthUserId(request?: Request): Promise<string> {
+  const userId = await requireAuthUserId(request);
+  const billing = await prisma.billingAccount.findUnique({
+    where: { userId },
+  });
+  if (!billing || !hasAppAccess(billing)) {
+    throw new SessionAccessError(
+      "An active Clipper subscription is required for Autopilot.",
+      402
+    );
+  }
+  return userId;
 }

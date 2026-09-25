@@ -4,6 +4,7 @@ import { usePathname, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import posthog from "posthog-js";
 import { capturePosthogPageview } from "@/lib/posthogPageview";
+import { captureClientAttribution } from "@/lib/clientAttribution";
 
 /**
  * App Router navigations do not fire a full page load, and
@@ -57,6 +58,14 @@ function PostHogNavigationTracker() {
       window.clearTimeout(timeoutId);
     };
   }, [pathname, search]);
+
+  useEffect(() => {
+    if (pathname !== "/" || typeof window === "undefined") return;
+    const key = "clipper_landing_viewed";
+    if (window.sessionStorage.getItem(key)) return;
+    window.sessionStorage.setItem(key, "1");
+    posthog.capture("landing_page_viewed", captureClientAttribution());
+  }, [pathname]);
 
   return null;
 }

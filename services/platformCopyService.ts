@@ -60,31 +60,52 @@ function normalizeCopy(
     const cleaned = value ? stripInternalClipCopy(value) : "";
     return cleaned || fallbackValue;
   };
-  const hashtags = [...new Set([...(raw.hashtags ?? []), ...fallback.hashtags]
+  const isYouTube = platform.startsWith("youtube");
+  const isX = platform === "x";
+  const isMergedCaption =
+    platform === "tiktok" ||
+    platform.startsWith("instagram") ||
+    platform.startsWith("facebook");
+
+  const rawHashtags = [...new Set([...(raw.hashtags ?? []), ...fallback.hashtags]
     .map(cleanHashtag)
     .filter(Boolean))]
     .slice(0, preset.hashtagRange?.hardMax ?? preset.hashtagRange?.max ?? 8);
-  const isYouTube = platform.startsWith("youtube");
-  const isX = platform === "x";
-  return {
-    title: cleanText(raw.title, fallback.title)?.slice(0, preset.titleLimit ?? 100) ?? null,
-    caption: isX || isYouTube
+
+  let caption =
+    isX || isYouTube
       ? null
-      : cleanText(raw.caption, fallback.caption)?.slice(0, preset.captionLimit ?? 2200) ?? null,
-    postText: isX
-      ? cleanText(raw.postText, fallback.postText)?.slice(0, preset.postTextLimit ?? 280) ?? null
+      : cleanText(raw.caption, fallback.caption)?.slice(0, preset.captionLimit ?? 2200) ?? null;
+  if (isMergedCaption && caption) {
+    const tags = rawHashtags.join(" ").trim();
+    if (tags && !caption.toLocaleLowerCase().includes(tags.toLocaleLowerCase())) {
+      caption = `${caption} ${tags}`.replace(/\s+/g, " ").trim().slice(0, preset.captionLimit ?? 2200);
+    }
+  }
+
+  let postText = isX
+    ? cleanText(raw.postText, fallback.postText)?.slice(0, preset.postTextLimit ?? 280) ?? null
+    : null;
+  if (isX && postText) {
+    const tags = rawHashtags.join(" ").trim();
+    if (tags && !postText.toLocaleLowerCase().includes(tags.toLocaleLowerCase())) {
+      postText = `${postText} ${tags}`.replace(/\s+/g, " ").trim().slice(0, preset.postTextLimit ?? 280);
+    }
+  }
+
+  return {
+    title: isYouTube
+      ? cleanText(raw.title, fallback.title)?.slice(0, preset.titleLimit ?? 100) ?? null
       : null,
+    caption,
+    postText,
     description: isYouTube
       ? cleanText(raw.description, fallback.description)?.slice(0, 5000) ?? null
       : null,
-    hashtags: hashtags.length > 0 ? hashtags : fallback.hashtags,
-    tags: isYouTube
-      ? [...new Set([...(raw.tags ?? []), ...fallback.tags].map((tag) => tag.trim()).filter(Boolean))].slice(0, 15)
-      : [],
+    hashtags: [],
+    tags: [],
     quoteText: cleanText(raw.quoteText, fallback.quoteText)?.slice(0, 180) ?? null,
-    thumbnailText: isYouTube
-      ? cleanText(raw.thumbnailText, fallback.thumbnailText)?.slice(0, 80) ?? null
-      : null,
+    thumbnailText: null,
     pinnedComment: isYouTube
       ? cleanText(raw.pinnedComment, fallback.pinnedComment)?.slice(0, 500) ?? null
       : null,
@@ -104,7 +125,6 @@ Limits:
 - title: ${preset.titleLimit ?? 100} characters maximum when used
 - caption: ${preset.captionLimit ?? 2200} characters maximum when used
 - postText: ${preset.postTextLimit ?? 280} characters maximum when used
-- hashtags: ${preset.hashtagRange ? `${preset.hashtagRange.min}-${preset.hashtagRange.max}` : "0-8"}
 - quoteText: one punchy quote under 120 characters
 
 Editorial requirements:
@@ -113,7 +133,8 @@ Editorial requirements:
 - Never invent a name, keyword, quote, outcome, or controversy.
 - Make the title/caption worth clicking without vague clickbait.
 - Fill every field that ${preset.name} actually uses. Keep irrelevant fields null.
-- Hashtags and search tags must be specific and discoverable, not generic filler.
+- For TikTok, Instagram, Facebook, and X: put hashtags INLINE at the end of caption/postText. Do not rely on a separate hashtags array.
+- For YouTube Shorts: provide title, description, and pinnedComment only. Leave hashtags, tags, and thumbnailText null/empty.
 - Description should explain what happens and why it matters without discussing the clipping process.
 - Pinned comments should ask a specific conversation-starting question about this clip.
 

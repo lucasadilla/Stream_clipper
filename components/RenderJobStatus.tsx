@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { cn } from "@/lib/cn";
 import { renderJobDownloadUrl } from "@/lib/downloadUrls";
 import { triggerFileDownload } from "@/lib/clientDownload";
+import { videoDownloadFilename } from "@/lib/downloadFilename";
 import type { RenderJobLogEntry } from "@/lib/renderJobLogs";
 import type { PostRenderQualityReview } from "@/lib/postRenderCritic";
 import { OperationProgress } from "@/components/ui/operation-progress";
@@ -20,6 +21,7 @@ interface RenderJob {
   completedAt?: string | null;
   logs?: RenderJobLogEntry[] | null;
   qualityReview?: PostRenderQualityReview | null;
+  downloadFilename?: string;
 }
 
 interface RenderJobStatusProps {
@@ -51,7 +53,10 @@ export function RenderJobStatus({
       if (data.job.status === "completed" && data.job.outputPath) {
         onComplete?.(data.job.outputPath);
         try {
-          await triggerFileDownload(fileUrl, `short-${jobId}.mp4`);
+          await triggerFileDownload(
+            fileUrl,
+            data.job.downloadFilename || videoDownloadFilename("Clipper Export")
+          );
         } catch {
           // User can click Download Short below
         }
@@ -93,11 +98,13 @@ export function RenderJobStatus({
   const renderStage =
     latestStep === "prepare_source"
       ? "Preparing source media…"
+      : latestStep === "download_source" || latestStep?.startsWith("download_source_attempt_")
+        ? "Fetching the full-quality source…"
       : latestStep === "source_ready"
         ? "Source ready; assembling the edit…"
         : latestStep === "captions"
           ? "Compositing captions…"
-          : latestStep === "cutting"
+            : latestStep === "cutting" || latestStep === "encoding"
             ? "Encoding the final video…"
             : latestStep === "quality_check"
               ? "Reviewing export quality…"
@@ -110,7 +117,10 @@ export function RenderJobStatus({
   async function handleDownload() {
     setDownloading(true);
     try {
-      await triggerFileDownload(fileUrl, `short-${jobId}.mp4`);
+      await triggerFileDownload(
+        fileUrl,
+        job?.downloadFilename || videoDownloadFilename("Clipper Export")
+      );
     } catch (err) {
       alert(err instanceof Error ? err.message : "Download failed");
     } finally {

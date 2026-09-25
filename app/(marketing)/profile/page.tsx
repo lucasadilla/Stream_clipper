@@ -213,26 +213,14 @@ export default function ProfilePage() {
         minute: "2-digit",
       })
     : null;
-  const betaExpiresAt = account.betaExpiresAt
-    ? new Date(account.betaExpiresAt).toLocaleDateString(undefined, {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-      })
-    : null;
-
   const exportsUsed = usage?.usage.renderedExports ?? 0;
   const exportsLimit = usage?.entitlements?.exportsLimit ?? null;
-  const uploadsUsed = usage?.usage.videoUploads ?? usage?.usage.streamStarts ?? 0;
-  const uploadsLimit = usage?.entitlements?.uploadsLimit ?? null;
   const nextInvoice = formatMoney(
     stripeDetails?.nextInvoiceAmountCents ?? null,
     stripeDetails?.currency ?? null
   );
-  const isCreatorBeta = usage?.plan?.name === "Creator Beta";
   const canUpgrade =
     !account.unlimitedAccess &&
-    !isCreatorBeta &&
     (account.plan === "creator" || account.plan === "pro");
 
   return (
@@ -242,21 +230,6 @@ export default function ProfilePage() {
       message={message}
       error={error}
     >
-      {isCreatorBeta && (
-        <div className="mt-7 border-l-2 border-[var(--color-accent)] bg-[#0a1008] px-5 py-4">
-          <p className="text-sm font-bold text-[var(--color-accent)]">
-            Creator Beta: Active
-          </p>
-          <div className="mt-3 grid gap-2 text-sm text-white/80 sm:grid-cols-2">
-            <p>Videos used: {exportsUsed} / 25</p>
-            <p>Uploads used this month: {uploadsUsed} / 10</p>
-            {betaExpiresAt && (
-              <p className="sm:col-span-2">Access ends: {betaExpiresAt}</p>
-            )}
-          </div>
-        </div>
-      )}
-
       {usage?.nearLimit && canUpgrade && (
         <div className="mt-6 border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 px-5 py-4">
           <p className="text-sm font-semibold text-[var(--color-accent)]">
@@ -324,9 +297,7 @@ export default function ProfilePage() {
             </form>
         </AccountSettingsPanel>
 
-        <AccountSettingsPanel
-          title={isCreatorBeta ? "Creator Beta access" : "Subscription"}
-        >
+        <AccountSettingsPanel title="Subscription">
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <p className="text-xs uppercase text-white/50">Plan</p>
@@ -337,17 +308,12 @@ export default function ProfilePage() {
                       Unlimited
                     </span>
                   )}
-                  {isCreatorBeta && !account.unlimitedAccess && (
-                    <span className="ml-2 text-xs font-semibold uppercase text-[var(--color-accent)]">
-                      Active
-                    </span>
-                  )}
                 </p>
               </div>
               <div>
                 <p className="text-xs uppercase text-white/50">Status</p>
                 <p className="mt-1 text-lg font-semibold capitalize text-white">
-                  {isCreatorBeta ? "Active" : account.status}
+                  {account.status}
                 </p>
               </div>
               {periodEnd && (
@@ -363,12 +329,6 @@ export default function ProfilePage() {
                       </span>
                     )}
                   </p>
-                </div>
-              )}
-              {isCreatorBeta && betaExpiresAt && (
-                <div>
-                  <p className="text-xs uppercase text-white/50">Access ends</p>
-                  <p className="mt-1 text-sm text-white/80">{betaExpiresAt}</p>
                 </div>
               )}
               {account.canManageBilling && stripeDetails?.paymentMethodLast4 && (
@@ -417,10 +377,6 @@ export default function ProfilePage() {
                 <p className="text-sm text-[var(--color-muted)]">
                   Comp access — no Stripe billing to manage.
                 </p>
-              ) : isCreatorBeta ? (
-                <p className="text-sm text-[var(--color-muted)]">
-                  Free access during the Creator Beta. No billing method required.
-                </p>
               ) : (
                 <Link
                   href="/#pricing"
@@ -446,25 +402,7 @@ export default function ProfilePage() {
             )}
         </AccountSettingsPanel>
 
-        <AccountSettingsPanel
-          title={isCreatorBeta ? "Creator Beta usage" : "Usage this month"}
-        >
-            {isCreatorBeta ? (
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="border border-[var(--color-card-border)] bg-[#020302] px-4 py-4">
-                  <p className="text-xs uppercase text-white/50">Finished videos</p>
-                  <p className="mt-2 text-xl font-semibold text-white">
-                    {formatLimit(String(exportsUsed), exportsLimit ?? 25)}
-                  </p>
-                </div>
-                <div className="border border-[var(--color-card-border)] bg-[#020302] px-4 py-4">
-                  <p className="text-xs uppercase text-white/50">Video uploads</p>
-                  <p className="mt-2 text-xl font-semibold text-white">
-                    {formatLimit(String(uploadsUsed), uploadsLimit ?? 10)}
-                  </p>
-                </div>
-              </div>
-            ) : (
+        <AccountSettingsPanel title="Usage this month">
             <div>
               <div className="border border-[var(--color-card-border)] bg-[#020302] px-4 py-4">
                 <p className="text-xs uppercase text-white/50">Finished videos</p>
@@ -477,7 +415,6 @@ export default function ProfilePage() {
                 </p>
               </div>
             </div>
-            )}
         </AccountSettingsPanel>
 
         <AccountSettingsPanel>

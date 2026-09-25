@@ -105,36 +105,26 @@ export async function registerWithPassword(params: {
     },
   });
 
-  const passwordHash = await hashPassword(params.password);
-
   if (existing) {
     if (existing.passwordHash) {
       throw new Error("An account with this email already exists. Sign in instead.");
     }
-    // Existing OAuth or legacy passwordless user adding a password.
-    const updated = await prisma.user.update({
-      where: { id: existing.id },
-      data: {
-        passwordHash,
-        emailVerified: existing.email ? new Date() : new Date(),
-        name: params.name?.trim() || existing.name,
-      },
-      select: { id: true, email: true, name: true },
-    });
-    if (!updated.email) throw new Error("Account is missing an email");
-    return {
-      id: updated.id,
-      email: updated.email,
-      name: updated.name,
-    };
+    const providers = existing.accounts
+      .map((account) => account.provider)
+      .filter((provider) => provider !== "credentials");
+    throw new Error(
+      providers.length
+        ? `This email already uses ${providers.map(prettyProvider).join(" / ")}. Sign in with that provider.`
+        : "An account with this email already exists. Sign in instead."
+    );
   }
 
+  const passwordHash = await hashPassword(params.password);
   const created = await prisma.user.create({
     data: {
       email,
       name: params.name?.trim() || null,
       passwordHash,
-      emailVerified: new Date(),
     },
     select: { id: true, email: true, name: true },
   });

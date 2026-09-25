@@ -5,6 +5,10 @@ import { errorResponse, jsonResponse } from "@/lib/utils";
 import { getBillingAccountIdFromRequest } from "@/services/billingService";
 import { getPostHogClient } from "@/lib/posthog-server";
 import { normalizeCaptionAppearance } from "@/lib/captionAppearance";
+import {
+  ensureSessionBillingAccess,
+  SessionAccessError,
+} from "@/services/sessionAccessService";
 
 const schema = z.object({
   description: z.string().min(3),
@@ -22,6 +26,8 @@ export async function POST(
 ) {
   try {
     const { sessionId } = await params;
+    const billingAccountId = getBillingAccountIdFromRequest(request);
+    await ensureSessionBillingAccess(sessionId, billingAccountId);
     const body = await request.json();
     const { description, autoRender, includeCaptions, captionAppearance } =
       schema.parse(body);
@@ -38,7 +44,6 @@ export async function POST(
         : undefined,
     });
 
-    const billingAccountId = getBillingAccountIdFromRequest(request);
     if (billingAccountId) {
       getPostHogClient().capture({
         distinctId: billingAccountId,
@@ -61,6 +66,9 @@ export async function POST(
       contextUsed: result.contextUsed,
     });
   } catch (error) {
+    if (error instanceof SessionAccessError) {
+      return errorResponse(error.message, error.status);
+    }
     if (error instanceof z.ZodError) {
       return errorResponse(error.errors[0]?.message ?? "Invalid input", 400);
     }

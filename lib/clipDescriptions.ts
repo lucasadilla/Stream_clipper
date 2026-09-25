@@ -45,8 +45,22 @@ export function extractClipHook(transcriptText: string | null | undefined): stri
     .map((s) => s.trim())
     .filter((s) => s.length >= 16 && s.length <= 90);
   if (sentences.length > 0) {
-    const mid = sentences[Math.floor(sentences.length / 2)]!;
-    return tidyTitle(mid);
+    const scored = sentences
+      .map((sentence, index) => {
+        const lower = sentence.toLowerCase();
+        const payoffHits =
+          lower.match(
+            /\b(?:because|but|finally|realized|revealed|won|lost|failed|worked|changed|wrong|right|never|actually|reason|problem|answer)\b/g
+          )?.length ?? 0;
+        const energyHits = lower.match(/[!?]/g)?.length ?? 0;
+        const middleDistance = Math.abs(index - (sentences.length - 1) / 2);
+        return {
+          sentence,
+          score: payoffHits * 3 + energyHits * 1.5 - middleDistance * 0.15,
+        };
+      })
+      .sort((a, b) => b.score - a.score);
+    return tidyTitle(scored[0]!.sentence);
   }
 
   // Fall back to a clean word window, never a mid-word cut.
@@ -58,13 +72,23 @@ export function extractClipHook(transcriptText: string | null | undefined): stri
 }
 
 function tidyTitle(raw: string): string {
-  let t = raw.replace(/^["'\s]+|["'\s]+$/g, "").replace(/\s+/g, " ").trim();
+  let t = raw
+    .replace(/\b(what|that|it|he|she|there|who)\s+s\b/gi, "$1's")
+    .replace(/\b(can|don|won|isn|aren|wasn|weren|didn|doesn)\s+t\b/gi, "$1't")
+    .replace(/\b(um+|uh+|erm+)\b/gi, " ")
+    .replace(/\b(\w+)(?:\s+\1\b)+/gi, "$1")
+    .replace(/^["'\s]+|["'\s]+$/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+[a-z]$/g, "")
+    .trim();
   // Drop leading filler words.
   t = t.replace(/^(um+|uh+|like|so|and|but|okay|ok|yeah|well)\b[,:]?\s+/i, "");
   if (!t) return "Stream moment";
   // Title-case lightly for Shorts-style hooks when all lowercase.
-  if (t === t.toLowerCase() && t.length <= 48) {
-    t = t.replace(/\b([a-z])/g, (m) => m.toUpperCase());
+  if (t.length <= 64) {
+    t = t.replace(/(^|\s)([a-z])/g, (_, space: string, letter: string) =>
+      `${space}${letter.toUpperCase()}`
+    );
   }
   if (t.length > 64) t = t.slice(0, 64).replace(/\s+\S*$/, "").trim();
   return t;

@@ -67,6 +67,12 @@ function parseInput(value: unknown): CreatePlatformExportPackInput {
     }
   }
   const copyOverrides: CreatePlatformExportPackInput["copyOverrides"] = {};
+  const captionOptions: CreatePlatformExportPackInput["captionOptions"] = {};
+  if (raw.captionOptions && typeof raw.captionOptions === "object") {
+    for (const [key, enabled] of Object.entries(raw.captionOptions)) {
+      if (isPlatformKey(key) && typeof enabled === "boolean") captionOptions[key] = enabled;
+    }
+  }
   if (raw.copyOverrides && typeof raw.copyOverrides === "object") {
     for (const [key, value] of Object.entries(raw.copyOverrides)) {
       if (!isPlatformKey(key)) continue;
@@ -83,6 +89,7 @@ function parseInput(value: unknown): CreatePlatformExportPackInput {
     xQuoteLayout: quoteLayout(raw.xQuoteLayout),
     outputOptions,
     copyOverrides,
+    captionOptions,
   };
 }
 

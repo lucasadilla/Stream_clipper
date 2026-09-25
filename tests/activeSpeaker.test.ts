@@ -4,6 +4,12 @@ import {
   buildAudioVisualActiveSpeakerTimeline,
 } from "@/lib/activeSpeaker";
 import type { FaceTrack } from "@/lib/verticalLayout";
+import {
+  SPEAKER_CAPTION_PALETTE_VERSION,
+  SPEAKER_CONTEXT_VERSION,
+  SPEAKER_IDENTITY_RESOLVER_VERSION,
+  type SpeakerContext,
+} from "@/lib/speakerContext";
 
 function speakerTrack(options: {
   id: string;
@@ -142,5 +148,72 @@ describe("audio-visual active speaker detection", () => {
 
     expect(timeline.audioAvailable).toBe(false);
     expect(activeSpeakerDecisionAt(timeline, 7)?.trackId).toBe("right");
+  });
+
+  it("does not follow an unrelated visible face for an off-screen voice", () => {
+    const left = speakerTrack({
+      id: "left",
+      x: 0.08,
+      audioAt: () => 0.85,
+      activityAt: (index) => (index < 8 ? 0.75 : 0.02),
+    });
+    const right = speakerTrack({
+      id: "right",
+      x: 0.7,
+      audioAt: () => 0.85,
+      activityAt: (index) => (index >= 8 ? 0.95 : 0.02),
+    });
+    const speakerContext: SpeakerContext = {
+      version: SPEAKER_CONTEXT_VERSION,
+      identityResolverVersion: SPEAKER_IDENTITY_RESOLVER_VERSION,
+      paletteVersion: SPEAKER_CAPTION_PALETTE_VERSION,
+      sourceSessionId: "session",
+      cacheKey: "key",
+      updatedAt: new Date(0).toISOString(),
+      speakers: [
+        {
+          id: "remote",
+          index: 0,
+          color: "#FFF4D6",
+          visibility: "offscreen",
+          confidence: 0.95,
+          providerAliases: [],
+        },
+      ],
+      intervals: [
+        {
+          startTimeSeconds: 0,
+          endTimeSeconds: 8.1,
+          speakerIds: ["remote"],
+          primarySpeakerId: "remote",
+          confidence: 0.95,
+          overlapping: false,
+          source: "provider_diarization",
+        },
+      ],
+      corrections: [],
+      models: {
+        diarizationProviders: ["deepgram"],
+        identityResolver: SPEAKER_IDENTITY_RESOLVER_VERSION,
+      },
+      metrics: {
+        totalWords: 1,
+        attributedWords: 1,
+        unresolvedWords: 0,
+        overlapSeconds: 0,
+      },
+    };
+    const timeline = buildAudioVisualActiveSpeakerTimeline({
+      tracks: [left, right],
+      clipStartSeconds: 0,
+      clipEndSeconds: 8,
+      primaryTrackId: "left",
+      speakerContext,
+    });
+
+    expect(activeSpeakerDecisionAt(timeline, 7)?.trackId).toBe("left");
+    expect(activeSpeakerDecisionAt(timeline, 7)?.speakerId).toBe("remote");
+    expect(activeSpeakerDecisionAt(timeline, 7)?.reason).toBe("offscreen_hold");
+    expect(timeline.switchCount).toBe(0);
   });
 });

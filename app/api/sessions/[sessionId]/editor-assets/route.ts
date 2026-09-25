@@ -1,11 +1,15 @@
 import path from "path";
 import { mkdir, writeFile } from "fs/promises";
-import { prisma } from "@/lib/db";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import {
   getEditorAssetsDir,
   toRelativeStoragePath,
 } from "@/lib/storage";
+import { getBillingAccountIdFromRequest } from "@/services/billingService";
+import {
+  ensureSessionBillingAccess,
+  SessionAccessError,
+} from "@/services/sessionAccessService";
 
 const MAX_ASSET_BYTES = 100 * 1024 * 1024;
 const ALLOWED_TYPES = new Set([
@@ -30,11 +34,10 @@ export async function POST(
 ) {
   try {
     const { sessionId } = await params;
-    const session = await prisma.streamSession.findUnique({
-      where: { id: sessionId },
-      select: { id: true },
-    });
-    if (!session) return errorResponse("Session not found", 404);
+    await ensureSessionBillingAccess(
+      sessionId,
+      getBillingAccountIdFromRequest(request)
+    );
 
     const form = await request.formData();
     const file = form.get("file");
@@ -56,6 +59,9 @@ export async function POST(
       name: file.name,
     });
   } catch (error) {
+    if (error instanceof SessionAccessError) {
+      return errorResponse(error.message, error.status);
+    }
     return errorResponse(
       error instanceof Error ? error.message : "Failed to upload editor asset",
       500

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPlatformVideoFilters } from "@/services/platformRenderService";
+import { buildPlatformVideoFilters, renderPlatformVideo } from "@/services/platformRenderService";
 import { platformSettings } from "@/lib/platforms/presets";
 
 function renderInput(sourceIncludesCaptions: boolean) {
@@ -20,6 +20,12 @@ function renderInput(sourceIncludesCaptions: boolean) {
 }
 
 describe("platform render quality", () => {
+  it("rejects a captioned master when a caption-free download was requested", async () => {
+    const input = renderInput(true);
+    input.settings.burnSubtitles = false;
+    input.settings.includeCaptions = false;
+    await expect(renderPlatformVideo(input)).rejects.toThrow("caption-free source");
+  });
   it("uses high-quality scaling for platform transforms", () => {
     const filters = buildPlatformVideoFilters(renderInput(false), false);
     expect(filters[0]).toContain("flags=lanczos");

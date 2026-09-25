@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { ensureBillingAccountForAuthUser } from "@/services/authAccountService";
-import { BILLING_ACCOUNT_COOKIE } from "@/lib/stripe";
+import {
+  BILLING_ACCOUNT_COOKIE,
+  serializeBillingAccountCookie,
+} from "@/lib/stripe";
 import { errorResponse } from "@/lib/utils";
 
 /**
@@ -27,13 +30,17 @@ export async function POST() {
     });
 
     const response = NextResponse.json({ account, authUser: session.user });
-    response.cookies.set(BILLING_ACCOUNT_COOKIE, account.id, {
+    response.cookies.set(
+      BILLING_ACCOUNT_COOKIE,
+      serializeBillingAccountCookie(account.id),
+      {
       httpOnly: true,
       sameSite: "lax",
       secure: process.env.NODE_ENV === "production",
       path: "/",
       maxAge: 60 * 60 * 24 * 365,
-    });
+      }
+    );
     return response;
   } catch (error) {
     const message =

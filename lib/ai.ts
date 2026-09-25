@@ -264,7 +264,7 @@ When you CAN match the user's request to an excerpt:
   "found": true,
   "answer": "1 sentence confirming what you found",
   "clipSuggestions": [{
-    "title": "Short catchy title (max 60 chars) using words from the excerpt",
+    "title": "Specific 5-9 word headline naming the tension or payoff",
     "startTimeSeconds": 840,
     "endTimeSeconds": 875,
     "reason": "2-3 sentences explaining why this matches. Quote transcript/chat text from context.",
@@ -285,6 +285,10 @@ STRICT RULES:
 - Clip length 20-45 seconds, tight around the moment
 - Prefer transcript/chat_window excerpts over metadata
 - Do NOT invent dialogue that is not in the excerpts
+- Make the title concrete and clickable: use a strong verb and the actual
+  conflict, reveal, mistake, insight, decision, or payoff from the excerpt
+- Remove verbal filler, repeated slang, and broken transcript fragments
+- Do not use generic clickbait, vague pronouns, timestamps, or ALL CAPS
 - Chat quotes are nice-to-have, not required — transcript-only matches are fine
 - If multiple excerpts fit, pick the strongest match to the user's wording`;
 

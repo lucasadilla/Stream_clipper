@@ -68,7 +68,10 @@ const modelVisualContextSchema = z.object({
       z.object({
         timeSeconds: z.number(),
         type: visualNarrativeRoleSchema,
-        description: z.string().min(2).max(320),
+        description: z.preprocess(
+          (value) => (typeof value === "string" ? value.trim().slice(0, 320) : value),
+          z.string().min(2).max(320)
+        ),
         confidence: z.number().min(0).max(1),
         evidenceTimestampSeconds: z.number().optional(),
       })

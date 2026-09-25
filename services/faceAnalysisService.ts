@@ -30,9 +30,16 @@ import {
   generateProfessionalReframePlan,
   type SceneChange,
 } from "@/lib/professionalReframe";
+import {
+  applyAutomaticSpeakerFaceMappings,
+  ensureSpeakerContext,
+} from "@/services/speakerContextService";
+import { buildAudioVisualActiveSpeakerTimeline } from "@/lib/activeSpeaker";
+import { inferAudioVisualSpeakerMatches } from "@/lib/audioVisualSpeakerMatcher";
+import { hasPaidSessionAccess } from "@/services/sessionAccessService";
 
 const FACE_ANALYSIS_WORKER_ID = `face-worker-${process.pid}`;
-const FACE_ANALYSIS_VERSION = 6;
+const FACE_ANALYSIS_VERSION = 8;
 
 /** Result JSON stored on the job row (adds source info to the shared shape). */
 export interface StoredFaceAnalysisResult extends FacecamAnalysisResult {
@@ -198,8 +205,8 @@ export async function requestFaceAnalysis(options: {
   const start = Math.max(0, options.startSeconds);
   const end = Math.max(start + 0.5, options.endSeconds);
   const sampleFps = Math.min(
-    8,
-    Math.max(1, options.sampleFps ?? (options.priority ? 4 : 3))
+    12,
+    Math.max(1, options.sampleFps ?? (options.priority ? 6 : 4))
   );
 
   if (!options.force) {
@@ -347,7 +354,10 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
     job.startSeconds,
     job.endSeconds,
     undefined,
-    { purpose: "preview" }
+    // Priority Clip Studio analysis uses the same HD segment as the final
+    // render. This catches small/profile faces that disappear in a 360p proxy,
+    // and the downloaded segment is reused by the subsequent export.
+    { purpose: job.sampleFps >= 6 ? "final" : "preview" }
   );
   const sourceMedia = await prisma.sourceMedia.findUnique({
     where: { id: clipSource.sourceMediaId },
@@ -369,11 +379,11 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
       endSeconds: clipSource.renderEnd,
       sampleFps: job.sampleFps,
       analysisWidth: Number.parseInt(
-        process.env.FACECAM_ANALYSIS_WIDTH ?? "640",
+        process.env.FACECAM_ANALYSIS_WIDTH ?? "960",
         10
-      ) || 640,
+      ) || 960,
       minConfidence: FACE_ANALYSIS_CONFIG.minConfidence,
-      maxFrames: 600,
+      maxFrames: 1200,
       ffmpegPath: getFfmpegPath(),
     },
     (percent) => {
@@ -405,6 +415,20 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
       rect,
       confidence: d.confidence,
     };
+    if (Array.isArray(d.appearanceDescriptor)) {
+      const descriptor = d.appearanceDescriptor
+        .slice(0, 64)
+        .filter((value): value is number =>
+          typeof value === "number" && Number.isFinite(value)
+        );
+      if (descriptor.length >= 8) detection.appearanceDescriptor = descriptor;
+    }
+    if (
+      typeof d.lookDirectionX === "number" &&
+      Number.isFinite(d.lookDirectionX)
+    ) {
+      detection.lookDirectionX = Math.min(1, Math.max(-1, d.lookDirectionX));
+    }
     if (
       typeof d.mouthOpenRatio === "number" &&
       Number.isFinite(d.mouthOpenRatio)
@@ -442,6 +466,23 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
       },
     ];
   });
+
+  // A face occupying the same screen position immediately after an edit is a
+  // different shot, even if its box looks geometrically identical. Give every
+  // detection a scene number so identity association cannot leak across cuts.
+  const sceneBoundaries = sceneChanges
+    .map((change) => change.timestampSeconds)
+    .sort((a, b) => a - b);
+  for (const detection of detections) {
+    let sceneId = 0;
+    while (
+      sceneId < sceneBoundaries.length &&
+      detection.timestampSeconds >= sceneBoundaries[sceneId]! - 1e-6
+    ) {
+      sceneId++;
+    }
+    detection.sceneId = sceneId;
+  }
 
   const tracks = buildFaceTracks(detections);
   const sampledFrames = Math.max(1, worker.sampledFrames);
@@ -560,6 +601,28 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
     };
   });
 
+  let speakerContext = await ensureSpeakerContext(job.streamSessionId).catch(
+    () => null
+  );
+  if (speakerContext && tracks.length > 1) {
+    const visualTimeline = buildAudioVisualActiveSpeakerTimeline({
+      tracks,
+      clipStartSeconds: job.startSeconds,
+      clipEndSeconds: job.endSeconds,
+      primaryTrackId: primaryCandidate?.trackId,
+      sceneChanges,
+    });
+    const matches = inferAudioVisualSpeakerMatches({
+      context: speakerContext,
+      visualTimeline,
+    });
+    if (matches.length > 0) {
+      speakerContext = await applyAutomaticSpeakerFaceMappings(
+        job.streamSessionId,
+        matches
+      ).catch(() => speakerContext);
+    }
+  }
   const professionalPlan = generateProfessionalReframePlan({
     clipId: job.clipSuggestionId ?? jobId,
     clipStartSeconds: job.startSeconds,
@@ -571,6 +634,7 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
     sampledFrames,
     primaryTrackId: primaryCandidate?.trackId,
     sceneChanges,
+    speakerContext: speakerContext ?? undefined,
   });
 
   const result: StoredFaceAnalysisResult = {
@@ -710,6 +774,17 @@ export async function processOneFaceAnalysisJob(): Promise<boolean> {
   if (!jobId) return false;
 
   try {
+    const job = await prisma.faceAnalysisJob.findUnique({
+      where: { id: jobId },
+      select: { streamSessionId: true },
+    });
+    if (!job || !(await hasPaidSessionAccess(job.streamSessionId))) {
+      await failFaceAnalysisJob(
+        jobId,
+        "An active subscription is required for face analysis."
+      );
+      return true;
+    }
     await executeFaceAnalysisJob(jobId);
   } catch (error) {
     const message =

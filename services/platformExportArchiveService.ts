@@ -3,17 +3,13 @@ import { existsSync } from "fs";
 import { ZipArchive, type ArchiverError } from "archiver";
 import { resolveStoragePath } from "@/lib/storage";
 import {
+  platformPackDownloadFilename,
+  videoDownloadFilename,
+} from "@/lib/downloadFilename";
+import {
   getPlatformExportPack,
   subtitlePathForExportOutput,
 } from "@/services/platformExportService";
-
-function safeName(value: string): string {
-  return value
-    .trim()
-    .replace(/[^a-zA-Z0-9 _-]/g, "")
-    .replace(/\s+/g, "-")
-    .slice(0, 70) || "platform-export-pack";
-}
 
 function copyText(item: NonNullable<Awaited<ReturnType<typeof getPlatformExportPack>>>["exports"][number]) {
   const hashtags = Array.isArray(item.hashtags)
@@ -53,7 +49,12 @@ export async function createPlatformExportArchive(packId: string) {
     const folder = item.platform;
     const outputPath = resolveStoragePath(item.outputPath!);
     if (existsSync(outputPath)) {
-      archive.file(outputPath, { name: `${folder}/${item.platform}.mp4` });
+      archive.file(outputPath, {
+        name: `${folder}/${videoDownloadFilename(
+          item.title || pack.clipSuggestion.title,
+          item.platform
+        )}`,
+      });
     }
     if (item.thumbnailPath) {
       const thumbnailPath = resolveStoragePath(item.thumbnailPath);
@@ -95,6 +96,6 @@ export async function createPlatformExportArchive(packId: string) {
   void archive.finalize();
   return {
     archive,
-    filename: `${safeName(pack.clipSuggestion.title)}-platform-pack.zip`,
+    filename: platformPackDownloadFilename(pack.clipSuggestion.title),
   };
 }

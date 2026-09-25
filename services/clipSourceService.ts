@@ -21,8 +21,10 @@ import {
   listSourceCandidateFiles,
 } from "@/lib/storage";
 import {
+  acceptableFinalSourceHeight,
   downloadClipSegmentFromStream,
   isYtDlpAvailable,
+  minFinalSourceHeight,
   renderSourceMaxHeight,
   resolveStreamCaptureUrl,
 } from "@/services/youtubeDownloadService";
@@ -385,7 +387,7 @@ function isOriginalUpload(
   sourceVideoId: string
 ): boolean {
   const name = path.basename(source.originalFilename).toLowerCase();
-  if (source.isLiveRecording || isSegmentFile(name) || name === "preview.mp4") {
+  if (source.isLiveRecording || isSegmentFile(name) || name === "preview.mp4" || name.startsWith("studio-preview-")) {
     return false;
   }
   if (/^source(?:\.f\d+)?\./i.test(name)) return false;
@@ -416,6 +418,8 @@ async function highQualityRemoteClipSource(options: {
   startTimeSeconds: number;
   endTimeSeconds: number;
   liveFromStart: boolean;
+  onProgress?: (progress: number) => void | Promise<void>;
+  onAttempt?: (attempt: number) => void | Promise<void>;
 }): Promise<{
   sourceMediaId: string;
   renderStart: number;
@@ -439,10 +443,18 @@ async function highQualityRemoteClipSource(options: {
 
   await ensureDir(uploadDir);
   let probe = null;
-  if (existsSync(outputPath)) {
+  const cachedMedia = await prisma.sourceMedia.findFirst({
+    where: { streamSessionId: options.streamSessionId, filePath: relativePath },
+  });
+  const minHeight = minFinalSourceHeight();
+  if (existsSync(outputPath) && isVerifiedRenderSource(cachedMedia?.codecInfo)) {
     try {
       probe = await probeMedia(outputPath);
-      if (!probe.videoCodec || !(await canDecodeVideoFrame(outputPath))) {
+      if (
+        !probe.videoCodec ||
+        (probe.height ?? 0) < minHeight ||
+        !(await canDecodeVideoFrame(outputPath))
+      ) {
         probe = null;
       }
     } catch {
@@ -465,11 +477,23 @@ async function highQualityRemoteClipSource(options: {
           liveFromStart: options.liveFromStart,
           timeoutMs,
           attemptTimeoutMs: renderSourceAttemptTimeoutMs(timeoutMs),
+          minVideoHeight: minHeight,
+          onProgress: (progress) => {
+            void options.onProgress?.(progress);
+          },
+          onAttempt: (attempt) => {
+            void options.onAttempt?.(attempt);
+          },
         }
       );
       probe = await probeMedia(tempPath);
       if (!probe.videoCodec || !(await canDecodeVideoFrame(tempPath))) {
         throw new Error("High-resolution clip source was not decodable");
+      }
+      if ((probe.height ?? 0) < minHeight) {
+        throw new Error(
+          `High-resolution clip source was only ${probe.width}x${probe.height}; need at least ${minHeight}p`
+        );
       }
       await fs.unlink(outputPath).catch(() => {});
       await fs.rename(tempPath, outputPath);
@@ -491,7 +515,7 @@ async function highQualityRemoteClipSource(options: {
     width: probe.width || null,
     height: probe.height || null,
     fps: probe.fps || null,
-    codecInfo: toJsonValue(probe.raw),
+    codecInfo: toJsonValue({ ...probe.raw, renderSourceQualityVersion: 3 }),
     isLiveRecording: false,
   };
   const media = existing
@@ -508,6 +532,11 @@ async function highQualityRemoteClipSource(options: {
       probe.durationSeconds || segmentEnd - segmentStart
     ),
   };
+}
+
+export function isVerifiedRenderSource(codecInfo: unknown): boolean {
+  return Boolean(codecInfo && typeof codecInfo === "object" &&
+    "renderSourceQualityVersion" in codecInfo && codecInfo.renderSourceQualityVersion === 3);
 }
 
 function localClipFromSource(options: {
@@ -612,6 +641,39 @@ export async function ensureClipSourceForRender(
       }
     }
 
+    const minHeight = minFinalSourceHeight();
+    const goodEnoughHeight = acceptableFinalSourceHeight();
+    type LocalFinalCandidate = {
+      sourceMediaId: string;
+      renderStart: number;
+      renderEnd: number;
+      absolutePath: string;
+      height: number;
+      verified: boolean;
+    };
+    let bestLocalFinal: LocalFinalCandidate | null = null;
+
+    const considerLocal = async (
+      candidate: {
+        sourceMediaId: string;
+        renderStart: number;
+        renderEnd: number;
+      },
+      absolutePath: string,
+      height: number,
+      verified: boolean
+    ) => {
+      if (height < minHeight) return;
+      if (!(await canDecodeVideoFrame(absolutePath))) return;
+      if (
+        !bestLocalFinal ||
+        height > bestLocalFinal.height ||
+        (height === bestLocalFinal.height && verified && !bestLocalFinal.verified)
+      ) {
+        bestLocalFinal = { ...candidate, absolutePath, height, verified };
+      }
+    };
+
     // Reuse a previously downloaded master segment whenever it fully covers
     // the new trim. Extending or shortening a clip should not redownload media.
     for (const source of allSources) {
@@ -621,16 +683,16 @@ export async function ensureClipSourceForRender(
       if (!match || !fileExists(source.filePath)) continue;
       const segmentStart = Number(match[1]);
       const segmentEnd = Number(match[2]);
-      const requestedHeight = Number(match[3]);
+      const height = source.height ?? 0;
       if (
         segmentStart > startTimeSeconds ||
         segmentEnd < endTimeSeconds ||
-        requestedHeight < 720
+        height < minHeight ||
+        !isVerifiedRenderSource(source.codecInfo)
       ) {
         continue;
       }
       const absolutePath = resolveStoragePath(source.filePath);
-      if (!(await canDecodeVideoFrame(absolutePath))) continue;
       const local = localClipFromSource({
         sourceMediaId: source.id,
         segmentStart,
@@ -639,25 +701,19 @@ export async function ensureClipSourceForRender(
         availableDuration: source.durationSeconds ?? segmentEnd - segmentStart,
       });
       if (local) {
-        await options.onStage?.(18, "cached_source");
-        return preferAudibleClipSource(
-          streamSessionId,
-          absolutePath,
-          local,
-          startTimeSeconds,
-          endTimeSeconds
-        );
+        await considerLocal(local, absolutePath, height, true);
       }
     }
 
-    // A configured 720p+ local capture is already export quality and avoids
-    // a second platform download entirely.
+    // Prefer a local HD capture when remote retrieval fails. Live/edit copies
+    // are never treated as already-final — we still attempt a master download.
     for (const source of allSources) {
       if (
         source.isLiveRecording ||
         source.originalFilename === "preview.mp4" ||
+        source.originalFilename.startsWith("studio-preview-") ||
         isSegmentFile(source.originalFilename) ||
-        (source.height ?? 0) < 720 ||
+        (source.height ?? 0) < minHeight ||
         !fileExists(source.filePath)
       ) {
         continue;
@@ -675,22 +731,49 @@ export async function ensureClipSourceForRender(
         endTimeSeconds,
         availableDuration: duration,
       });
-      if (local && (await canDecodeVideoFrame(absolutePath))) {
-        await options.onStage?.(18, "local_hd_source");
-        return preferAudibleClipSource(
-          streamSessionId,
-          absolutePath,
-          local,
-          startTimeSeconds,
-          endTimeSeconds
-        );
+      if (local) {
+        await considerLocal(local, absolutePath, source.height ?? 0, false);
       }
+    }
+
+    const resolveLocalFinal = async (candidate: LocalFinalCandidate, stage: string) => {
+      await options.onStage?.(18, stage);
+      return preferAudibleClipSource(
+        streamSessionId,
+        candidate.absolutePath,
+        {
+          sourceMediaId: candidate.sourceMediaId,
+          renderStart: candidate.renderStart,
+          renderEnd: candidate.renderEnd,
+        },
+        startTimeSeconds,
+        endTimeSeconds
+      );
+    };
+
+    // TypeScript does not track assignments performed by the async collector.
+    const resolvedLocalFinal = bestLocalFinal as LocalFinalCandidate | null;
+    // Any validated local full-source copy at typical VOD quality is already
+    // sufficient for a 1080x1920 export. Do not make the user wait for the
+    // network just to redownload pixels we already have on disk.
+    if (
+      resolvedLocalFinal &&
+      resolvedLocalFinal.height >= goodEnoughHeight
+    ) {
+      return resolveLocalFinal(resolvedLocalFinal, "cached_source");
     }
 
     const streamUrl = resolveStreamCaptureUrl(session) || session.youtubeUrl;
     if (streamUrl) {
+      let sourceProgressQueue = Promise.resolve();
+      const reportSourceProgress = (progress: number, step: string) => {
+        sourceProgressQueue = sourceProgressQueue.then(async () => {
+          await options.onStage?.(progress, step);
+        });
+      };
       try {
         await options.onStage?.(18, "download_source");
+        let highestDownloadProgress = 18;
         const master = await highQualityRemoteClipSource({
           streamSessionId,
           streamUrl,
@@ -701,23 +784,57 @@ export async function ensureClipSourceForRender(
             (session.liveStatus === "live" ||
               session.liveStatus === "upcoming" ||
               activelyRecording),
+          onProgress: (progress) => {
+            const next = Math.max(
+              highestDownloadProgress,
+              18 + Math.floor(Math.min(1, Math.max(0, progress)) * 5)
+            );
+            if (next === highestDownloadProgress) return;
+            highestDownloadProgress = next;
+            reportSourceProgress(next, "download_source");
+          },
+          onAttempt: (attempt) => {
+            reportSourceProgress(
+              highestDownloadProgress,
+              `download_source_attempt_${attempt}`
+            );
+          },
         });
+        await sourceProgressQueue;
         if (master) return master;
       } catch (error) {
-        // Direct segment retrieval can be blocked by a platform while the local
-        // proxy remains usable. Preserve reliability and render from the proxy.
+        await sourceProgressQueue.catch(() => {});
         const message =
           error instanceof Error ? error.message : String(error);
+        if (resolvedLocalFinal) {
+          await options.onWarning?.(
+            "source_fallback",
+            `Full-quality source retrieval failed; using local ${resolvedLocalFinal.height}p copy. ${message}`
+          );
+          console.warn(
+            "[render] Full-quality source retrieval failed; using local HD:",
+            message
+          );
+          return resolveLocalFinal(resolvedLocalFinal, "local_hd_source");
+        }
         await options.onWarning?.(
           "source_fallback",
-          `High-resolution source unavailable; using the local edit copy. ${message}`
+          `Full-quality source retrieval failed. ${message}`
         );
         console.warn(
-          "[render] High-resolution source unavailable; using local capture:",
+          "[render] Full-quality source retrieval failed:",
           message
         );
       }
+    } else if (bestLocalFinal) {
+      return resolveLocalFinal(bestLocalFinal, "local_hd_source");
     }
+
+    // Final downloads must never silently use a low-resolution editing proxy.
+    // Leave the preview usable and let the user retry or supply the original.
+    throw new Error(
+      "Could not retrieve the full-quality source video. Export stopped instead of enlarging the low-resolution preview. Retry the render or upload the original video."
+    );
   }
 
   // 1. preview.mp4 — only use it after a successful structural probe. File

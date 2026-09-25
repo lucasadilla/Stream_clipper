@@ -5,6 +5,7 @@ import {
   isSpecificClickableTitle,
   sanitizeRankedClipTitle,
 } from "@/services/clipRankingService";
+import { buildSpecificClipTitle } from "@/lib/clipDescriptions";
 
 describe("contextual clip title cleanup", () => {
   it("removes ellipses and trailing punctuation", () => {
@@ -77,5 +78,34 @@ describe("clickable title quality gate", () => {
       .toBe(false);
     expect(isSpecificClickableTitle("Inde Navarrette on the biggest ones"))
       .toBe(false);
+    expect(
+      isSpecificClickableTitle("Bro why you saying LOL Bro what s so f")
+    ).toBe(false);
+    expect(
+      isSpecificClickableTitle("Creator Explains Why Creator Explains Why")
+    ).toBe(false);
+  });
+});
+
+describe("fallback clip title writing", () => {
+  it("prefers the concrete payoff over a flat middle sentence", () => {
+    expect(
+      buildSpecificClipTitle({
+        startTimeSeconds: 20,
+        endTimeSeconds: 50,
+        transcriptText:
+          "I started with the old camera. The setup took a while. But the new camera finally worked because I changed the cable!",
+      })
+    ).toContain("New Camera Finally Worked");
+  });
+
+  it("cleans broken ASR contractions and dangling fragments", () => {
+    const title = buildSpecificClipTitle({
+      startTimeSeconds: 0,
+      endTimeSeconds: 30,
+      transcriptText: "what s happening with the camera right now f",
+    });
+    expect(title).toContain("What's");
+    expect(title).not.toMatch(/\sf$/i);
   });
 });

@@ -5,7 +5,9 @@ import posthog from "posthog-js";
 import { formatSeconds, formatDuration } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import { clipDownloadUrl } from "@/lib/downloadUrls";
-import { triggerFileDownload } from "@/lib/clientDownload";
+import { prepareFileDownload, triggerFileDownload } from "@/lib/clientDownload";
+import { renderClip } from "@/lib/clipActions";
+import { videoDownloadFilename } from "@/lib/downloadFilename";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
 
 export interface ClipSuggestionData {
@@ -44,9 +46,10 @@ export function ClipSuggestionCard({
 
   const duration = clip.endTimeSeconds - clip.startTimeSeconds;
   const downloadUrl = rendered ? clipDownloadUrl(clip.id) : null;
-  const safeFilename = `${clip.title.slice(0, 40) || "short"}.mp4`;
+  const safeFilename = videoDownloadFilename(clip.title);
 
   async function handleRender() {
+    const preparedDownload = prepareFileDownload();
     setLoading(true);
     setError(null);
     posthog.capture("clip_suggestion_rendered", {
@@ -54,22 +57,18 @@ export function ClipSuggestionCard({
       duration_seconds: duration,
     });
     try {
-      const res = await fetch(`/api/clips/${clip.id}/render`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          includeCaptions,
-          captionAppearance,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Render failed");
-
-      const url = data.downloadUrl ?? clipDownloadUrl(clip.id);
+      const result = await renderClip(
+        clip.id,
+        "vertical",
+        includeCaptions,
+        captionAppearance
+      );
+      const url = result.downloadUrl;
       setRendered(true);
       onUpdate({ ...clip, status: "rendered" });
-      await triggerFileDownload(url, safeFilename);
+      await preparedDownload.start(url, safeFilename);
     } catch (err) {
+      preparedDownload.cancel();
       const message = err instanceof Error ? err.message : "Render failed";
       setError(message);
       alert(message);

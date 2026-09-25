@@ -10,6 +10,7 @@ import {
 import {
   baseYtDlpArgs,
   getYtDlpDeploymentArgs,
+  preferredBestAudio,
   resolveYtDlpInvocation,
   detectDownloadPlatform,
   isLiveFromStartUnavailable,
@@ -145,7 +146,7 @@ function startCompanionAudioDownload(
             : ["--no-live-from-start"]
           : []),
         "-f",
-        "bestaudio/best",
+        `${preferredBestAudio()}/best`,
         "--no-part",
         "-o",
         outputPath,

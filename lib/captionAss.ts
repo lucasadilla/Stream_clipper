@@ -24,7 +24,17 @@ import {
 
 export interface GenerateAssOptions {
   cues: Array<
-    Pick<CaptionCue, "startTimeSeconds" | "endTimeSeconds" | "text"> & {
+    Pick<
+      CaptionCue,
+      | "startTimeSeconds"
+      | "endTimeSeconds"
+      | "text"
+      | "speakerId"
+      | "speakerConfidence"
+      | "speakerColor"
+      | "speakerLabel"
+      | "overlappingSpeakerIds"
+    > & {
       words?: CaptionWord[];
       direction?: CaptionCueDirection;
     }
@@ -40,6 +50,8 @@ export interface GenerateAssOptions {
    * `stylized` (editor preview parity): keeps decorative motion.
    */
   syncMode?: "precise" | "stylized";
+  /** Accessible alternative to color-only attribution. */
+  showSpeakerLabels?: boolean;
   overlays?: Array<{
     startTimeSeconds: number;
     endTimeSeconds: number;
@@ -187,13 +199,15 @@ function timedWordAssBody(
     const startMs = toMs(word.start);
     const endMs = Math.max(startMs + 1, toMs(word.end));
     const timedColor = karaokeEnabled
-      ? `\\t(${startMs},${startMs},\\c${highlightColor}&)\\t(${endMs},${endMs},\\c${baseColor}&)`
+      ? `${startMs === 0 ? `\\c${highlightColor}&` : `\\t(${startMs},${startMs},\\c${highlightColor}&)`}\\t(${endMs},${endMs},\\c${baseColor}&)`
       : "";
     // Precise burns snap visible on the spoken timestamp. Stylized preview
     // keeps a short fade so motion still matches the editor.
     const reveal = wordReveal
       ? preciseSync
-        ? `\\alpha&HFF&\\t(${startMs},${startMs},\\alpha&H00&)`
+        // libass interprets t(0,0,...) as an animation over the ENTIRE cue.
+        // An immediate first word must use a static opaque override.
+        ? startMs === 0 ? "\\alpha&H00&" : `\\alpha&HFF&\\t(${startMs},${startMs},\\alpha&H00&)`
         : `\\alpha&HFF&\\blur2\\t(${startMs},${startMs + 140},\\alpha&H00&\\blur${restingBlur.toFixed(2)})`
       : "";
     parts.push(
@@ -318,6 +332,10 @@ export function generateAss(options: GenerateAssOptions): string {
     const start = formatAssTime(cue.startTimeSeconds, "start");
     const end = formatAssTime(cue.endTimeSeconds, "end");
     const sourceAnimation = effectiveCaptionAnimation(cue, app.animation);
+    const cueBaseColor =
+      cue.speakerColor && (cue.speakerConfidence ?? 1) >= 0.45
+        ? hexToAssColor(cue.speakerColor)
+        : baseColor;
     // Suppress decorative entrance motion on final burns, but keep the
     // source animation so word-reveal / karaoke still fire on STT timings.
     const animationTag = preciseSync
@@ -348,8 +366,18 @@ export function generateAss(options: GenerateAssOptions): string {
         ? captionWordsForAnimation(cue)
         : null;
 
-    const overrideParts = [blurTag, animationTag].filter(Boolean).join("");
+    const overrideParts = [
+      blurTag,
+      animationTag,
+      cueBaseColor !== baseColor ? `\\c${cueBaseColor}&` : "",
+    ]
+      .filter(Boolean)
+      .join("");
     const override = overrideParts ? `{${overrideParts}}` : "";
+    const speakerLabel =
+      options.showSpeakerLabels && cue.speakerLabel
+        ? `${escapeAssText(cue.speakerLabel)}: `
+        : "";
 
     if (words) {
       const body = timedWordAssBody(
@@ -358,7 +386,7 @@ export function generateAss(options: GenerateAssOptions): string {
         cue.endTimeSeconds,
         app.capitalization,
         maxChars,
-        baseColor,
+        cueBaseColor,
         highlightColor,
         app.karaokeEnabled,
         sourceAnimation === "wordReveal",
@@ -367,7 +395,7 @@ export function generateAss(options: GenerateAssOptions): string {
       );
       if (!body) {
         const fallback = escapeAssText(
-          applyCaptionCapitalization(cue.text, app.capitalization)
+          `${speakerLabel}${applyCaptionCapitalization(cue.text, app.capitalization)}`
         );
         dialogueLines.push(
           `Dialogue: 0,${start},${end},Default,,0,0,0,,${override}${fallback}`
@@ -375,13 +403,13 @@ export function generateAss(options: GenerateAssOptions): string {
         continue;
       }
       dialogueLines.push(
-        `Dialogue: 0,${start},${end},Default,,0,0,0,,${override}${body}`
+        `Dialogue: 0,${start},${end},Default,,0,0,0,,${override}${speakerLabel}${body}`
       );
       continue;
     }
 
     const body = escapeAssText(
-      applyCaptionCapitalization(cue.text, app.capitalization)
+      `${speakerLabel}${applyCaptionCapitalization(cue.text, app.capitalization)}`
     );
     dialogueLines.push(
       `Dialogue: 0,${start},${end},Default,,0,0,0,,${override}${body}`

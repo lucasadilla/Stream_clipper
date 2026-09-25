@@ -12,7 +12,7 @@ import {
   ensureClipSuggestionThumbnail,
   clipThumbRelativePath,
 } from "@/services/clipThumbnailService";
-import { getFramesDir, resolveStoragePath } from "@/lib/storage";
+import { resolveStoragePath } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -55,16 +55,10 @@ export async function GET(
       return errorResponse("Thumbnail not ready", 503);
     }
 
-    const dest = path.join(
-      getFramesDir(clip.streamSessionId),
-      `clip_${clip.id}.jpg`
-    );
+    const relative = clipThumbRelativePath(clip.streamSessionId, clip.id);
+    const dest = resolveStoragePath(relative);
     if (!existsSync(dest)) {
-      // Fall back to relative resolve
-      const relative = clipThumbRelativePath(clip.streamSessionId, clip.id);
-      const resolved = resolveStoragePath(relative);
-      if (!existsSync(resolved)) return errorResponse("Thumbnail missing", 404);
-      return streamJpeg(resolved, request);
+      return errorResponse("Thumbnail missing", 404);
     }
     return streamJpeg(dest, request);
   } catch (error) {

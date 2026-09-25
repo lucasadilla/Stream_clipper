@@ -201,13 +201,15 @@ function platformHashtags(
   keywords: string[],
   streamerName?: string | null
 ): string[] {
+  // YouTube Shorts does not use hashtags in the studio package.
+  if (platform === "youtube_shorts" || platform === "youtube_landscape") {
+    return [];
+  }
   const preset = PLATFORM_PRESETS[platform];
   const platformTags =
-    platform === "youtube_shorts"
-      ? ["#Shorts"]
-      : platform === "instagram_reels" || platform === "facebook_reels"
-        ? ["#Reels"]
-        : [];
+    platform === "instagram_reels" || platform === "facebook_reels"
+      ? ["#Reels"]
+      : [];
   const topical = [...keywords, streamerName ?? ""]
     .map(keywordToHashtag)
     .filter(Boolean);
@@ -222,6 +224,16 @@ function platformHashtags(
     }
   }
   return result.slice(0, max);
+}
+
+function mergeCaptionWithHashtags(caption: string, hashtags: string[], limit: number): string {
+  const tags = hashtags.join(" ").trim();
+  if (!tags) return caption.slice(0, limit).trim();
+  if (caption.toLocaleLowerCase().includes(tags.toLocaleLowerCase())) {
+    return caption.slice(0, limit).trim();
+  }
+  const joined = `${caption} ${tags}`.replace(/\s+/g, " ").trim();
+  return joined.slice(0, limit).trim();
 }
 
 /** Strong deterministic copy used immediately and whenever AI is unavailable. */
@@ -240,31 +252,34 @@ export function buildFallbackPlatformCopy(input: PlatformCopyContext): PlatformC
   const captionBody = summary.toLocaleLowerCase().includes(title.toLocaleLowerCase())
     ? summary
     : `${title}. ${summary}`;
-  const caption = captionBody.slice(0, preset.captionLimit ?? 2200).trim();
-  const xText = `${captionBody}${hashtags[0] ? ` ${hashtags[0]}` : ""}`.slice(0, 280).trim();
+  const captionLimit = preset.captionLimit ?? 2200;
+  const caption = mergeCaptionWithHashtags(captionBody, hashtags, captionLimit);
+  const xText = mergeCaptionWithHashtags(
+    captionBody,
+    hashtags,
+    preset.postTextLimit ?? 280
+  );
   const primaryTopic = keywords[0] ?? input.streamerName ?? "this moment";
-  const tags = uniqueByLowercase([
-    ...keywords,
-    ...(input.streamerName ? [input.streamerName] : []),
-  ]).slice(0, 15);
+  const isYouTube = input.platform.startsWith("youtube");
+  const isMergedCaptionPlatform =
+    input.platform === "tiktok" ||
+    input.platform.startsWith("instagram") ||
+    input.platform.startsWith("facebook");
 
   return {
-    title,
-    caption:
-      input.platform === "x" || input.platform.startsWith("youtube")
-        ? null
-        : caption,
+    title: isYouTube ? title : null,
+    caption: isMergedCaptionPlatform ? caption : null,
     postText: input.platform === "x" ? xText : null,
-    description: input.platform.startsWith("youtube")
+    description: isYouTube
       ? [summary, creatorContext].filter(Boolean).join("\n\n")
       : null,
-    hashtags,
-    tags: input.platform.startsWith("youtube") ? tags : [],
+    // Studio posts hashtags inline for TikTok/IG/FB/X; keep the array empty so
+    // the UI does not surface a separate hashtag field.
+    hashtags: [],
+    tags: [],
     quoteText: extractClipHook(cleanSourceText(input.transcriptText)) ?? title,
-    thumbnailText: input.platform.startsWith("youtube")
-      ? title.split(/\s+/).slice(0, 6).join(" ").toLocaleUpperCase()
-      : null,
-    pinnedComment: input.platform.startsWith("youtube")
+    thumbnailText: null,
+    pinnedComment: isYouTube
       ? `What’s your take on ${primaryTopic}?`
       : null,
   };

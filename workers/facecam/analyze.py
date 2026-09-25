@@ -6,10 +6,10 @@ Reads JSON from stdin:
     "videoPath": "...",
     "startSeconds": 0,
     "endSeconds": 10,
-    "sampleFps": 4,
-    "analysisWidth": 640,
+    "sampleFps": 6,
+    "analysisWidth": 960,
     "minConfidence": 0.55,
-    "maxFrames": 600
+    "maxFrames": 1200
   }
 
 Writes JSON to stdout with per-frame detections (normalized 0-1 rects).
@@ -61,6 +61,72 @@ def _rect_center(rect: dict[str, float]) -> tuple[float, float]:
     return (rect["x"] + rect["width"] * 0.5, rect["y"] + rect["height"] * 0.5)
 
 
+def _rect_iou(a: dict[str, float], b: dict[str, float]) -> float:
+    left = max(a["x"], b["x"])
+    top = max(a["y"], b["y"])
+    right = min(a["x"] + a["width"], b["x"] + b["width"])
+    bottom = min(a["y"] + a["height"], b["y"] + b["height"])
+    intersection = max(0.0, right - left) * max(0.0, bottom - top)
+    union = a["width"] * a["height"] + b["width"] * b["height"] - intersection
+    return intersection / union if union > 1e-8 else 0.0
+
+
+def _appearance_descriptor(frame, rect: dict[str, float]) -> list[float] | None:
+    """Return an anonymous color+texture cue for identity association.
+
+    This is intentionally not a biometric embedding. It only separates people
+    within one clip and is discarded with the analysis result.
+    """
+    import cv2
+    import numpy as np
+
+    height, width = frame.shape[:2]
+    left = max(0, min(width - 1, int((rect["x"] + rect["width"] * 0.06) * width)))
+    right = max(left + 1, min(width, int((rect["x"] + rect["width"] * 0.94) * width)))
+    top = max(0, min(height - 1, int((rect["y"] + rect["height"] * 0.04) * height)))
+    bottom = max(top + 1, min(height, int((rect["y"] + rect["height"] * 0.98) * height)))
+    patch = frame[top:bottom, left:right]
+    if patch.size == 0 or patch.shape[0] < 6 or patch.shape[1] < 6:
+        return None
+
+    hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+    histogram = cv2.calcHist([hsv], [0, 1], None, [8, 4], [0, 180, 0, 256]).flatten()
+    histogram_norm = float(np.linalg.norm(histogram))
+    if histogram_norm > 1e-6:
+        histogram = histogram / histogram_norm
+
+    gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+    texture = cv2.resize(gray, (4, 4), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+    texture = texture.flatten()
+    texture -= float(np.mean(texture))
+    texture_norm = float(np.linalg.norm(texture))
+    if texture_norm > 1e-6:
+        texture = texture / texture_norm
+
+    descriptor = np.concatenate((histogram * 0.78, texture * 0.32))
+    norm = float(np.linalg.norm(descriptor))
+    if norm <= 1e-6:
+        return None
+    return [round(float(value), 5) for value in descriptor / norm]
+
+
+def _descriptor_similarity(a, b) -> float | None:
+    if not isinstance(a, list) or not isinstance(b, list) or len(a) != len(b) or len(a) < 8:
+        return None
+    try:
+        dot = sum(float(left) * float(right) for left, right in zip(a, b))
+    except (TypeError, ValueError):
+        return None
+    return clamp01((dot - 0.25) / 0.75)
+
+
+def _attach_appearance_descriptors(frame, faces: list[dict[str, Any]]) -> None:
+    for face in faces:
+        descriptor = _appearance_descriptor(frame, face["rect"])
+        if descriptor is not None:
+            face["appearanceDescriptor"] = descriptor
+
+
 def _aligned_face_patch(
     gray,
     rect: dict[str, float],
@@ -107,6 +173,7 @@ def _attach_speaking_activity(frame, faces: list[dict[str, Any]], previous_faces
         center_x, center_y = _rect_center(rect)
         best_index = None
         best_distance = 1.0
+        best_match_score = float("inf")
         for index, previous in enumerate(previous_faces):
             if index in claimed_previous:
                 continue
@@ -114,9 +181,14 @@ def _attach_speaking_activity(frame, faces: list[dict[str, Any]], previous_faces
             previous_x, previous_y = _rect_center(previous_rect)
             distance = ((center_x - previous_x) ** 2 + (center_y - previous_y) ** 2) ** 0.5
             size_ratio = rect["width"] / max(1e-6, previous_rect["width"])
-            if 0.55 <= size_ratio <= 1.8 and distance < best_distance:
+            appearance = _descriptor_similarity(
+                face.get("appearanceDescriptor"), previous.get("appearanceDescriptor")
+            )
+            match_score = distance - (appearance or 0.0) * 0.055
+            if 0.55 <= size_ratio <= 1.8 and match_score < best_match_score:
                 best_index = index
                 best_distance = distance
+                best_match_score = match_score
 
         mouth_patch = _aligned_face_patch(
             gray, rect, 0.14, 0.86, 0.54, 0.92, (48, 24)
@@ -156,6 +228,7 @@ def _attach_speaking_activity(frame, faces: list[dict[str, Any]], previous_faces
                 "rect": rect,
                 "mouthPatch": mouth_patch,
                 "controlPatch": control_patch,
+                "appearanceDescriptor": face.get("appearanceDescriptor"),
             }
         )
     return current
@@ -288,7 +361,7 @@ class YuNetDetector:
         self._input_size: tuple[int, int] | None = None
         self._min_confidence = min_confidence
 
-    def detect(self, frame) -> list[dict[str, Any]]:
+    def detect(self, frame, timestamp_ms: int | None = None) -> list[dict[str, Any]]:
         h, w = frame.shape[:2]
         if self._input_size != (w, h):
             self._detector.setInputSize((w, h))
@@ -319,6 +392,217 @@ class YuNetDetector:
     def close(self) -> None:
         pass
 
+    def detect_region(self, frame) -> list[dict[str, Any]]:
+        return self.detect(frame)
+
+
+class MediaPipeFaceLandmarker:
+    """Dense landmarks, head direction, and mouth articulation.
+
+    YuNet remains the small-face detector. The landmarker runs beside it when
+    MediaPipe is installed and refines facial motion/composition while also
+    recovering profile faces YuNet occasionally misses.
+    """
+
+    name = "mediapipe-face-landmarker"
+    version = "float16-1"
+
+    def __init__(self, min_confidence: float) -> None:
+        import mediapipe as mp
+
+        model_path = _download_model(
+            "face_landmarker_v1.task",
+            "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
+            "face_landmarker/float16/1/face_landmarker.task",
+        )
+        self._mp = mp
+        options = mp.tasks.vision.FaceLandmarkerOptions(
+            base_options=mp.tasks.BaseOptions(model_asset_path=model_path),
+            running_mode=mp.tasks.vision.RunningMode.VIDEO,
+            num_faces=10,
+            min_face_detection_confidence=max(0.35, min_confidence - 0.12),
+            min_face_presence_confidence=max(0.35, min_confidence - 0.15),
+            min_tracking_confidence=0.4,
+            output_face_blendshapes=True,
+        )
+        self._detector = mp.tasks.vision.FaceLandmarker.create_from_options(options)
+        self._last_timestamp_ms = -1
+
+    def detect(self, frame, timestamp_ms: int | None = None) -> list[dict[str, Any]]:
+        import numpy as np
+
+        h, w = frame.shape[:2]
+        rgb = np.ascontiguousarray(frame[:, :, ::-1])
+        mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
+        safe_timestamp = max(self._last_timestamp_ms + 1, int(timestamp_ms or 0))
+        self._last_timestamp_ms = safe_timestamp
+        result = self._detector.detect_for_video(mp_image, safe_timestamp)
+        out: list[dict[str, Any]] = []
+        blendshape_sets = result.face_blendshapes or []
+        for index, landmarks in enumerate(result.face_landmarks or []):
+            if not landmarks:
+                continue
+            xs = [clamp01(point.x) for point in landmarks]
+            ys = [clamp01(point.y) for point in landmarks]
+            left, right = min(xs), max(xs)
+            top, bottom = min(ys), max(ys)
+            face_w = max(1e-4, right - left)
+            face_h = max(1e-4, bottom - top)
+            rect = normalize_rect(
+                (left - face_w * 0.08) * w,
+                (top - face_h * 0.1) * h,
+                face_w * 1.16 * w,
+                face_h * 1.2 * h,
+                w,
+                h,
+            )
+            if rect is None:
+                continue
+
+            mouth_width = math.hypot(
+                landmarks[291].x - landmarks[61].x,
+                landmarks[291].y - landmarks[61].y,
+            )
+            lip_gap = math.hypot(
+                landmarks[14].x - landmarks[13].x,
+                landmarks[14].y - landmarks[13].y,
+            )
+            mouth_activity = clamp01(lip_gap / max(1e-4, mouth_width) * 2.2)
+            if index < len(blendshape_sets):
+                for category in blendshape_sets[index]:
+                    if getattr(category, "category_name", "") == "jawOpen":
+                        mouth_activity = clamp01(
+                            mouth_activity * 0.35 + float(category.score) * 0.65
+                        )
+                        break
+
+            eye_mid_x = (landmarks[33].x + landmarks[263].x) * 0.5
+            eye_distance = abs(landmarks[263].x - landmarks[33].x)
+            look_direction = clamp01(
+                0.5 + ((landmarks[1].x - eye_mid_x) / max(1e-4, eye_distance)) * 1.15
+            ) * 2.0 - 1.0
+            out.append(
+                {
+                    "rect": rect,
+                    "confidence": 0.86,
+                    "mouthOpenRatio": round(mouth_activity, 5),
+                    "lookDirectionX": round(max(-1.0, min(1.0, look_direction)), 4),
+                }
+            )
+        return out
+
+    def close(self) -> None:
+        try:
+            self._detector.close()
+        except Exception:
+            pass
+
+
+class CompositeDetector:
+    """Fuse high-recall YuNet boxes with MediaPipe landmark refinement."""
+
+    def __init__(self, primary, landmarker: MediaPipeFaceLandmarker) -> None:
+        self._primary = primary
+        self._landmarker = landmarker
+        self.name = f"{primary.name}+{landmarker.name}"
+        self.version = f"{primary.version}+{landmarker.version}"
+
+    def detect(self, frame, timestamp_ms: int | None = None) -> list[dict[str, Any]]:
+        import cv2
+
+        primary_faces = self._primary.detect(frame, timestamp_ms)
+        primary_count = len(primary_faces)
+        try:
+            landmark_faces = self._landmarker.detect(frame, timestamp_ms)
+        except Exception:
+            landmark_faces = []
+
+        used_primary: set[int] = set()
+        for landmark_face in landmark_faces:
+            best_index = None
+            best_overlap = 0.0
+            landmark_center = _rect_center(landmark_face["rect"])
+            for index, primary_face in enumerate(primary_faces):
+                if index in used_primary:
+                    continue
+                overlap = _rect_iou(landmark_face["rect"], primary_face["rect"])
+                primary_center = _rect_center(primary_face["rect"])
+                center_distance = math.hypot(
+                    landmark_center[0] - primary_center[0],
+                    landmark_center[1] - primary_center[1],
+                )
+                if overlap > best_overlap and (overlap >= 0.16 or center_distance <= 0.055):
+                    best_index = index
+                    best_overlap = overlap
+            if best_index is None:
+                primary_faces.append(landmark_face)
+                continue
+            used_primary.add(best_index)
+            primary_faces[best_index]["mouthOpenRatio"] = landmark_face["mouthOpenRatio"]
+            primary_faces[best_index]["lookDirectionX"] = landmark_face["lookDirectionX"]
+
+        # Dense landmarks need more facial pixels than YuNet. Refine up to six
+        # unmatched small faces on enlarged local crops so embedded facecams get
+        # the same mouth/head-direction quality as full-screen talking heads.
+        height, width = frame.shape[:2]
+        unmatched = [
+            index
+            for index in range(primary_count)
+            if index not in used_primary
+        ]
+        unmatched.sort(
+            key=lambda index: primary_faces[index]["rect"]["width"]
+            * primary_faces[index]["rect"]["height"],
+            reverse=True,
+        )
+        for offset, primary_index in enumerate(unmatched[:6], start=1):
+            rect = primary_faces[primary_index]["rect"]
+            center_x, center_y = _rect_center(rect)
+            crop_w = min(1.0, max(rect["width"] * 2.2, 0.11))
+            crop_h = min(1.0, max(rect["height"] * 2.2, 0.13))
+            left = max(0.0, min(1.0 - crop_w, center_x - crop_w * 0.5))
+            top = max(0.0, min(1.0 - crop_h, center_y - crop_h * 0.5))
+            px_left, px_top = int(left * width), int(top * height)
+            px_right = max(px_left + 2, int((left + crop_w) * width))
+            px_bottom = max(px_top + 2, int((top + crop_h) * height))
+            crop = frame[px_top:px_bottom, px_left:px_right]
+            if crop.size == 0:
+                continue
+            crop_height, crop_width = crop.shape[:2]
+            scale = max(1.0, 640.0 / max(1, crop_width))
+            if scale > 1.01:
+                crop = cv2.resize(
+                    crop,
+                    (int(crop_width * scale), int(crop_height * scale)),
+                    interpolation=cv2.INTER_CUBIC,
+                )
+            try:
+                refinements = self._landmarker.detect(
+                    crop, int(timestamp_ms or 0) + offset
+                )
+            except Exception:
+                continue
+            if not refinements:
+                continue
+            refinement = max(
+                refinements,
+                key=lambda item: item["rect"]["width"] * item["rect"]["height"],
+            )
+            primary_faces[primary_index]["mouthOpenRatio"] = refinement[
+                "mouthOpenRatio"
+            ]
+            primary_faces[primary_index]["lookDirectionX"] = refinement[
+                "lookDirectionX"
+            ]
+        return primary_faces
+
+    def detect_region(self, frame) -> list[dict[str, Any]]:
+        return self._primary.detect(frame)
+
+    def close(self) -> None:
+        self._primary.close()
+        self._landmarker.close()
+
 
 class MediaPipeDetector:
     """Reusable MediaPipe face detector (created once, used for every frame).
@@ -347,7 +631,7 @@ class MediaPipeDetector:
         self._detector = mp.tasks.vision.FaceDetector.create_from_options(options)
         self._min_confidence = min_confidence
 
-    def detect(self, frame) -> list[dict[str, Any]]:
+    def detect(self, frame, timestamp_ms: int | None = None) -> list[dict[str, Any]]:
         import numpy as np
 
         h, w = frame.shape[:2]
@@ -389,7 +673,7 @@ class HaarDetector:
         )
         self._min_confidence = min_confidence
 
-    def detect(self, frame) -> list[dict[str, Any]]:
+    def detect(self, frame, timestamp_ms: int | None = None) -> list[dict[str, Any]]:
         h, w = frame.shape[:2]
         gray = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2GRAY)
         faces = self._cascade.detectMultiScale(
@@ -409,12 +693,97 @@ class HaarDetector:
 
 
 def create_detector(min_confidence: float):
-    for cls in (YuNetDetector, MediaPipeDetector, HaarDetector):
+    primary = None
+    landmarker = None
+    try:
+        primary = YuNetDetector(min_confidence)
+    except Exception:
+        pass
+    try:
+        landmarker = MediaPipeFaceLandmarker(min_confidence)
+    except Exception:
+        pass
+    if primary is not None and landmarker is not None:
+        return CompositeDetector(primary, landmarker)
+    if primary is not None:
+        return primary
+    if landmarker is not None:
+        return landmarker
+    for cls in (MediaPipeDetector, HaarDetector):
         try:
             return cls(min_confidence)
         except Exception:
             continue
     return HaarDetector(min_confidence)
+
+
+def _recover_missed_faces(detector, frame, faces, previous_faces):
+    """Re-run YuNet around a recently visible face when full-frame detection misses.
+
+    Small facecams and profiles can fall below a full-frame detector's effective
+    resolution for one or two samples. A larger local crop gives the detector a
+    second chance without paying for tiled inference across the entire frame.
+    """
+    import cv2
+
+    detect_region = getattr(detector, "detect_region", None)
+    if not callable(detect_region) or not previous_faces:
+        return faces
+    height, width = frame.shape[:2]
+    recovered = list(faces)
+    for previous in previous_faces[:8]:
+        previous_rect = previous["rect"]
+        if any(_rect_iou(previous_rect, face["rect"]) >= 0.12 for face in recovered):
+            continue
+        center_x, center_y = _rect_center(previous_rect)
+        region_w = min(1.0, max(previous_rect["width"] * 2.8, 0.14))
+        region_h = min(1.0, max(previous_rect["height"] * 2.8, 0.16))
+        left = max(0.0, min(1.0 - region_w, center_x - region_w * 0.5))
+        top = max(0.0, min(1.0 - region_h, center_y - region_h * 0.5))
+        px_left = int(left * width)
+        px_top = int(top * height)
+        px_right = max(px_left + 2, int((left + region_w) * width))
+        px_bottom = max(px_top + 2, int((top + region_h) * height))
+        crop = frame[px_top:px_bottom, px_left:px_right]
+        if crop.size == 0:
+            continue
+        crop_height, crop_width = crop.shape[:2]
+        scale = max(1.0, 360.0 / max(1, crop_width))
+        inference_crop = (
+            cv2.resize(
+                crop,
+                (int(crop_width * scale), int(crop_height * scale)),
+                interpolation=cv2.INTER_CUBIC,
+            )
+            if scale > 1.01
+            else crop
+        )
+        try:
+            local_faces = detect_region(inference_crop)
+        except Exception:
+            continue
+        candidates = []
+        for local_face in local_faces:
+            local_rect = local_face["rect"]
+            mapped = {
+                "x": left + local_rect["x"] * region_w,
+                "y": top + local_rect["y"] * region_h,
+                "width": local_rect["width"] * region_w,
+                "height": local_rect["height"] * region_h,
+            }
+            mapped_center = _rect_center(mapped)
+            distance = math.hypot(mapped_center[0] - center_x, mapped_center[1] - center_y)
+            if distance <= max(0.08, previous_rect["width"] * 1.15):
+                candidate = dict(local_face)
+                candidate["rect"] = mapped
+                candidate["confidence"] = clamp01(float(candidate["confidence"]) * 0.94)
+                candidates.append((distance, candidate))
+        if not candidates:
+            continue
+        candidate = min(candidates, key=lambda item: item[0])[1]
+        if not any(_rect_iou(candidate["rect"], face["rect"]) >= 0.25 for face in recovered):
+            recovered.append(candidate)
+    return recovered
 
 
 def analyze(payload: dict[str, Any]) -> dict[str, Any]:
@@ -423,10 +792,10 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
     video_path = payload["videoPath"]
     start = float(payload.get("startSeconds", 0))
     end = float(payload.get("endSeconds", 0))
-    sample_fps = float(payload.get("sampleFps", 4))
-    analysis_width = int(payload.get("analysisWidth", 640))
+    sample_fps = float(payload.get("sampleFps", 6))
+    analysis_width = int(payload.get("analysisWidth", 960))
     min_confidence = float(payload.get("minConfidence", 0.55))
-    max_frames = int(payload.get("maxFrames", 600))
+    max_frames = int(payload.get("maxFrames", 1200))
     ffmpeg_path = str(payload.get("ffmpegPath", "ffmpeg"))
 
     cap = cv2.VideoCapture(video_path)
@@ -443,7 +812,7 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
     if end <= start:
         end = start + 1
 
-    sample_fps = max(0.25, min(8.0, sample_fps))
+    sample_fps = max(0.25, min(12.0, sample_fps))
     interval = 1.0 / sample_fps
     # Cap total work for extremely long ranges by widening the interval.
     expected = (end - start) / interval
@@ -507,18 +876,21 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
             previous_scene_gray = scene_gray
             previous_scene_hist = scene_hist
 
+            if hard_scene_change:
+                previous_faces = []
+
             try:
-                faces = detector.detect(frame)
+                faces = detector.detect(frame, int(round((t - start) * 1000.0)))
             except Exception:
                 if not isinstance(detector, HaarDetector):
                     detector.close()
                     detector = HaarDetector(min_confidence)
-                    faces = detector.detect(frame)
+                    faces = detector.detect(frame, int(round((t - start) * 1000.0)))
                 else:
                     faces = []
 
-            if hard_scene_change:
-                previous_faces = []
+            faces = _recover_missed_faces(detector, frame, faces, previous_faces)
+            _attach_appearance_descriptors(frame, faces)
             previous_faces = _attach_speaking_activity(
                 frame, faces, previous_faces
             )
@@ -530,6 +902,16 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
                         "timestampSeconds": round(t, 3),
                         "rect": face["rect"],
                         "confidence": face["confidence"],
+                        **(
+                            {"appearanceDescriptor": face["appearanceDescriptor"]}
+                            if "appearanceDescriptor" in face
+                            else {}
+                        ),
+                        **(
+                            {"lookDirectionX": face["lookDirectionX"]}
+                            if "lookDirectionX" in face
+                            else {}
+                        ),
                         **(
                             {"mouthOpenRatio": face["mouthOpenRatio"]}
                             if "mouthOpenRatio" in face

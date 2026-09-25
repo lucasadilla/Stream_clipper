@@ -16,7 +16,6 @@ export const PLATFORM_PRESETS: Record<PlatformKey, PlatformPreset> = {
     recommendedDuration: { min: 15, max: 60 },
     hardDuration: { max: 180 },
     titleLimit: 100,
-    hashtagRange: { min: 3, max: 5 },
   },
   youtube_landscape: {
     key: "youtube_landscape",

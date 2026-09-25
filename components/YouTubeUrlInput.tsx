@@ -8,13 +8,16 @@ import { fetchJson } from "@/lib/apiClient";
 import { normalizeUserStreamUrl, parseStreamUrl } from "@/lib/streamPlatform";
 import { cn } from "@/lib/cn";
 import type { BillingAccountSummary } from "@/services/billingService";
-import type { SessionMode } from "@/lib/sessionMode";
-import { ClippingModeModal } from "@/components/ClippingModeModal";
+import {
+  ClippingModeModal,
+  type ClippingEntryMode,
+} from "@/components/ClippingModeModal";
 import { PlatformBrandIcon } from "@/components/brand/PlatformBrandIcon";
 import {
   writeSessionBootstrap,
   type SessionBootstrap,
 } from "@/lib/sessionBootstrap";
+import { captureClientAttribution } from "@/lib/clientAttribution";
 
 export function StreamUrlInput() {
   const router = useRouter();
@@ -22,18 +25,26 @@ export function StreamUrlInput() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasAccess, setHasAccess] = useState<boolean | null>(null);
+  const [signedIn, setSignedIn] = useState(false);
   const [modeModalOpen, setModeModalOpen] = useState(false);
-  const [selectedMode, setSelectedMode] = useState<SessionMode | null>(null);
+  const [selectedMode, setSelectedMode] = useState<ClippingEntryMode | null>(null);
+  const [agentPrompt, setAgentPrompt] = useState("");
+  const [preview, setPreview] = useState<{
+    title: string;
+    creator: string | null;
+    thumbnailUrl: string | null;
+    platform: "youtube" | "twitch" | "kick";
+  } | null>(null);
 
   useEffect(() => {
     void fetchJson<{ account: BillingAccountSummary | null }>("/api/auth/me").then(
       ({ data }) => {
         const account = data.account;
+        setSignedIn(Boolean(account));
         setHasAccess(
           Boolean(
             account &&
               (account.unlimitedAccess ||
-                account.betaAccess ||
                 account.status === "active" ||
                 account.status === "trialing")
           )
@@ -42,7 +53,7 @@ export function StreamUrlInput() {
     );
   }, []);
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
 
@@ -59,12 +70,32 @@ export function StreamUrlInput() {
       return;
     }
 
-    if (hasAccess === false) return;
-    setSelectedMode(null);
-    setModeModalOpen(true);
+    setLoading(true);
+    try {
+      const result = await fetchJson<{
+        preview?: typeof preview;
+      }>("/api/stream-preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: normalized }),
+      });
+      const nextPreview = result.ok ? result.data.preview ?? null : null;
+      setPreview(nextPreview);
+      if (nextPreview) {
+        posthog.capture("stream_preview_loaded", {
+          platform: nextPreview.platform,
+        });
+      }
+    } catch {
+      setPreview(null);
+    } finally {
+      setLoading(false);
+      setSelectedMode(null);
+      setModeModalOpen(true);
+    }
   }
 
-  async function createWithMode(mode: SessionMode) {
+  async function createWithMode(mode: ClippingEntryMode) {
     if (loading) return;
     // Instant UI feedback — don't wait for the network round-trip.
     setSelectedMode(mode);
@@ -74,13 +105,70 @@ export function StreamUrlInput() {
     const normalized = normalizeUserStreamUrl(url);
 
     try {
+      let paidAccess = hasAccess;
+      let authenticated = signedIn;
+      if (paidAccess === null) {
+        const me = await fetchJson<{ account: BillingAccountSummary | null }>(
+          "/api/auth/me"
+        );
+        authenticated = Boolean(me.data.account);
+        paidAccess = Boolean(
+          me.data.account &&
+            (me.data.account.unlimitedAccess ||
+              me.data.account.status === "active" ||
+              me.data.account.status === "trialing")
+        );
+        setSignedIn(authenticated);
+        setHasAccess(paidAccess);
+      }
+      posthog.capture("workflow_selected", { workflow: mode });
+      posthog.capture("stream_url_entered", {
+        workflow: mode,
+        platform: parseStreamUrl(normalized)?.platform,
+      });
+      if (!paidAccess) {
+        const intentResult = await fetchJson<{ error?: string }>(
+          "/api/onboarding/intent",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              workflow: mode,
+              streamUrl: normalized,
+              requestedAction: mode === "agent" ? agentPrompt : null,
+              attribution: captureClientAttribution(),
+            }),
+          }
+        );
+        if (!intentResult.ok) {
+          throw new Error(intentResult.data.error ?? "Could not save your stream");
+        }
+        posthog.capture("signup_started", { workflow: mode });
+        router.push(authenticated ? "/welcome" : "/login");
+        return;
+      }
+
+      if (mode === "autopilot") {
+        await fetchJson("/api/onboarding/intent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workflow: mode, streamUrl: normalized }),
+        });
+        router.push("/settings/autopilot?onboarding=1");
+        return;
+      }
+
       const { ok, data } = await fetchJson<{
         session?: SessionBootstrap;
         error?: string;
       }>("/api/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ streamUrl: normalized, mode }),
+        body: JSON.stringify({
+          streamUrl: normalized,
+          mode,
+          requestedAction: mode === "agent" ? agentPrompt : undefined,
+        }),
       });
 
       if (!ok) throw new Error(data.error ?? "Failed to create session");
@@ -122,14 +210,14 @@ export function StreamUrlInput() {
           </div>
           <button
             type="submit"
-            disabled={loading || !url.trim() || hasAccess === false}
+            disabled={loading || !url.trim()}
             className={cn(
               "h-14 px-7 text-sm font-semibold whitespace-nowrap text-black",
               "bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)]",
               "disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             )}
           >
-            {loading ? "Starting…" : "Start clipping"}
+          {loading ? "Checking stream…" : "Start clipping"}
           </button>
         </div>
         {error && (
@@ -137,9 +225,9 @@ export function StreamUrlInput() {
         )}
         {hasAccess === false && (
           <p className="mt-3 text-sm text-[#c1cabd]">
-            Creator Beta access is required right now. Enter your access code to unlock beta features.{" "}
-            <Link href="/creator-beta" className="font-semibold text-[var(--color-accent)] hover:underline">
-              Unlock access
+            Paste your stream now. You will choose a plan before Clipper starts processing it.{" "}
+            <Link href="#pricing" className="font-semibold text-[var(--color-accent)] hover:underline">
+              See plans
             </Link>
           </p>
         )}
@@ -149,6 +237,9 @@ export function StreamUrlInput() {
         open={modeModalOpen}
         loading={loading}
         selectedMode={selectedMode}
+        agentPrompt={agentPrompt}
+        onAgentPromptChange={setAgentPrompt}
+        preview={preview}
         onClose={() => {
           if (!loading) {
             setModeModalOpen(false);

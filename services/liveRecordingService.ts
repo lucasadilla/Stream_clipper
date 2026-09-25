@@ -18,6 +18,7 @@ import {
   baseYtDlpArgs,
   getYtDlpDeploymentArgs,
   getYoutubeCaptureStrategies,
+  preferredBestAudio,
   resolveYtDlpInvocation,
   formatYtDlpUserError,
   isYoutubePoTokenError,
@@ -43,10 +44,14 @@ function liveFormat(): string {
       : 1080;
   // Prefer an explicit video+audio merge. Putting `best[ext=mp4]` first often
   // selects YouTube DASH video-only (e.g. f299) and leaves Whisper with no audio.
+  // Prefer original audio so live capture matches what creators hear on stream
+  // (not a YouTube AI dub that final renders might otherwise pick).
+  const audio = preferredBestAudio();
+  const aacAudio = preferredBestAudio("[acodec^=mp4a]");
   return (
-    `bestvideo[vcodec^=avc1][height<=${height}]+bestaudio[acodec^=mp4a]/` +
-    `bestvideo[vcodec^=avc1][height<=${height}]+bestaudio/` +
-    `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/best`
+    `bestvideo[vcodec^=avc1][height<=${height}]+${aacAudio}/` +
+    `bestvideo[vcodec^=avc1][height<=${height}]+${audio}/` +
+    `bestvideo[height<=${height}]+${audio}/best[height<=${height}]/best`
   );
 }
 
@@ -814,7 +819,7 @@ async function acquireSourceMediaOnce(streamSessionId: string) {
     // continue with cached metadata
   }
 
-  let session = await prisma.streamSession.findUnique({
+  const session = await prisma.streamSession.findUnique({
     where: { id: streamSessionId },
     include: { sourceMedia: { take: 1 }, liveRecording: true },
   });

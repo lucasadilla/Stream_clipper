@@ -406,6 +406,21 @@ function contentTypeForFile(filePath: string): string {
   return "application/octet-stream";
 }
 
+export function parseDownloadByteRange(
+  rangeHeader: string | null | undefined,
+  fileSize: number
+): { start: number; end: number } | null | "invalid" {
+  if (!rangeHeader) return null;
+  const range = rangeHeader.match(/^bytes=(\d+)-(\d*)$/);
+  if (!range) return "invalid";
+  const start = Number.parseInt(range[1]!, 10);
+  const requestedEnd = range[2] ? Number.parseInt(range[2], 10) : fileSize - 1;
+  const end = Math.min(requestedEnd, fileSize - 1);
+  return Number.isFinite(start) && Number.isFinite(end) && start <= end && start < fileSize
+    ? { start, end }
+    : "invalid";
+}
+
 /** Serve a file for inline display (images, video preview). */
 export async function serveStorageFileInline(
   relativePath: string,
@@ -488,7 +503,8 @@ export async function serveStorageFileInline(
 /** Stream a file from storage with forced-download headers. */
 export async function serveStorageFile(
   relativePath: string,
-  downloadFilename?: string
+  downloadFilename?: string,
+  request?: Request
 ): Promise<Response> {
   const fullPath = resolveStoragePath(relativePath);
   if (!existsSync(fullPath)) {
@@ -501,15 +517,43 @@ export async function serveStorageFile(
     "_"
   );
 
+  const baseHeaders = {
+    "Content-Type": contentTypeForFile(fullPath),
+    "Content-Disposition": `attachment; filename="${filename}"`,
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "private, no-cache",
+  };
+  if (request?.method === "HEAD") {
+    return new Response(null, {
+      status: 200,
+      headers: { ...baseHeaders, "Content-Length": String(stat.size) },
+    });
+  }
+
+  const range = parseDownloadByteRange(request?.headers.get("range"), stat.size);
+  if (range === "invalid") {
+    return new Response(null, {
+      status: 416,
+      headers: { ...baseHeaders, "Content-Range": `bytes */${stat.size}` },
+    });
+  }
+  if (range) {
+    const { start, end } = range;
+    const stream = createReadStream(fullPath, { start, end });
+    return new Response(stream as unknown as BodyInit, {
+      status: 206,
+      headers: {
+        ...baseHeaders,
+        "Content-Length": String(end - start + 1),
+        "Content-Range": `bytes ${start}-${end}/${stat.size}`,
+      },
+    });
+  }
+
   const stream = createReadStream(fullPath);
   return new Response(stream as unknown as BodyInit, {
     status: 200,
-    headers: {
-      "Content-Type": contentTypeForFile(fullPath),
-      "Content-Disposition": `attachment; filename="${filename}"`,
-      "Content-Length": String(stat.size),
-      "Cache-Control": "private, no-cache",
-    },
+    headers: { ...baseHeaders, "Content-Length": String(stat.size) },
   });
 }
 

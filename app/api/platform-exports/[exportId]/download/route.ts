@@ -6,6 +6,7 @@ import {
   SessionAccessError,
 } from "@/services/platformExportAccessService";
 import { inspectDeliverableVideo } from "@/services/deliverableVideoService";
+import { videoDownloadFilename } from "@/lib/downloadFilename";
 
 export const runtime = "nodejs";
 
@@ -26,7 +27,14 @@ export async function GET(
         inspection.sizeBytes === 0 ? 404 : 409
       );
     }
-    return serveStorageFile(item.outputPath, `${item.platform}-${exportId}.mp4`);
+    return serveStorageFile(
+      item.outputPath,
+      videoDownloadFilename(
+        item.title || item.clipSuggestion.title,
+        item.platform
+      ),
+      request
+    );
   } catch (error) {
     if (error instanceof SessionAccessError) return errorResponse(error.message, error.status);
     return errorResponse(error instanceof Error ? error.message : "Download failed", 500);

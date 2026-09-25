@@ -20,7 +20,7 @@ export async function ensureSessionBillingAccess(
 ) {
   if (!billingAccountId) {
     throw new SessionAccessError(
-      "Creator Beta access is required right now. Enter your access code to unlock beta features.",
+      "Sign in and choose a Clipper plan to continue.",
       401
     );
   }
@@ -28,7 +28,7 @@ export async function ensureSessionBillingAccess(
   const account = await getBillingAccount(billingAccountId);
   if (!account || !hasAppAccess(account)) {
     throw new SessionAccessError(
-      "Creator Beta access is required right now. Enter your access code to unlock beta features.",
+      "An active Clipper subscription is required to continue.",
       402
     );
   }
@@ -57,4 +57,12 @@ export async function ensureSessionBillingAccess(
   }
 
   return session;
+}
+
+export async function hasPaidSessionAccess(sessionId: string): Promise<boolean> {
+  const session = await prisma.streamSession.findUnique({
+    where: { id: sessionId },
+    select: { billingAccount: true },
+  });
+  return Boolean(session?.billingAccount && hasAppAccess(session.billingAccount));
 }

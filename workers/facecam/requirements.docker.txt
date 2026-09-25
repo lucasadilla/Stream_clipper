@@ -1,4 +1,5 @@
-# Slim deps for Railway/Docker. YuNet (primary) only needs OpenCV + numpy.
-# MediaPipe is optional locally; skipped here to keep the image smaller.
+# Final-quality analysis combines YuNet's small-face recall with MediaPipe's
+# dense landmarks, head direction, and mouth articulation.
 opencv-python-headless>=4.9,<5
 numpy>=1.26,<3
+mediapipe>=0.10.14,<0.11

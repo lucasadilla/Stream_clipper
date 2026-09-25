@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { prisma } from "@/lib/db";
 import { formatFfmpegProcessError } from "@/lib/ffmpeg";
+import { isRetryableRenderFailure } from "@/lib/renderReliability";
 import { appendRenderJobLog } from "@/lib/renderJobLogs";
 import {
   executeRenderJob,
@@ -37,6 +38,12 @@ import {
 } from "@/services/faceAnalysisService";
 import { processOneStreamAutomation } from "@/services/streamAutomationService";
 import { analyzePendingVisualWindow } from "@/services/visualAnalysisService";
+import { hasPaidSessionAccess } from "@/services/sessionAccessService";
+import { hasAppAccess } from "@/services/billingService";
+import {
+  databaseBackoffDelayMs,
+  isTransientDatabaseError,
+} from "@/lib/databaseReliability";
 
 const WORKER_ID = `worker-${process.pid}-${randomUUID().slice(0, 8)}`;
 
@@ -89,6 +96,7 @@ async function runFrequentStorageReclaim(): Promise<void> {
     await enforceSingleSessionPerAccount();
     await reclaimEphemeralStorage({ pruneSessionSegments: false });
   } catch (err) {
+    if (isTransientDatabaseError(err)) throw err;
     console.warn("[worker] frequent storage reclaim failed:", err);
   }
 }
@@ -214,12 +222,28 @@ async function processOneRenderJob(): Promise<boolean> {
 
   const job = await prisma.renderJob.findUnique({ where: { id: jobId } });
   if (!job) return false;
+  if (!(await hasPaidSessionAccess(job.streamSessionId))) {
+    await failRenderJob(jobId, "An active subscription is required to render.");
+    return true;
+  }
 
   const params = parseRenderJobParams(job.params);
   if (!params) {
     await failRenderJob(jobId, "Render job is missing params");
     return true;
   }
+
+  const heartbeat = setInterval(() => {
+    void prisma.renderJob
+      .updateMany({
+        where: { id: jobId, status: "processing", lockedBy: WORKER_ID },
+        data: { lockedAt: new Date() },
+      })
+      .catch((error) => {
+        console.warn(`[worker] render heartbeat failed for ${jobId}:`, error);
+      });
+  }, 15_000);
+  heartbeat.unref?.();
 
   try {
     await executeRenderJob(jobId, params);
@@ -231,7 +255,10 @@ async function processOneRenderJob(): Promise<boolean> {
     });
     if (!fresh) return true;
 
-    if (fresh.attempts < fresh.maxAttempts) {
+    if (
+      fresh.attempts < fresh.maxAttempts &&
+      isRetryableRenderFailure(message)
+    ) {
       await appendRenderJobLog(jobId, "retry", message, "warn");
       await prisma.renderJob.update({
         where: { id: jobId },
@@ -246,6 +273,8 @@ async function processOneRenderJob(): Promise<boolean> {
     } else {
       await failRenderJob(jobId, message);
     }
+  } finally {
+    clearInterval(heartbeat);
   }
   return true;
 }
@@ -255,6 +284,17 @@ async function processOnePlatformExport(): Promise<boolean> {
   if (!exportId) return false;
 
   try {
+    const item = await prisma.platformExport.findUnique({
+      where: { id: exportId },
+      select: { streamSessionId: true },
+    });
+    if (!item || !(await hasPaidSessionAccess(item.streamSessionId))) {
+      await failPlatformExport(
+        exportId,
+        new Error("An active subscription is required to export.")
+      );
+      return true;
+    }
     await executePlatformExport(exportId);
   } catch (error) {
     await failPlatformExport(exportId, error);
@@ -267,6 +307,25 @@ async function processOneSocialPublish(): Promise<boolean> {
   if (!jobId) return false;
 
   try {
+    const job = await prisma.socialPublishJob.findUnique({
+      where: { id: jobId },
+      select: {
+        publishGroup: { select: { clipSuggestionId: true } },
+      },
+    });
+    const clip = job
+      ? await prisma.clipSuggestion.findUnique({
+          where: { id: job.publishGroup.clipSuggestionId },
+          select: { streamSessionId: true },
+        })
+      : null;
+    if (!clip || !(await hasPaidSessionAccess(clip.streamSessionId))) {
+      await failSocialPublishJob(
+        jobId,
+        "An active subscription is required to publish."
+      );
+      return true;
+    }
     await executeSocialPublishJob(jobId);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Social publish failed";
@@ -283,8 +342,18 @@ async function processOneTranscription(): Promise<boolean> {
     try {
       const session = await prisma.streamSession.findUnique({
         where: { id: sessionId },
-        select: { mode: true, liveStatus: true },
+        select: { mode: true, liveStatus: true, billingAccount: true },
       });
+      if (!session?.billingAccount || !hasAppAccess(session.billingAccount)) {
+        await prisma.streamSession.update({
+          where: { id: sessionId },
+          data: {
+            lastTranscriptionError:
+              "Transcription paused because the subscription is not active.",
+          },
+        });
+        return true;
+      }
       const agentPriority = session?.mode === "agent";
       const result = await syncTranscription(sessionId, {
         isLive:
@@ -374,16 +443,19 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
     let reclaimed = 0;
     if (Date.now() - lastStaleReclaimAt >= staleReclaimTickMs()) {
       lastStaleReclaimAt = Date.now();
-      const [staleRenders, stalePlatformExports, staleSocial, staleFaceAnalyses] =
-        await Promise.all([
-          reclaimStaleRenderJobs(),
-          reclaimStalePlatformExports(),
-          reclaimStaleSocialPublishJobs(),
-          reclaimStaleFaceAnalysisJobs().catch((err) => {
-            console.warn("[worker] face analysis reclaim skipped:", err);
-            return 0;
-          }),
-        ]);
+      // Run maintenance sequentially. During a database interruption, launching
+      // all four claims at once consumed multiple pool slots and delayed API
+      // requests that were trying to recover at the same time.
+      const staleRenders = await reclaimStaleRenderJobs();
+      const stalePlatformExports = await reclaimStalePlatformExports();
+      const staleSocial = await reclaimStaleSocialPublishJobs();
+      let staleFaceAnalyses = 0;
+      try {
+        staleFaceAnalyses = await reclaimStaleFaceAnalysisJobs();
+      } catch (err) {
+        if (isTransientDatabaseError(err)) throw err;
+        console.warn("[worker] face analysis reclaim skipped:", err);
+      }
       reclaimed =
         staleRenders + stalePlatformExports + staleSocial + staleFaceAnalyses;
     }
@@ -399,6 +471,7 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
       const didFace = await processOneFaceAnalysisJob();
       if (didFace) faceAnalyses = 1;
     } catch (err) {
+      if (isTransientDatabaseError(err)) throw err;
       console.error("[worker] face analysis failed:", err);
     }
 
@@ -427,6 +500,7 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
       const didAutomation = await processOneStreamAutomation();
       if (didAutomation) streamAutomations = 1;
     } catch (err) {
+      if (isTransientDatabaseError(err)) throw err;
       console.error("[worker] stream automation failed:", err);
     }
 
@@ -437,6 +511,7 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
         const retention = await runRetentionCleanup({ limit: 10 });
         retentionDeleted = retention.deleted;
       } catch (err) {
+        if (isTransientDatabaseError(err)) throw err;
         console.error("[worker] retention failed:", err);
       }
     }
@@ -465,6 +540,7 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
 let pollerStarted = false;
 let pollerHandle: ReturnType<typeof setTimeout> | null = null;
 let idlePollCount = 0;
+let consecutiveDatabaseFailures = 0;
 
 export function workerTickDidWork(result: WorkerTickResult): boolean {
   return (
@@ -513,20 +589,33 @@ export function startWorkerPoller(): void {
   const poll = async () => {
     if (!pollerStarted) return;
     let didWork = false;
+    let databaseDelayMs = 0;
     try {
       didWork = workerTickDidWork(await runWorkerTick());
+      consecutiveDatabaseFailures = 0;
     } catch (err) {
-      console.error("[worker] tick failed:", err);
+      if (isTransientDatabaseError(err)) {
+        consecutiveDatabaseFailures += 1;
+        databaseDelayMs = databaseBackoffDelayMs(consecutiveDatabaseFailures);
+        console.warn(
+          `[worker] database unavailable; pausing worker for ${Math.round(
+            databaseDelayMs / 1000
+          )}s`
+        );
+      } else {
+        console.error("[worker] tick failed:", err);
+      }
     }
     idlePollCount = didWork ? 0 : idlePollCount + 1;
-    schedule(
+    schedule(Math.max(
+      databaseDelayMs,
       nextWorkerPollDelayMs(
         didWork,
         idlePollCount,
         activePollMs,
         maxIdlePollMs
       )
-    );
+    ));
   };
   void poll();
 }
@@ -537,5 +626,6 @@ export function stopWorkerPoller(): void {
     pollerHandle = null;
   }
   idlePollCount = 0;
+  consecutiveDatabaseFailures = 0;
   pollerStarted = false;
 }

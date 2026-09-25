@@ -15,6 +15,7 @@ function track(
     count?: number;
     mouthAt?: (index: number) => number;
     confidenceAt?: (index: number) => number;
+    lookAt?: (index: number) => number;
   } = {}
 ): FaceTrack {
   const count = options.count ?? 49;
@@ -27,6 +28,7 @@ function track(
       height: 0.28,
     },
     confidence: options.confidenceAt?.(index) ?? 0.92,
+    lookDirectionX: options.lookAt?.(index),
     mouthOpenRatio: options.mouthAt?.(index) ?? 0.4,
   }));
   return {
@@ -70,6 +72,25 @@ describe("professional reframe planning", () => {
     );
     expect(movingFrames.length).toBeLessThanOrEqual(2);
     expect(plan.validation.valid).toBe(true);
+  });
+
+  it("leaves restrained lead room in the subject's look direction", () => {
+    const lookingRight = track("creator", () => 0.35, {
+      lookAt: () => 0.8,
+    });
+    const lookingLeft = track("creator", () => 0.35, {
+      lookAt: () => -0.8,
+    });
+    const rightFrame = previewCameraFrameAt(
+      planFor([lookingRight]).cropKeyframes,
+      0
+    );
+    const leftFrame = previewCameraFrameAt(
+      planFor([lookingLeft]).cropKeyframes,
+      0
+    );
+    expect(rightFrame!.centerX).toBeGreaterThan(leftFrame!.centerX);
+    expect(rightFrame!.centerX - leftFrame!.centerX).toBeLessThan(0.08);
   });
 
   it("cuts at a scene boundary instead of panning across unrelated scenes", () => {

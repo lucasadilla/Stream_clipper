@@ -21,6 +21,11 @@ import {
 } from "@/services/transcriptSearchService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import type { RagSearchResult } from "@/lib/rag";
+import { getBillingAccountIdFromRequest } from "@/services/billingService";
+import {
+  ensureSessionBillingAccess,
+  SessionAccessError,
+} from "@/services/sessionAccessService";
 
 const SIMILARITY_THRESHOLD = 0.25;
 
@@ -75,6 +80,10 @@ export async function POST(
 ) {
   try {
     const { sessionId } = await params;
+    await ensureSessionBillingAccess(
+      sessionId,
+      getBillingAccountIdFromRequest(request)
+    );
     const body = await request.json();
     const { message, history = [] } = askSchema.parse(body);
 
@@ -158,6 +167,9 @@ export async function POST(
       contextUsed: transcriptCtx.length,
     });
   } catch (error) {
+    if (error instanceof SessionAccessError) {
+      return errorResponse(error.message, error.status);
+    }
     if (error instanceof z.ZodError) {
       return errorResponse(error.errors[0]?.message ?? "Invalid input", 400);
     }

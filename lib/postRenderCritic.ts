@@ -63,6 +63,8 @@ export interface TechnicalReviewInput {
   audioCodec: string | null;
   fileSizeBytes: number;
   format: "vertical" | "native";
+  expectedDimensions?: { width: number; height: number };
+  sourceDimensions?: { width: number; height: number };
   expectsAudio: boolean;
   expectsCaptions: boolean;
 }
@@ -144,6 +146,25 @@ export function buildTechnicalQualityReview(
     platformReadiness: 100,
   };
 
+  if (input.sourceDimensions) {
+    const sourceShortSide = Math.min(
+      input.sourceDimensions.width,
+      input.sourceDimensions.height
+    );
+    if (sourceShortSide < 720) {
+      issues.push({
+        severity: "warning",
+        category: "clarity",
+        timestampSeconds: null,
+        title: "Source video is low resolution",
+        evidence: `The source is only ${input.sourceDimensions.width}x${input.sourceDimensions.height}; a larger export cannot restore missing detail.`,
+        recommendation: "Use the original HD source video and render again.",
+      });
+      scores.clarity = Math.min(scores.clarity, 40);
+      scores.platformReadiness = Math.min(scores.platformReadiness, 65);
+    }
+  }
+
   if (!input.videoCodec || input.width <= 0 || input.height <= 0) {
     issues.push({
       severity: "critical",
@@ -177,19 +198,21 @@ export function buildTechnicalQualityReview(
 
   if (input.format === "vertical" && input.width > 0 && input.height > 0) {
     const ratio = input.width / input.height;
-    if (Math.abs(ratio - 9 / 16) > 0.025) {
+    const expectedRatio = input.expectedDimensions
+      ? input.expectedDimensions.width / input.expectedDimensions.height : 9 / 16;
+    if (Math.abs(ratio - expectedRatio) > 0.025) {
       issues.push({
         severity: "critical",
         category: "platform",
         timestampSeconds: null,
-        title: "Export is not true 9:16",
+        title: input.expectedDimensions ? "Export does not match the platform format" : "Export is not true 9:16",
         evidence: `The rendered dimensions are ${input.width}x${input.height}.`,
-        recommendation: "Render with the vertical Short preset before publishing.",
+        recommendation: "Render with the selected platform preset before publishing.",
       });
       scores.platformReadiness = 30;
       scores.framing = Math.min(scores.framing, 65);
     }
-    if (input.height < 1280) {
+    if (input.height < (input.expectedDimensions?.height ?? 1280)) {
       issues.push({
         severity: "warning",
         category: "clarity",
@@ -267,7 +290,7 @@ export function buildTechnicalQualityReview(
     strengths:
       issues.length === 0
         ? [
-            input.format === "vertical"
+            input.expectedDimensions ? "Correct platform delivery format" : input.format === "vertical"
               ? "Correct vertical delivery format"
               : "Valid native video delivery",
             input.audioCodec ? "Video and audio streams are present" : "Video stream is present",

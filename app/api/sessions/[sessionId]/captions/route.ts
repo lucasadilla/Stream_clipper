@@ -4,16 +4,28 @@ import {
   upsertCaptionEdit,
 } from "@/services/captionEditService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
+import { getBillingAccountIdFromRequest } from "@/services/billingService";
+import {
+  ensureSessionBillingAccess,
+  SessionAccessError,
+} from "@/services/sessionAccessService";
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ sessionId: string }> }
 ) {
   try {
     const { sessionId } = await params;
+    await ensureSessionBillingAccess(
+      sessionId,
+      getBillingAccountIdFromRequest(request)
+    );
     const edits = await readCaptionEdits(sessionId);
     return jsonResponse({ edits });
   } catch (error) {
+    if (error instanceof SessionAccessError) {
+      return errorResponse(error.message, error.status);
+    }
     const message =
       error instanceof Error ? error.message : "Failed to load caption edits";
     return errorResponse(message, 500);
@@ -26,6 +38,10 @@ export async function PATCH(
 ) {
   try {
     const { sessionId } = await params;
+    await ensureSessionBillingAccess(
+      sessionId,
+      getBillingAccountIdFromRequest(request)
+    );
     const body = await request.json();
     const cueId = (body as { cueId?: string }).cueId;
     if (!cueId || typeof cueId !== "string") {
@@ -53,6 +69,9 @@ export async function PATCH(
     const edits = await upsertCaptionEdit(sessionId, cueId, patch);
     return jsonResponse({ edits });
   } catch (error) {
+    if (error instanceof SessionAccessError) {
+      return errorResponse(error.message, error.status);
+    }
     const message =
       error instanceof Error ? error.message : "Failed to save caption edit";
     return errorResponse(message, 500);

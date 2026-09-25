@@ -109,7 +109,9 @@ export async function createStreamSession(
     meta.durationSeconds &&
     meta.durationSeconds > maxSourceDurationSeconds
   ) {
-    throw new Error("Creator Beta source videos can be up to 3 hours long.");
+    throw new Error(
+      `Your plan supports source videos up to ${Math.round(maxSourceDurationSeconds / 3600)} hours long.`
+    );
   }
 
   const session = await prisma.streamSession.create({

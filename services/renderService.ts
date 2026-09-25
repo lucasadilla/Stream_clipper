@@ -2,6 +2,7 @@ import path from "path";
 import fs from "fs/promises";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
+import { getPostHogClient } from "@/lib/posthog-server";
 import {
   renderShort as ffmpegRender,
   renderSequence as ffmpegRenderSequence,
@@ -30,6 +31,8 @@ import {
   reclaimEphemeralStorage,
 } from "@/services/storageReclaimService";
 import type { RenderFormat } from "@/lib/renderFormat";
+import { parsePlatformRenderTarget, platformRenderDimensions, type PlatformRenderTarget } from "@/lib/platforms/renderTarget";
+import { PLATFORM_SAFE_ZONES } from "@/lib/platforms/safeZones";
 import type { CaptionAppearance } from "@/lib/captionAppearance";
 import {
   DEFAULT_CAPTION_APPEARANCE,
@@ -62,6 +65,8 @@ import type { PostRenderQualityReview } from "@/lib/postRenderCritic";
 import { directCaptionTrack } from "@/lib/captionDirector";
 import { getCachedCaptionDirectionForClip } from "@/services/captionDirectorService";
 import { assertDeliverableVideo } from "@/services/deliverableVideoService";
+import { renderSpecHash, storedRenderSpecHash } from "@/lib/renderSpec";
+import { ensureSpeakerContext } from "@/services/speakerContextService";
 
 const PREVIEW_MAX_SECONDS = 5;
 const PREVIEW_HEIGHT = 640;
@@ -107,6 +112,7 @@ function nativeOutputDimensions(source: {
 }
 
 export interface RenderShortParams {
+  platformTarget?: PlatformRenderTarget;
   streamSessionId: string;
   sourceMediaId?: string;
   clipSuggestionId?: string;
@@ -136,6 +142,7 @@ export function parseRenderJobParams(value: unknown): RenderShortParams | null {
   }
   return {
     streamSessionId: raw.streamSessionId,
+    platformTarget: parsePlatformRenderTarget(raw.platformTarget),
     sourceMediaId:
       typeof raw.sourceMediaId === "string" ? raw.sourceMediaId : undefined,
     clipSuggestionId:
@@ -228,6 +235,7 @@ function mapCaptionsToSequence(
         .filter(({ word }) => word.end > overlapStart && word.start < overlapEnd);
       const words = wordEntries
         ?.map(({ word }) => ({
+          ...word,
           start: outputOffset + Math.max(0, word.start - segment.sourceStart),
           end:
             outputOffset +
@@ -242,6 +250,7 @@ function mapCaptionsToSequence(
             : []
         );
       mapped.push({
+        ...cue,
         id: `${cue.id}-segment-${segment.id}`,
         startTimeSeconds:
           outputOffset + Math.max(0, overlapStart - segment.sourceStart),
@@ -264,14 +273,50 @@ function mapCaptionsToSequence(
   return mapped;
 }
 
-async function updateJobProgress(jobId: string, progress: number, step?: string) {
-  await prisma.renderJob.update({
-    where: { id: jobId },
-    data: { progress: Math.min(100, Math.max(0, Math.round(progress))) },
+async function updateJobProgress(
+  jobId: string,
+  progress: number,
+  step?: string,
+  options: { log?: boolean } = {}
+) {
+  const updated = await prisma.renderJob.updateMany({
+    where: { id: jobId, status: "processing" },
+    data: {
+      progress: Math.min(100, Math.max(0, Math.round(progress))),
+      // Progress writes double as a lease heartbeat. A healthy long render can
+      // no longer be reclaimed while FFmpeg is still producing frames.
+      lockedAt: new Date(),
+    },
   });
-  if (step) {
+  if (updated.count > 0 && step && options.log !== false) {
     await appendRenderJobLog(jobId, step, `Progress ${Math.round(progress)}%`);
   }
+}
+
+function createEncodingProgressReporter(jobId: string) {
+  let lastJobProgress = 54;
+  let lastUpdateAt = 0;
+  let queue = Promise.resolve();
+
+  return {
+    report(progress: number) {
+      const next = 55 + Math.floor(Math.min(1, Math.max(0, progress)) * 34);
+      const now = Date.now();
+      if (next <= lastJobProgress && now - lastUpdateAt < 5_000) return;
+      if (next > lastJobProgress && next - lastJobProgress < 1 && now - lastUpdateAt < 1_500) {
+        return;
+      }
+      lastJobProgress = Math.max(lastJobProgress, next);
+      lastUpdateAt = now;
+      const queuedProgress = lastJobProgress;
+      queue = queue.then(() =>
+        updateJobProgress(jobId, queuedProgress, "encoding", { log: false })
+      );
+    },
+    async flush() {
+      await queue;
+    },
+  };
 }
 
 async function completeRenderJob(input: {
@@ -281,6 +326,13 @@ async function completeRenderJob(input: {
   relativeOutput: string;
   completionMessage: string;
   resolvedLayout?: string;
+  sourceDimensions?: { width: number; height: number };
+  expectedOutput?: {
+    width: number;
+    height: number;
+    durationSeconds: number;
+    audio: boolean;
+  };
 }): Promise<void> {
   const outputStat = await fs.stat(input.outputPath).catch(() => null);
   if (!outputStat || outputStat.size < 1024) {
@@ -292,6 +344,32 @@ async function completeRenderJob(input: {
   // A non-empty path is not enough: truncated MP4s and files without a
   // decodable video stream must never be marked completed or offered to users.
   await assertDeliverableVideo(input.outputPath);
+  const outputProbe = await probeMedia(input.outputPath);
+  if (input.expectedOutput) {
+    const expected = input.expectedOutput;
+    if (outputProbe.width !== expected.width || outputProbe.height !== expected.height) {
+      throw new Error(
+        `Render produced ${outputProbe.width}x${outputProbe.height}; expected ${expected.width}x${expected.height}.`
+      );
+    }
+    const durationTolerance = Math.max(1, expected.durationSeconds * 0.05);
+    if (
+      Math.abs(outputProbe.durationSeconds - expected.durationSeconds) >
+      durationTolerance
+    ) {
+      throw new Error(
+        `Render duration was ${outputProbe.durationSeconds.toFixed(2)}s; expected ${expected.durationSeconds.toFixed(2)}s.`
+      );
+    }
+    if (expected.audio && !outputProbe.audioCodec) {
+      throw new Error("Render finished without the source audio track.");
+    }
+    await appendRenderJobLog(
+      input.jobId,
+      "output_validated",
+      `${outputProbe.width}x${outputProbe.height}, ${outputProbe.durationSeconds.toFixed(2)}s, ${outputProbe.videoCodec}/${outputProbe.audioCodec ?? "no audio"}`
+    );
+  }
 
   let qualityReview: PostRenderQualityReview | null = null;
   if (!input.params.preview) {
@@ -300,6 +378,7 @@ async function completeRenderJob(input: {
       qualityReview = await reviewRenderedOutput({
         outputPath: input.outputPath,
         params: input.params,
+        sourceDimensions: input.sourceDimensions,
       });
       await appendRenderJobLog(
         input.jobId,
@@ -349,6 +428,35 @@ async function completeRenderJob(input: {
       where: { id: input.params.clipSuggestionId },
       data: { status: "rendered" },
     });
+
+    const completed = await prisma.renderJob.findUnique({
+      where: { id: input.jobId },
+      select: {
+        streamSession: { select: { billingAccountId: true, mode: true } },
+        clipSuggestionId: true,
+      },
+    });
+    const billingAccountId = completed?.streamSession.billingAccountId;
+    if (billingAccountId) {
+      const properties = {
+        clip_id: completed.clipSuggestionId,
+        workflow: completed.streamSession.mode,
+        $insert_id: `${input.jobId}:completed`,
+      };
+      getPostHogClient().capture({
+        distinctId: billingAccountId,
+        event: "clip_rendered",
+        properties,
+      });
+      getPostHogClient().capture({
+        distinctId: billingAccountId,
+        event: "first_clip_rendered",
+        properties: {
+          ...properties,
+          $insert_id: `${billingAccountId}:first_clip_rendered`,
+        },
+      });
+    }
   }
 }
 
@@ -448,35 +556,54 @@ export async function executeRenderJob(
 
   const outputFilename = preview
     ? `clip-${clipId}-preview-${jobId.slice(-8)}.mp4`
-    : `clip-${clipId}-${format}.mp4`;
+    : `clip-${clipId}-${format}-${jobId}.mp4`;
   const outputPath = path.join(rendersDir, outputFilename);
   const relativeOutput = toRelativeStoragePath(outputPath);
 
   const inputPath = resolveStoragePath(renderSource.filePath);
   const inputProbe = await probeMedia(inputPath).catch(() => null);
+  if (
+    !inputProbe?.videoCodec ||
+    inputProbe.width < 2 ||
+    inputProbe.height < 2 ||
+    (!preview && inputProbe.durationSeconds <= 0)
+  ) {
+    throw new Error(
+      "The selected source video is incomplete or unreadable. Clipper stopped before encoding; retry after the source finishes processing or upload the original file."
+    );
+  }
+  if (
+    renderStart < 0 ||
+    renderEnd <= renderStart ||
+    (inputProbe.durationSeconds > 0 &&
+      renderStart >= inputProbe.durationSeconds - 0.05)
+  ) {
+    throw new Error(
+      "The selected clip range falls outside the available source video. Reopen the clip and choose a valid range."
+    );
+  }
   const nativeDimensions = nativeOutputDimensions(inputProbe);
   let subtitlePath: string | undefined;
   let burnedCaptionCueCount = 0;
+  const platformOutput = params.platformTarget ? platformRenderDimensions(params.platformTarget) : undefined;
   const outputHeight = preview
     ? PREVIEW_HEIGHT
-    : format === "vertical"
+    : platformOutput?.height ?? (format === "vertical"
       ? Math.max(720, Number.parseInt(process.env.RENDER_VERTICAL_HEIGHT || "1920", 10) || 1920)
-      : nativeDimensions.height;
+      : nativeDimensions.height);
   const outputWidth =
-    format === "vertical"
+    !preview && platformOutput ? platformOutput.width : format === "vertical"
       ? Math.round((outputHeight * 9) / 16)
       : preview
         ? Math.round((outputHeight * 16) / 9)
         : nativeDimensions.width;
 
-  if (inputProbe) {
-    await appendRenderJobLog(
-      jobId,
-      "source_quality",
-      `Source ${inputProbe.width}x${inputProbe.height} at ${inputProbe.fps.toFixed(2)} fps; export ${outputWidth}x${outputHeight}`,
-      !preview && inputProbe.height < 720 ? "warn" : "info"
-    );
-  }
+  await appendRenderJobLog(
+    jobId,
+    "source_quality",
+    `Source ${inputProbe.width}x${inputProbe.height} at ${inputProbe.fps.toFixed(2)} fps; export ${outputWidth}x${outputHeight}`,
+    !preview && inputProbe.height < 720 ? "warn" : "info"
+  );
 
   // Resolve the facecam-aware vertical layout (auto recommendation, manual
   // rect, candidate selection). Falls back to center crop internally, so a
@@ -530,6 +657,14 @@ export async function executeRenderJob(
     }
   }
 
+  if (params.platformTarget && appearance.vertical === "bottom") {
+    appearance = {
+      ...appearance,
+      verticalOffsetPercent: Math.max(appearance.verticalOffsetPercent,
+        PLATFORM_SAFE_ZONES[params.platformTarget.platform].subtitleBottomPercent),
+    };
+  }
+
   const textOverlays = editorState.overlays.filter(
     (
       overlay
@@ -542,6 +677,7 @@ export async function executeRenderJob(
   );
   const canStreamCopy =
     format === "native" &&
+    !platformOutput &&
     !includeCaptions &&
     textOverlays.length === 0 &&
     !hasMediaOverlays &&
@@ -591,6 +727,15 @@ export async function executeRenderJob(
       outputPath,
       relativeOutput,
       completionMessage: "Stream copy finished",
+      sourceDimensions: inputProbe
+        ? { width: inputProbe.width, height: inputProbe.height }
+        : undefined,
+      expectedOutput: {
+        width: outputWidth,
+        height: outputHeight,
+        durationSeconds: cutEnd - cutStart,
+        audio: Boolean(inputProbe?.audioCodec),
+      },
     });
 
     return { outputPath: relativeOutput };
@@ -598,7 +743,27 @@ export async function executeRenderJob(
 
   if (includeCaptions || textOverlays.length > 0) {
     await updateJobProgress(jobId, 35, "captions");
-    const clientCues = (clientCaptionCues ?? []).filter(
+    let authoritativeRefinement = false;
+    if (includeCaptions && !preview && clipSuggestionId) {
+      const { refineClipTranscript } = await import("@/services/clipTranscriptRefinementService");
+      const refinement = await refineClipTranscript(clipSuggestionId, {
+        inputPath, timelineOffsetSeconds: effectiveStart - renderStart,
+        startTimeSeconds: effectiveStart, endTimeSeconds: effectiveEnd,
+      });
+      authoritativeRefinement = refinement.status === "refined" || refinement.status === "cached";
+      await appendRenderJobLog(jobId, "caption_refinement",
+        authoritativeRefinement ? "Verified captions against the source audio" :
+          `Using the available transcript: ${refinement.reason ?? refinement.status}`);
+    }
+    const speakerContext = includeCaptions
+      ? await ensureSpeakerContext(streamSessionId).catch((error) => {
+          console.warn("[render] speaker context unavailable:", error);
+          return null;
+        })
+      : null;
+    // Persisted manual edits are applied below. A stale browser copy must not
+    // overwrite words recovered by the final audio verification pass.
+    const clientCues = (authoritativeRefinement ? [] : clientCaptionCues ?? []).filter(
       (cue) => {
         if (sequenceSegments.length === 0) {
           return (
@@ -638,7 +803,8 @@ export async function executeRenderJob(
                   text: c.text,
                   rawJson: c.rawJson,
                 })),
-              format
+              format,
+              { speakerContext: speakerContext ?? undefined }
             ),
             captionEdits
           );
@@ -670,6 +836,7 @@ export async function executeRenderJob(
                 );
               const words = wordEntries
                 ?.map(({ word }) => ({
+                  ...word,
                   start: Math.max(0, word.start - effectiveStart),
                   end: Math.min(
                     effectiveEnd - effectiveStart,
@@ -687,6 +854,7 @@ export async function executeRenderJob(
                     : []
                 );
               return {
+                ...cue,
                 id: cue.id,
                 startTimeSeconds: Math.max(
                   0,
@@ -752,7 +920,7 @@ export async function executeRenderJob(
         (includeCaptions && shiftedCues.length > 0) ||
         overlayCues.length > 0
       ) {
-        subtitlePath = path.join(rendersDir, `clip-${clipId}${preview ? "-preview" : ""}.ass`);
+        subtitlePath = path.join(rendersDir, `clip-${clipId}-${jobId}.ass`);
         await fs.writeFile(subtitlePath, assContent, "utf8");
         await appendRenderJobLog(
           jobId,
@@ -786,8 +954,9 @@ export async function executeRenderJob(
         })
       : null;
 
-  await appendRenderJobLog(jobId, "ffmpeg", "Encoding clip");
-  await updateJobProgress(jobId, 55);
+  await appendRenderJobLog(jobId, "encoding", "Encoding clip");
+  await updateJobProgress(jobId, 55, undefined, { log: false });
+  const encodingProgress = createEncodingProgressReporter(jobId);
 
   if (sequenceSegments.length > 0) {
     const mediaOverlays = editorState.overlays.flatMap((overlay) => {
@@ -841,6 +1010,7 @@ export async function executeRenderJob(
       denoiseAudio: editorState.settings.denoiseAudio,
       verticalBackground: editorState.settings.verticalBackground,
       mediaOverlays,
+      onProgress: encodingProgress.report,
     });
   } else {
     await ffmpegRender({
@@ -860,6 +1030,7 @@ export async function executeRenderJob(
       captionAppearance: appearance,
       verticalLayout: resolvedVerticalLayout?.resolved,
       previewQuality: preview,
+      onProgress: encodingProgress.report,
       facecamRegion: facecam
         ? {
             x: facecam.x,
@@ -870,6 +1041,7 @@ export async function executeRenderJob(
         : undefined,
     });
   }
+  await encodingProgress.flush();
 
   if (subtitlePath) {
     await appendRenderJobLog(
@@ -887,7 +1059,22 @@ export async function executeRenderJob(
     outputPath,
     relativeOutput,
     completionMessage: "Render finished",
+    sourceDimensions: inputProbe ? { width: inputProbe.width, height: inputProbe.height } : undefined,
     resolvedLayout: resolvedVerticalLayout?.effectiveLayout,
+    expectedOutput: {
+      width: outputWidth,
+      height: outputHeight,
+      durationSeconds:
+        sequenceSegments.length > 0
+          ? sequenceSegments.reduce(
+              (total, segment) => total + segmentDuration(segment),
+              0
+            )
+          : (preview
+              ? Math.min(renderEnd, renderStart + PREVIEW_MAX_SECONDS)
+              : renderEnd) - renderStart,
+      audio: Boolean(inputProbe.audioCodec),
+    },
   });
 
   return { outputPath: relativeOutput };
@@ -903,6 +1090,37 @@ export async function createRenderJobRecord(params: {
   renderParams: RenderShortParams;
   maxAttempts?: number;
 }) {
+  const specHash = renderSpecHash(params.renderParams);
+  const activeJobs = await prisma.renderJob.findMany({
+    where: {
+      streamSessionId: params.streamSessionId,
+      clipSuggestionId: params.clipSuggestionId ?? null,
+      OR: [
+        {
+          status: "queued",
+          updatedAt: { gte: new Date(Date.now() - 10 * 60_000) },
+        },
+        {
+          status: "processing",
+          // Do not attach a new request to an abandoned process. Healthy jobs
+          // refresh this timestamp through progress and worker heartbeats.
+          updatedAt: { gte: new Date(Date.now() - 2 * 60_000) },
+        },
+      ],
+    },
+    orderBy: { createdAt: "desc" },
+    take: 8,
+    select: { id: true, params: true },
+  });
+  const duplicate = activeJobs.find(
+    (candidate) => storedRenderSpecHash(candidate.params) === specHash
+  );
+  if (duplicate) return duplicate.id;
+
+  const storedParams = {
+    ...params.renderParams,
+    renderSpecHash: specHash,
+  };
   const job = await prisma.renderJob.create({
     data: {
       streamSessionId: params.streamSessionId,
@@ -912,7 +1130,7 @@ export async function createRenderJobRecord(params: {
       progress: 0,
       layout: params.layout ?? "center_crop",
       includeCaptions: params.includeCaptions ?? true,
-      params: params.renderParams as unknown as Prisma.InputJsonValue,
+      params: storedParams as unknown as Prisma.InputJsonValue,
       maxAttempts: params.maxAttempts ?? 3,
       logs: [
         makeRenderJobLogEntry("queued", "Render job queued"),
@@ -941,7 +1159,7 @@ export async function waitForRenderJob(
   jobId: string,
   options: { timeoutMs?: number; pollMs?: number } = {}
 ): Promise<{ outputPath: string }> {
-  const timeoutMs = options.timeoutMs ?? 10 * 60 * 1000;
+  const timeoutMs = options.timeoutMs ?? 30 * 60 * 1000;
   const pollMs = options.pollMs ?? 1500;
   const started = Date.now();
 
@@ -987,5 +1205,11 @@ export async function renderShort(params: RenderShortParams) {
 }
 
 export async function getRenderJob(renderJobId: string) {
-  return prisma.renderJob.findUnique({ where: { id: renderJobId } });
+  return prisma.renderJob.findUnique({
+    where: { id: renderJobId },
+    include: {
+      clipSuggestion: { select: { title: true } },
+      streamSession: { select: { title: true } },
+    },
+  });
 }

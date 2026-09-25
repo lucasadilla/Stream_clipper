@@ -7,6 +7,37 @@ export interface TimedTextSlice {
   text: string;
 }
 
+/** Preserve spoken words whose provider timestamps collapse to an instant. */
+export function repairCollapsedWordTimings<T extends { start: number; end: number; word: string }>(input: T[]): T[] {
+  const words = input.filter((word) => Number.isFinite(word.start) && Number.isFinite(word.end))
+    .map((word) => ({ ...word }));
+  for (let index = 0; index < words.length; index++) {
+    if (words[index]!.end > words[index]!.start) continue;
+    const first = index;
+    while (index + 1 < words.length && words[index + 1]!.end <= words[index + 1]!.start) index++;
+    const next = words[index + 1];
+    let startIndex = first;
+    let endIndex = index;
+    let start = words[first]!.start;
+    let end = next?.start ?? words[index]!.start;
+    if (end <= start && next) {
+      endIndex = index + 1;
+      end = next.end;
+    } else if (end <= start && first > 0 && start - words[first - 1]!.end < 0.2) {
+      startIndex = first - 1;
+      start = words[startIndex]!.start;
+      end = Math.max(words[startIndex]!.end, words[index]!.start);
+    }
+    const count = endIndex - startIndex + 1;
+    const span = Math.max(0.02 * count, end - start);
+    for (let slot = 0; slot < count; slot++) {
+      words[startIndex + slot] = { ...words[startIndex + slot]!,
+        start: start + span * slot / count, end: start + span * (slot + 1) / count };
+    }
+  }
+  return words;
+}
+
 /** Spread transcript text proportionally across a time span (for STT without segments). */
 export function distributeTextAcrossSpan(
   text: string,

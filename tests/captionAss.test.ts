@@ -214,7 +214,9 @@ describe("generateAss captions", () => {
 
     expect(ass).not.toContain("\\fad(");
     expect(ass).not.toContain("\\move(");
-    expect(ass).toContain("\\t(0,0,");
+    expect(ass).not.toContain("\\t(0,0,");
+    expect(ass).toContain("\\alpha&H00&");
+    expect(ass).toContain("\\t(600,600,");
     expect(ass).not.toContain("\\t(0,140,");
     expect(ass).toContain("hello");
     expect(ass).toContain("world");
@@ -359,7 +361,8 @@ describe("caption text cleanup", () => {
       },
     ]);
     expect(cues[0]!.startTimeSeconds).toBe(10);
-    expect(cues.at(-1)!.endTimeSeconds).toBe(12);
+    // The readable phrase holds briefly; spoken-word timing stays clamped.
+    expect(cues.at(-1)!.endTimeSeconds).toBeCloseTo(12.2);
     const words = cues.flatMap((cue) => cue.words ?? []);
     expect(words[0]!.start).toBe(10);
     expect(words.at(-1)!.end).toBe(12);
@@ -370,7 +373,7 @@ describe("caption text cleanup", () => {
       { id: "a", startTimeSeconds: 0, endTimeSeconds: 2, text: "first" },
       { id: "b", startTimeSeconds: 1.5, endTimeSeconds: 3, text: "second" },
     ]);
-    expect(cues[0]!.endTimeSeconds).toBeLessThan(cues[1]!.startTimeSeconds);
+    expect(cues[0]!.endTimeSeconds).toBeLessThanOrEqual(cues[1]!.startTimeSeconds);
   });
 
   it("recovers captions when provider word clocks are implausibly short", () => {

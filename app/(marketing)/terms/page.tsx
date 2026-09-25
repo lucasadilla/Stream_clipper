@@ -77,12 +77,12 @@ export default function TermsPage() {
         a clip you choose to publish).
       </p>
 
-      <h2>6. Plans, billing, and beta access</h2>
+      <h2>6. Plans and billing</h2>
       <p>
-        Paid plans, trials, and invite-only Creator Beta access are subject to
-        the pricing and limits shown in the product. Fees are non-refundable
-        except where required by law. We may change plans or limits with notice
-        where practical.
+        Paid plans are subject to the prices, renewal periods, and usage limits
+        shown before checkout. Fees are non-refundable except where required by
+        law. You can manage or cancel a subscription through Billing settings.
+        We may change plans or limits with notice where practical.
       </p>
 
       <h2>7. Disclaimers</h2>

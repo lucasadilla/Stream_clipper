@@ -18,6 +18,7 @@ import { getPublisherContext } from "@/services/social/socialConnectionService";
 import { getSocialPublisher } from "@/services/social/publishers";
 import { validateSocialPost } from "@/services/social/socialPublishValidationService";
 import { getPublishingPreferences } from "@/services/social/socialPublishingPreferenceService";
+import { getPostHogClient } from "@/lib/posthog-server";
 
 function asJson(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
@@ -49,6 +50,51 @@ async function appendEvent(
       safeMetadata: safeMetadata ? asJson(safeMetadata) : undefined,
     },
   });
+}
+
+async function capturePublishCompleted(jobId: string) {
+  try {
+    const job = await prisma.socialPublishJob.findUnique({
+      where: { id: jobId },
+      select: {
+        platform: true,
+        publishGroup: {
+          select: {
+            clipSuggestionId: true,
+            userId: true,
+            user: {
+              select: { billingAccount: { select: { id: true } } },
+            },
+          },
+        },
+      },
+    });
+    if (!job) return;
+
+    const distinctId =
+      job.publishGroup.user.billingAccount?.id ?? job.publishGroup.userId;
+    const client = getPostHogClient();
+    client.capture({
+      distinctId,
+      event: "clip_published",
+      properties: {
+        clip_id: job.publishGroup.clipSuggestionId,
+        platform: job.platform,
+        $insert_id: `${jobId}:clip_published`,
+      },
+    });
+    client.capture({
+      distinctId,
+      event: "first_clip_published",
+      properties: {
+        clip_id: job.publishGroup.clipSuggestionId,
+        platform: job.platform,
+        $insert_id: `${distinctId}:first_clip_published`,
+      },
+    });
+  } catch (error) {
+    console.warn("[analytics] Could not capture publish completion:", error);
+  }
 }
 
 async function loadClipContext(clipSuggestionId: string) {
@@ -857,6 +903,7 @@ export async function executeSocialPublishJob(jobId: string): Promise<void> {
         });
         await appendEvent(jobId, "completed", "Existing platform post confirmed");
         await refreshGroupStatus(job.publishGroupId);
+        await capturePublishCompleted(jobId);
         return;
       }
     }
@@ -918,6 +965,7 @@ export async function executeSocialPublishJob(jobId: string): Promise<void> {
       privacyStatus: result.privacyStatus,
     });
     await refreshGroupStatus(job.publishGroupId);
+    await capturePublishCompleted(jobId);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Publish failed";
     const code =

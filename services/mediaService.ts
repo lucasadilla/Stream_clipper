@@ -119,7 +119,9 @@ export async function saveSourceMediaStream(
     probe.durationSeconds > options.maxDurationSeconds
   ) {
     await fsUnlink(temporaryPath);
-    throw new Error("Creator Beta source videos can be up to 3 hours long.");
+    throw new Error(
+      `Your plan supports source videos up to ${Math.round(options.maxDurationSeconds / 3600)} hours long.`
+    );
   }
 
   const { rename } = await import("fs/promises");

@@ -5,6 +5,13 @@ import {
 } from "@/lib/renderJobSelection";
 
 describe("render job selection", () => {
+  it("keeps a platform-specific render from replacing the general download", () => {
+    const jobs = [
+      { id: "landscape", outputPath: "x.mp4", params: { platformTarget: { platform: "x", outputId: "landscape" } } },
+      { id: "general", outputPath: "general.mp4", params: { format: "vertical" } },
+    ];
+    expect(selectLatestFinalRenderJob(jobs)?.id).toBe("general");
+  });
   it("recognizes only explicitly marked preview jobs", () => {
     expect(isPreviewRenderJobParams({ preview: true })).toBe(true);
     expect(isPreviewRenderJobParams({ preview: false })).toBe(false);

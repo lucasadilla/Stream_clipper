@@ -60,6 +60,7 @@ export interface PlatformExportSettings {
 }
 
 export interface CreatePlatformExportPackInput {
+  captionOptions?: Partial<Record<PlatformKey, boolean>>;
   platforms: PlatformKey[];
   includeCaptions: boolean;
   burnSubtitles: boolean;

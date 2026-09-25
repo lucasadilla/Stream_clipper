@@ -6,15 +6,19 @@ const FINAL_RENDER_LOOKBACK = 50;
 export async function getLatestCompletedFinalRenderJob(
   clipSuggestionId: string
 ) {
-  const jobs = await prisma.renderJob.findMany({
-    where: {
-      clipSuggestionId,
-      status: "completed",
-      outputPath: { not: null },
-    },
-    orderBy: [{ completedAt: "desc" }, { createdAt: "desc" }],
-    take: FINAL_RENDER_LOOKBACK,
-  });
+  for (let skip = 0; ; skip += FINAL_RENDER_LOOKBACK) {
+    const jobs = await prisma.renderJob.findMany({
+      where: {
+        clipSuggestionId,
+        status: "completed",
+        outputPath: { not: null },
+      },
+      orderBy: [{ completedAt: "desc" }, { createdAt: "desc" }, { id: "desc" }],
+      skip,
+      take: FINAL_RENDER_LOOKBACK,
+    });
 
-  return selectLatestFinalRenderJob(jobs);
+    const general = selectLatestFinalRenderJob(jobs);
+    if (general || jobs.length < FINAL_RENDER_LOOKBACK) return general;
+  }
 }

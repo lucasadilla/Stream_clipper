@@ -5,6 +5,7 @@ import { formatDuration, formatSeconds } from "@/lib/time";
 import { clipDownloadUrl } from "@/lib/downloadUrls";
 import { clipShareUrl } from "@/lib/clipShare";
 import { triggerFileDownload } from "@/lib/clientDownload";
+import { videoDownloadFilename } from "@/lib/downloadFilename";
 import type { ClipSharePayload } from "@/services/clipShareService";
 import { cn } from "@/lib/cn";
 import { SiteLogo } from "@/components/layout/SiteLogo";
@@ -38,8 +39,10 @@ export function ClipShareView({ clip }: ClipShareViewProps) {
     if (!clip.downloadUrl) return;
     setDownloading(true);
     try {
-      const safeName = `${clip.title.slice(0, 40).replace(/[^\w\s-]/g, "") || "clip"}.mp4`;
-      await triggerFileDownload(clipDownloadUrl(clip.id), safeName);
+      await triggerFileDownload(
+        clipDownloadUrl(clip.id),
+        videoDownloadFilename(clip.title)
+      );
     } finally {
       setDownloading(false);
     }

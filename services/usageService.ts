@@ -1,17 +1,14 @@
 import { prisma } from "@/lib/db";
 import {
-  CREATOR_BETA_PLAN,
   getPricingPlan,
   type PlanEntitlements,
   type PricingPlan,
 } from "@/lib/pricing";
 import { formatBytes } from "@/lib/storage";
 import { videoOutputUsageKeys } from "@/lib/videoUsage";
-import { getCreatorBetaExpiration } from "@/lib/creatorBeta";
 import {
   getBillingAccount,
   hasAppAccess,
-  isActiveBillingStatus,
   serializeBillingAccount,
   type BillingAccountSummary,
 } from "@/services/billingService";
@@ -116,19 +113,13 @@ function isNearLimit(
 export async function getUsageSnapshot(
   billingAccountId: string | null | undefined
 ): Promise<UsageSnapshot> {
-  let { periodStart, periodEnd } = monthWindow();
+  const { periodStart, periodEnd } = monthWindow();
   const account = await getBillingAccount(billingAccountId);
   if (!account || !hasAppAccess(account)) {
     return billingRequiredSnapshot(periodStart, periodEnd);
   }
 
-  const betaOnly = account.betaAccess && !isActiveBillingStatus(account.status);
-  const betaExpiresAt = getCreatorBetaExpiration(account);
-  if (betaOnly && account.betaGrantedAt && betaExpiresAt) {
-    periodStart = account.betaGrantedAt;
-    periodEnd = betaExpiresAt;
-  }
-  const plan = betaOnly ? CREATOR_BETA_PLAN : getPricingPlan(account.plan);
+  const plan = getPricingPlan(account.plan);
   const entitlements = account.unlimitedAccess
     ? unlimitedEntitlements()
     : plan.entitlements;
@@ -220,7 +211,7 @@ function billingRequiredGate(snapshot: UsageSnapshot): UsageGateResult {
   return {
     allowed: false,
     status: 402,
-    message: "Creator Beta access is required right now. Enter your access code to unlock beta features.",
+    message: "An active Clipper subscription is required to process videos.",
     snapshot,
   };
 }
@@ -236,7 +227,7 @@ export async function canCreateStreamSession(
     return {
       allowed: false,
       status: 402,
-      message: `Creator Beta includes ${limit} video uploads per month. Your limit resets next month.`,
+      message: `Your plan includes ${limit} video uploads per month. Your limit resets next billing period.`,
       snapshot,
     };
   }
@@ -306,7 +297,7 @@ export async function canRenderExport(
     return {
       allowed: false,
       status: 400,
-      message: `Creator Beta rendered clips can be up to ${maxClipDuration} seconds. Shorten this clip before rendering.`,
+      message: `Your plan supports rendered clips up to ${maxClipDuration} seconds. Shorten this clip before rendering.`,
       snapshot,
     };
   }
@@ -367,7 +358,7 @@ export async function canUseSourceDuration(
     return {
       allowed: false,
       status: 400,
-      message: "Creator Beta source videos can be up to 3 hours long.",
+      message: `Your plan supports source videos up to ${Math.round(limit / 3600)} hours long.`,
       snapshot,
     };
   }

@@ -49,6 +49,12 @@ export type FaceDetection = {
   timestampSeconds: number;
   rect: NormalizedRect;
   confidence: number;
+  /** Anonymous, clip-local visual feature used only to keep track IDs stable. */
+  appearanceDescriptor?: number[];
+  /** Approximate horizontal head direction from -1 (left) to 1 (right). */
+  lookDirectionX?: number;
+  /** Scene number assigned from hard-cut detection; tracks never cross scenes. */
+  sceneId?: number;
   /** Mouth width / face width when the detector provides landmarks. */
   mouthOpenRatio?: number;
   /** Normalized motion inside the aligned mouth region for this sample. */
@@ -61,6 +67,8 @@ export type FaceTrackPoint = {
   timestampSeconds: number;
   rect: NormalizedRect;
   confidence: number;
+  /** Approximate horizontal head direction from -1 (left) to 1 (right). */
+  lookDirectionX?: number;
   mouthOpenRatio?: number;
   speakingActivity?: number;
   audioActivity?: number;

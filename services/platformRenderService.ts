@@ -3,6 +3,8 @@ import fs from "fs/promises";
 import {
   getFfmpegPath,
   getFfmpegThreadCount,
+  ffmpegProgressHandler,
+  ffmpegRenderTimeoutMs,
   isFfmpegLowMemoryMode,
   probeMedia,
   runCommand,
@@ -24,6 +26,8 @@ export interface RenderPlatformVideoInput {
   quoteText?: string | null;
   /** The master already contains the approved preview captions. */
   sourceIncludesCaptions?: boolean;
+  /** Actual encode progress, from zero to one. */
+  onProgress?: (progress: number) => void;
 }
 
 function escapeSubtitlePath(filePath: string): string {
@@ -101,7 +105,7 @@ async function encode(
   const preset =
     process.env.FFMPEG_PLATFORM_EXPORT_PRESET?.trim() ||
     process.env.FFMPEG_EXPORT_PRESET?.trim() ||
-    (lowMemory ? "medium" : "slow");
+    "medium";
   const configuredCrf = Number.parseInt(
     process.env.FFMPEG_PLATFORM_EXPORT_CRF?.trim() ||
       process.env.FFMPEG_EXPORT_CRF?.trim() ||
@@ -111,9 +115,7 @@ async function encode(
   const crf =
     Number.isFinite(configuredCrf) && configuredCrf >= 0 && configuredCrf <= 51
       ? String(configuredCrf)
-      : lowMemory
-        ? "16"
-        : "14";
+      : "10";
 
   const args = [
     "-y",
@@ -148,8 +150,16 @@ async function encode(
   if (lowMemory) {
     args.push("-filter_threads", "1", "-max_muxing_queue_size", "1024");
   }
+  const source = await probeMedia(input.inputPath).catch(() => null);
+  const durationSeconds = Math.max(0.1, source?.durationSeconds ?? 0.1);
+  if (input.onProgress) {
+    args.push("-stats_period", "0.25", "-progress", "pipe:2", "-nostats");
+  }
   args.push(input.outputPath);
-  await runCommand(getFfmpegPath(), args);
+  await runCommand(getFfmpegPath(), args, {
+    timeoutMs: ffmpegRenderTimeoutMs(durationSeconds),
+    onOutputLine: ffmpegProgressHandler(durationSeconds, input.onProgress),
+  });
 }
 
 export function buildPlatformVideoFilters(
@@ -220,6 +230,9 @@ async function reuseFinishedMaster(input: RenderPlatformVideoInput): Promise<boo
 export async function renderPlatformVideo(
   input: RenderPlatformVideoInput
 ): Promise<{ warnings: string[] }> {
+  if (input.sourceIncludesCaptions && !input.settings.burnSubtitles) {
+    throw new Error("A caption-free source render is required when captions are turned off.");
+  }
   await fs.mkdir(path.dirname(input.outputPath), { recursive: true });
   const warnings: string[] = [];
   const wantsQuote =

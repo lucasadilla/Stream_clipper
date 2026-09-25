@@ -1,4 +1,5 @@
 import os from "os";
+import { platformRenderDimensions, type PlatformRenderTarget } from "@/lib/platforms/renderTarget";
 import path from "path";
 import fs from "fs/promises";
 import { getAiClient, getChatModel, hasAnyAiKey } from "@/lib/aiProvider";
@@ -15,6 +16,7 @@ import { getTranscriptChunksForRange } from "@/services/transcriptService";
 import { prisma } from "@/lib/db";
 
 interface CriticRenderParams {
+  platformTarget?: PlatformRenderTarget;
   streamSessionId: string;
   clipSuggestionId?: string;
   startTimeSeconds: number;
@@ -245,6 +247,7 @@ ${transcriptForPrompt(input.transcript)}`;
 export async function reviewRenderedOutput(input: {
   outputPath: string;
   params: CriticRenderParams;
+  sourceDimensions?: { width: number; height: number };
 }): Promise<PostRenderQualityReview> {
   const [probe, stat, context, transcript] = await Promise.all([
     probeMedia(input.outputPath),
@@ -276,14 +279,16 @@ export async function reviewRenderedOutput(input: {
     audioCodec: probe.audioCodec,
     fileSizeBytes: stat.size,
     format: input.params.format ?? "vertical",
+    expectedDimensions: input.params.platformTarget ? platformRenderDimensions(input.params.platformTarget) : undefined,
     expectsAudio: expectsAudio(input.params),
     expectsCaptions: input.params.includeCaptions !== false,
+    sourceDimensions: input.sourceDimensions,
   });
 
   if (!criticEnabled() || !hasAnyAiKey()) {
     return {
       ...technical,
-      summary: hasAnyAiKey()
+      summary: technical.verdict !== "pass" ? technical.summary : hasAnyAiKey()
         ? "The export passed through technical checks; visual AI review is disabled."
         : "The export passed through technical checks; visual AI review needs an AI provider key.",
     };

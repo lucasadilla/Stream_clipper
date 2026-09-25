@@ -1,12 +1,18 @@
 import type { FaceTrack, FaceTrackPoint } from "@/lib/verticalLayout";
+import {
+  faceTrackForSpeaker,
+  speakerAtTime,
+  type SpeakerContext,
+} from "@/lib/speakerContext";
 
-export const ACTIVE_SPEAKER_VERSION = "audio-visual-speaker-v1";
+export const ACTIVE_SPEAKER_VERSION = "audio-visual-speaker-v2";
 
 export type ActiveSpeakerDecisionReason =
   | "initial"
   | "speech"
   | "speaker_change"
   | "scene_change"
+  | "offscreen_hold"
   | "hold"
   | "fallback";
 
@@ -18,6 +24,9 @@ export type ActiveSpeakerDecision = {
   visualActivity: number;
   audioVisualCorrelation: number;
   reason: ActiveSpeakerDecisionReason;
+  /** Audible source-level identity, even when it is not visible. */
+  speakerId?: string;
+  speakerIdentityConfidence?: number;
 };
 
 export type ActiveSpeakerTimeline = {
@@ -288,6 +297,7 @@ export function buildAudioVisualActiveSpeakerTimeline(options: {
   clipEndSeconds: number;
   primaryTrackId?: string;
   sceneChanges?: SceneBoundary[];
+  speakerContext?: SpeakerContext;
   config?: Partial<ActiveSpeakerConfig>;
 }): ActiveSpeakerTimeline {
   const config = { ...DEFAULT_ACTIVE_SPEAKER_CONFIG, ...options.config };
@@ -354,6 +364,15 @@ export function buildAudioVisualActiveSpeakerTimeline(options: {
         )
         .at(-1)?.timestampSeconds ?? options.clipStartSeconds;
     const audioActivity = audioActivityAt(audioSamples, timestampSeconds);
+    const speakerInterval = speakerAtTime(
+      options.speakerContext,
+      timestampSeconds
+    );
+    const audibleSpeakerId = speakerInterval?.primarySpeakerId;
+    const mappedTrackId = faceTrackForSpeaker(
+      options.speakerContext,
+      audibleSpeakerId
+    );
     const visible = tracks
       .flatMap((track) => {
         const point = closestPoint(track, timestampSeconds);
@@ -393,7 +412,14 @@ export function buildAudioVisualActiveSpeakerTimeline(options: {
 
     const current = visible.find((item) => item.track.id === activeId);
     if (current) lastActiveVisibleAt = timestampSeconds;
-    const best = visible[0];
+    const visualBest = visible[0];
+    const mapped = mappedTrackId
+      ? visible.find((item) => item.track.id === mappedTrackId)
+      : undefined;
+    const best = speakerInterval ? mapped ?? visualBest : visualBest;
+    const canonicalSpeakerUnmapped = Boolean(
+      speakerInterval && audibleSpeakerId && !mapped
+    );
     const speechEvidence = Boolean(
       best &&
         best.visual.normalized >= config.speechVisualThreshold &&
@@ -404,8 +430,11 @@ export function buildAudioVisualActiveSpeakerTimeline(options: {
       : "hold";
 
     if (decisions.length === 0 && best) {
-      const openingChoice =
-        (speechEvidence ? best : undefined) ?? current ?? best;
+      const openingChoice = canonicalSpeakerUnmapped
+        ? current ??
+          visible.find((item) => item.track.id === options.primaryTrackId) ??
+          best
+        : (speechEvidence ? best : undefined) ?? current ?? best;
       activeId = openingChoice.track.id;
       activeSince = timestampSeconds;
       lastActiveVisibleAt = timestampSeconds;
@@ -413,7 +442,7 @@ export function buildAudioVisualActiveSpeakerTimeline(options: {
       reason = "initial";
     } else if (sceneChanged) {
       const sceneChoice =
-        (speechEvidence ? best : undefined) ??
+        (mapped ?? (canonicalSpeakerUnmapped ? undefined : speechEvidence ? best : undefined)) ??
         visible.find((item) => item.track.id === options.primaryTrackId) ??
         best;
       if (sceneChoice) {
@@ -430,6 +459,7 @@ export function buildAudioVisualActiveSpeakerTimeline(options: {
         timestampSeconds - lastActiveVisibleAt >= config.faceLossHoldSeconds;
       const currentScore = current?.score ?? 0;
       const canChallenge =
+        !canonicalSpeakerUnmapped &&
         best.track.id !== activeId &&
         (activeMissing ||
           (speechEvidence &&
@@ -454,7 +484,8 @@ export function buildAudioVisualActiveSpeakerTimeline(options: {
         }
       } else {
         challengerId = undefined;
-        if (speechEvidence && best.track.id === activeId) reason = "speech";
+        if (canonicalSpeakerUnmapped) reason = "offscreen_hold";
+        else if (speechEvidence && best.track.id === activeId) reason = "speech";
       }
     } else if (
       timestampSeconds - lastActiveVisibleAt > config.faceLossHoldSeconds
@@ -485,6 +516,10 @@ export function buildAudioVisualActiveSpeakerTimeline(options: {
       visualActivity: selected?.visual.normalized ?? 0,
       audioVisualCorrelation: selected?.correlation ?? 0,
       reason,
+      ...(audibleSpeakerId ? { speakerId: audibleSpeakerId } : {}),
+      ...(speakerInterval
+        ? { speakerIdentityConfidence: speakerInterval.confidence }
+        : {}),
     });
   }
 

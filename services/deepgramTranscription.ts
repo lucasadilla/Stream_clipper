@@ -17,6 +17,7 @@ interface DeepgramWord {
   end?: number;
   confidence?: number;
   speaker?: number | string;
+  speaker_confidence?: number;
 }
 
 interface DeepgramUtterance {
@@ -30,6 +31,7 @@ interface DeepgramUtterance {
 interface DeepgramResponse {
   metadata?: {
     model_info?: Record<string, { name?: string }>;
+    diarize_info?: { model_uuid?: string; arch?: string };
   };
   results?: {
     utterances?: DeepgramUtterance[];
@@ -87,6 +89,14 @@ function normalizeWord(
       ? { confidence: Math.min(1, Math.max(0, raw.confidence)) }
       : {}),
     ...(raw.speaker != null ? { speaker: String(raw.speaker) } : {}),
+    ...(typeof raw.speaker_confidence === "number"
+      ? {
+          speakerConfidence: Math.min(
+            1,
+            Math.max(0, raw.speaker_confidence)
+          ),
+        }
+      : {}),
   };
 }
 
@@ -105,6 +115,9 @@ export function parseDeepgramTranscription(
   timeOffsetSeconds: number,
   model = getDeepgramModel()
 ): TranscriptSegmentWithMeta[] {
+  const diarizationModel = response.metadata?.diarize_info?.arch
+    ? `deepgram-${response.metadata.diarize_info.arch}`
+    : undefined;
   const utterances = response.results?.utterances ?? [];
   const parsedUtterances = utterances.flatMap((utterance) => {
     const text = sanitizeCaptionText(utterance.transcript ?? "");
@@ -129,6 +142,7 @@ export function parseDeepgramTranscription(
         provider: "deepgram" as const,
         model,
         timingModel: model,
+        ...(diarizationModel ? { diarizationModel } : {}),
       },
     ];
   });
@@ -155,11 +169,12 @@ export function parseDeepgramTranscription(
       provider: "deepgram",
       model,
       timingModel: model,
+      ...(diarizationModel ? { diarizationModel } : {}),
     },
   ];
 }
 
-function buildDeepgramUrl(context: TranscriptionContextPacket): string {
+export function buildDeepgramUrl(context: TranscriptionContextPacket): string {
   const url = new URL("https://api.deepgram.com/v1/listen");
   url.searchParams.set("model", getDeepgramModel());
   url.searchParams.set("smart_format", "true");
@@ -171,8 +186,14 @@ function buildDeepgramUrl(context: TranscriptionContextPacket): string {
   } else if (context.language) {
     url.searchParams.set("language", context.language);
   }
-  if (/^(1|true|yes|on)$/i.test(process.env.DEEPGRAM_DIARIZE?.trim() ?? "")) {
-    url.searchParams.set("diarize", "true");
+  // Speaker attribution is part of Clipper's normal transcript contract.
+  // Keep an explicit opt-out for constrained deployments, but do not silently
+  // discard diarization when the provider supports it.
+  if (!/^(0|false|no|off)$/i.test(process.env.DEEPGRAM_DIARIZE?.trim() ?? "")) {
+    url.searchParams.set(
+      "diarize_model",
+      process.env.DEEPGRAM_DIARIZE_MODEL?.trim() || "latest"
+    );
   }
   for (const keyterm of context.keyterms.slice(0, 100)) {
     url.searchParams.append("keyterm", keyterm);

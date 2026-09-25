@@ -76,7 +76,18 @@ async function sourceMediaFromFoundFile(
 
 export async function findLocalSourceMedia(streamSessionId: string) {
   const sourceMedia = await prisma.sourceMedia.findFirst({
-    where: { streamSessionId },
+    where: {
+      streamSessionId,
+      // Render-range masters and clip segments are dedicated cache entries.
+      // Reusing the newest one as the canonical session source caused this
+      // repair routine to overwrite its database row with the low-resolution
+      // editing proxy, so every export downloaded the same 4K range again.
+      NOT: [
+        { originalFilename: { startsWith: "render-source-" } },
+        { originalFilename: { startsWith: "segment-" } },
+        { originalFilename: { startsWith: "studio-preview-" } },
+      ],
+    },
     orderBy: { createdAt: "desc" },
   });
 

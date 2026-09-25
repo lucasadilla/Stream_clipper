@@ -1,13 +1,10 @@
 import type Stripe from "stripe";
-import {
-  getCreatorBetaExpiration,
-  isCreatorBetaAccessActive,
-} from "@/lib/creatorBeta";
 import { prisma } from "@/lib/db";
 import {
   BILLING_ACCOUNT_COOKIE,
   getStripe,
   isManagedPaymentsEnabled,
+  parseBillingAccountCookie,
 } from "@/lib/stripe";
 import type { ManagedPaymentsCheckoutSessionParams } from "@/lib/stripeCheckout";
 import {
@@ -19,6 +16,7 @@ import {
   type CheckoutPlanId,
   type PlanId,
 } from "@/lib/pricing";
+import type { OnboardingAttribution, OnboardingWorkflow } from "@/lib/onboardingIntent";
 
 export interface BillingAccountSummary {
   id: string;
@@ -53,7 +51,6 @@ export function canManageBillingForAccount(account: {
   status?: string;
 }): boolean {
   if (account.unlimitedAccess) return false;
-  if (account.betaAccess && !isActiveBillingStatus(account.status)) return false;
   if (account.stripeCustomerId.startsWith("beta_")) return false;
   return !account.stripeCustomerId.startsWith("comp_");
 }
@@ -64,7 +61,7 @@ export function getBillingAccountIdFromRequest(request: Request): string | null 
   const value = parts
     .find((part) => part.startsWith(`${BILLING_ACCOUNT_COOKIE}=`))
     ?.split("=")[1];
-  return value ? decodeURIComponent(value) : null;
+  return parseBillingAccountCookie(value ? decodeURIComponent(value) : null);
 }
 
 export function isActiveBillingStatus(status: string | null | undefined) {
@@ -80,7 +77,6 @@ export function hasAppAccess(account: {
 } | null | undefined): boolean {
   if (!account) return false;
   if (account.unlimitedAccess) return true;
-  if (isCreatorBetaAccessActive(account)) return true;
   return isActiveBillingStatus(account.status);
 }
 
@@ -101,8 +97,7 @@ export function serializeBillingAccount(account: {
   lastSignedInAt?: Date | null;
 }): BillingAccountSummary {
   const unlimitedAccess = account.unlimitedAccess ?? false;
-  const betaAccess = isCreatorBetaAccessActive(account);
-  const betaExpiresAt = getCreatorBetaExpiration(account);
+  const betaAccess = false;
   return {
     id: account.id,
     email: account.email,
@@ -112,7 +107,7 @@ export function serializeBillingAccount(account: {
     unlimitedAccess,
     betaAccess,
     betaGrantedAt: account.betaGrantedAt?.toISOString() ?? null,
-    betaExpiresAt: betaExpiresAt?.toISOString() ?? null,
+    betaExpiresAt: null,
     canManageBilling: canManageBillingForAccount({
       unlimitedAccess,
       betaAccess,
@@ -131,11 +126,13 @@ export async function getBillingAccount(accountId: string | null | undefined) {
   if (!accountId) return null;
   const account = await prisma.billingAccount.findUnique({ where: { id: accountId } });
   if (!account) return null;
-  if (account.betaAccess && !isCreatorBetaAccessActive(account)) {
+  if (account.betaAccess) {
     return prisma.billingAccount.update({
       where: { id: account.id },
       data: {
         betaAccess: false,
+        betaGrantedAt: null,
+        betaExpiresAt: null,
         ...(account.status === "beta" ? { status: "incomplete" } : {}),
       },
     });
@@ -149,6 +146,8 @@ export async function createCheckoutSession(params: {
   origin: string;
   customerEmail?: string | null;
   billingAccountId?: string | null;
+  workflow?: OnboardingWorkflow | null;
+  attribution?: OnboardingAttribution;
 }) {
   if (!isCheckoutPlan(params.planId)) {
     throw new Error("Choose Creator, Pro, or Studio to start checkout");
@@ -165,16 +164,57 @@ export async function createCheckoutSession(params: {
   }
 
   const stripe = getStripe();
+  const configuredPrice = await stripe.prices.retrieve(priceId);
+  const expectedInterval = params.interval === "monthly" ? "month" : "year";
+  if (
+    !configuredPrice.active ||
+    configuredPrice.type !== "recurring" ||
+    configuredPrice.recurring?.interval !== expectedInterval
+  ) {
+    throw new Error(
+      `${priceEnvVar} must reference an active ${expectedInterval}ly recurring Stripe Price.`
+    );
+  }
+  const existingAccount = params.billingAccountId
+    ? await getBillingAccount(params.billingAccountId)
+    : null;
+  if (!existingAccount) {
+    throw new Error("Sign in before choosing a Clipper plan");
+  }
+  if (hasAppAccess(existingAccount)) {
+    throw new Error(
+      "Your subscription is already active. Use Billing settings to change plans."
+    );
+  }
   const sessionParams: ManagedPaymentsCheckoutSessionParams = {
     mode: "subscription",
     line_items: [{ price: priceId, quantity: 1 }],
     allow_promotion_codes: true,
-    success_url: `${params.origin}/api/billing/complete?session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${params.origin}/welcome`,
+    success_url: `${params.origin}/billing/activate?session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${params.origin}/welcome?checkout=cancelled`,
     client_reference_id: params.billingAccountId || planId,
     metadata: {
       plan: planId,
       interval: params.interval,
+      workflow: params.workflow ?? "timeline",
+      ...(params.attribution?.utmSource
+        ? { utm_source: params.attribution.utmSource.slice(0, 500) }
+        : {}),
+      ...(params.attribution?.utmMedium
+        ? { utm_medium: params.attribution.utmMedium.slice(0, 500) }
+        : {}),
+      ...(params.attribution?.utmCampaign
+        ? { utm_campaign: params.attribution.utmCampaign.slice(0, 500) }
+        : {}),
+      ...(params.attribution?.utmContent
+        ? { utm_content: params.attribution.utmContent.slice(0, 500) }
+        : {}),
+      ...(params.attribution?.marketingContentId
+        ? {
+            marketing_content_id:
+              params.attribution.marketingContentId.slice(0, 500),
+          }
+        : {}),
       ...(params.billingAccountId
         ? { billingAccountId: params.billingAccountId }
         : {}),
@@ -183,6 +223,7 @@ export async function createCheckoutSession(params: {
       metadata: {
         plan: planId,
         interval: params.interval,
+        workflow: params.workflow ?? "timeline",
         ...(params.billingAccountId
           ? { billingAccountId: params.billingAccountId }
           : {}),
@@ -198,7 +239,16 @@ export async function createCheckoutSession(params: {
     sessionParams.managed_payments = { enabled: true };
   }
 
-  return stripe.checkout.sessions.create(sessionParams);
+  const checkoutWindow = Math.floor(Date.now() / (10 * 60 * 1_000));
+  return stripe.checkout.sessions.create(sessionParams, {
+    idempotencyKey: [
+      "clipper_checkout",
+      existingAccount.id,
+      planId,
+      params.interval,
+      checkoutWindow,
+    ].join("_"),
+  });
 }
 
 export async function createPortalSession(params: {
@@ -259,6 +309,34 @@ export async function upsertBillingAccountFromCheckout(
     status = subscription.status;
     currentPeriodEnd = subscriptionPeriodEnd(subscription);
     cancelAtPeriodEnd = subscription.cancel_at_period_end;
+  }
+
+  const intendedAccountId = session.metadata?.billingAccountId?.trim();
+  if (intendedAccountId) {
+    const intendedAccount = await prisma.billingAccount.findUnique({
+      where: { id: intendedAccountId },
+      select: { id: true },
+    });
+    if (!intendedAccount) {
+      throw new Error("Checkout account no longer exists");
+    }
+    return prisma.billingAccount.update({
+      where: { id: intendedAccountId },
+      data: {
+        email:
+          session.customer_details?.email ?? session.customer_email ?? undefined,
+        stripeCustomerId: customerId,
+        stripeSubscriptionId: subscriptionId,
+        plan,
+        status,
+        currentPeriodEnd,
+        cancelAtPeriodEnd,
+        betaAccess: false,
+        betaGrantedAt: null,
+        betaExpiresAt: null,
+        lastSignedInAt: new Date(),
+      },
+    });
   }
 
   return prisma.billingAccount.upsert({

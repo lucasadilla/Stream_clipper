@@ -2,14 +2,16 @@ import { randomUUID } from "crypto";
 import { cookies } from "next/headers";
 import { prisma } from "@/lib/db";
 import { normalizeLoginEmail, isUnlimitedAccessEmail } from "@/lib/accessConfig";
-import { BILLING_ACCOUNT_COOKIE } from "@/lib/stripe";
+import {
+  BILLING_ACCOUNT_COOKIE,
+  serializeBillingAccountCookie,
+} from "@/lib/stripe";
 import {
   hasAppAccess,
   isActiveBillingStatus,
   serializeBillingAccount,
   type BillingAccountSummary,
 } from "@/services/billingService";
-import { isCreatorBetaAccessActive } from "@/lib/creatorBeta";
 
 export const PENDING_CREATOR_CODE_COOKIE = "clipper_pending_creator_code";
 
@@ -20,7 +22,7 @@ function authStripeCustomerId(provider: string, providerAccountId?: string) {
 
 export async function setBillingAccountCookie(accountId: string) {
   const jar = await cookies();
-  jar.set(BILLING_ACCOUNT_COOKIE, accountId, {
+  jar.set(BILLING_ACCOUNT_COOKIE, serializeBillingAccountCookie(accountId), {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
@@ -83,7 +85,6 @@ export async function ensureBillingAccountForAuthUser(params: {
       },
     });
   } else {
-    const betaActive = isCreatorBetaAccessActive(account);
     account = await prisma.billingAccount.update({
       where: { id: account.id },
       data: {
@@ -93,13 +94,13 @@ export async function ensureBillingAccountForAuthUser(params: {
           params.name?.trim().slice(0, 80) || account.displayName || null,
         authProvider: provider,
         unlimitedAccess: unlimited || account.unlimitedAccess,
-        betaAccess: betaActive,
+        betaAccess: false,
+        betaGrantedAt: null,
+        betaExpiresAt: null,
         status: unlimited || account.unlimitedAccess
           ? "active"
           : isActiveBillingStatus(account.status)
             ? account.status
-          : betaActive
-            ? "beta"
             : account.status === "beta"
               ? "incomplete"
               : account.status,
@@ -114,6 +115,6 @@ export async function ensureBillingAccountForAuthUser(params: {
 }
 
 export function postAuthRedirectPath(account: BillingAccountSummary): string {
-  if (hasAppAccess(account)) return "/#analyze";
+  if (hasAppAccess(account)) return "/billing/activate";
   return "/welcome";
 }

@@ -1,9 +1,10 @@
 import path from "path";
+import { spawn } from "child_process";
 import { existsSync, statSync } from "fs";
 import { unlink } from "fs/promises";
 import {
   extractFastTimelineFrame,
-  extractSoloTimelineFrame,
+  extractPortraitThumbnailFrame,
 } from "@/lib/ffmpeg";
 import {
   ensureDir,
@@ -16,13 +17,18 @@ import { ensureClipSourceForRender } from "@/services/clipSourceService";
 import { prisma } from "@/lib/db";
 
 const activeThumbnailJobs = new Map<string, Promise<string | null>>();
+const CLIP_THUMBNAIL_VERSION = 2;
+
+function clipThumbFilename(clipSuggestionId: string): string {
+  return `clip_${clipSuggestionId}_v${CLIP_THUMBNAIL_VERSION}.jpg`;
+}
 
 export function clipThumbRelativePath(
   streamSessionId: string,
   clipSuggestionId: string
 ): string {
   return toRelativeStoragePath(
-    path.join(getFramesDir(streamSessionId), `clip_${clipSuggestionId}.jpg`)
+    path.join(getFramesDir(streamSessionId), clipThumbFilename(clipSuggestionId))
   );
 }
 
@@ -49,6 +55,73 @@ function validThumbnail(filePath: string): boolean {
   } catch {
     return false;
   }
+}
+
+function thumbnailPythonExecutable(): string {
+  return (
+    process.env.FACECAM_PYTHON ||
+    process.env.PYTHON_PATH ||
+    (process.platform === "win32" ? "python" : "python3")
+  );
+}
+
+async function selectHighQualityThumbnail(options: {
+  inputPath: string;
+  outputPath: string;
+  candidateTimes: number[];
+}): Promise<boolean> {
+  return new Promise((resolve) => {
+    const script = path.resolve(
+      process.cwd(),
+      "workers",
+      "facecam",
+      "select_thumbnail.py"
+    );
+    const proc = spawn(thumbnailPythonExecutable(), [script], {
+      shell: false,
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let settled = false;
+    const finish = (success: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(success && validThumbnail(options.outputPath));
+    };
+    const timer = setTimeout(() => {
+      proc.kill();
+      finish(false);
+    }, 45_000);
+    proc.stdout.on("data", (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+    // The detector can emit native-library diagnostics on stderr. Ignore them;
+    // process status and structured stdout determine whether the image is valid.
+    proc.stderr.resume();
+    proc.stdin.on("error", () => finish(false));
+    proc.on("error", () => finish(false));
+    proc.on("close", (code) => {
+      if (code !== 0) return finish(false);
+      try {
+        const result = JSON.parse(stdout) as { ok?: boolean };
+        finish(result.ok === true);
+      } catch {
+        finish(false);
+      }
+    });
+    proc.stdin.end(
+      JSON.stringify({
+        videoPath: options.inputPath,
+        outputPath: options.outputPath,
+        candidateTimes: options.candidateTimes,
+        outputWidth: 720,
+        outputHeight: 1280,
+        minConfidence: 0.45,
+      })
+    );
+  });
 }
 
 async function resolveThumbInput(
@@ -81,8 +154,7 @@ export async function ensureClipSuggestionThumbnail(
   const active = activeThumbnailJobs.get(key);
   if (active) return active;
 
-  let job: Promise<string | null>;
-  job = generateClipSuggestionThumbnail(
+  const job = generateClipSuggestionThumbnail(
     streamSessionId,
     clipSuggestionId
   ).finally(() => {
@@ -105,7 +177,7 @@ async function generateClipSuggestionThumbnail(
 
   const framesDir = getFramesDir(streamSessionId);
   await ensureDir(framesDir);
-  const dest = path.join(framesDir, `clip_${clipSuggestionId}.jpg`);
+  const dest = path.join(framesDir, clipThumbFilename(clipSuggestionId));
   if (validThumbnail(dest)) {
     return clipThumbPublicUrl(streamSessionId, clipSuggestionId, Date.now());
   }
@@ -130,22 +202,48 @@ async function generateClipSuggestionThumbnail(
     raw.focusTimeSeconds <= clip.endTimeSeconds
       ? raw.focusTimeSeconds
       : null;
-  // Prefer a beat slightly into the clip — mid is often a reaction face.
+  const duration = Math.max(1, clip.endTimeSeconds - clip.startTimeSeconds);
+  // Sample the story focus, reaction, and payoff. The selector prioritizes a
+  // clear face, then sharpness/exposure, and creates the portrait crop itself.
   const seekTimes = [
     storedFocus,
+    clip.startTimeSeconds + duration * 0.68,
     mid || clip.startTimeSeconds + 1,
-    clip.startTimeSeconds +
-      Math.min(4, (clip.endTimeSeconds - clip.startTimeSeconds) * 0.35),
+    clip.startTimeSeconds + duration * 0.35,
+    clip.startTimeSeconds + duration * 0.82,
     clip.startTimeSeconds + 1,
+    Math.max(clip.startTimeSeconds, clip.endTimeSeconds - 1.25),
   ].filter(
     (value, index, values): value is number =>
       value != null && values.indexOf(value) === index
   );
 
-  for (const t of seekTimes) {
-    const seekTime = Math.max(0, t + input.seekOffsetSeconds);
+  const sourceSeekTimes = seekTimes.map((time) =>
+    Math.max(0, time + input.seekOffsetSeconds)
+  );
+  if (
+    await selectHighQualityThumbnail({
+      inputPath: input.inputPath,
+      outputPath: dest,
+      candidateTimes: sourceSeekTimes,
+    })
+  ) {
+    return clipThumbPublicUrl(streamSessionId, clipSuggestionId, Date.now());
+  }
+  await unlink(dest).catch(() => {});
+
+  // Keep FFmpeg as a dependency-light fallback if the local Python detector is
+  // unavailable. Use a larger still so the card remains crisp.
+  for (const seekTime of sourceSeekTimes) {
     try {
-      await extractSoloTimelineFrame(input.inputPath, dest, seekTime, 480, 3);
+      await extractPortraitThumbnailFrame(
+        input.inputPath,
+        dest,
+        seekTime,
+        720,
+        1280,
+        2
+      );
       if (validThumbnail(dest)) {
         return clipThumbPublicUrl(streamSessionId, clipSuggestionId, Date.now());
       }
@@ -154,7 +252,7 @@ async function generateClipSuggestionThumbnail(
     }
     await unlink(dest).catch(() => {});
     try {
-      await extractFastTimelineFrame(input.inputPath, dest, seekTime, 480, 3);
+      await extractFastTimelineFrame(input.inputPath, dest, seekTime, 720, 2);
       if (validThumbnail(dest)) {
         return clipThumbPublicUrl(streamSessionId, clipSuggestionId, Date.now());
       }

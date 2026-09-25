@@ -8,7 +8,7 @@ import { DitheringBackground } from "@/components/ui/dithering-background";
 import { AnimatedGradient } from "@/components/ui/animated-gradient";
 import { AuroraBackground } from "@/components/ui/aurora-background";
 import { MarketingMarquee } from "@/components/MarketingMarquee";
-import { PRICING_PLANS } from "@/lib/pricing";
+import { getPublicPricingPlans } from "@/services/publicPricingService";
 
 export const metadata: Metadata = {
   alternates: { canonical: "https://streamclipper.stream/" },
@@ -159,7 +159,8 @@ const structuredData = {
   ],
 };
 
-export default function HomePage() {
+export default async function HomePage() {
+  const pricingPlans = await getPublicPricingPlans();
   return (
     <div className="marketing-shell marketing-home overflow-hidden bg-[#020302]">
       <MarketingScrollMotion />
@@ -384,7 +385,7 @@ export default function HomePage() {
           </div>
 
           <div className="mt-14 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            {PRICING_PLANS.map((plan) => (
+            {pricingPlans.map((plan) => (
               <div
                 key={plan.id}
                 data-scroll-reveal="card"
@@ -413,7 +414,9 @@ export default function HomePage() {
                   <p className="mt-2 text-xs text-[var(--color-muted)]">
                     {plan.yearlyLabel === "Custom"
                       ? "Custom annual contract"
-                      : `${plan.yearlyLabel} with yearly billing`}
+                      : plan.yearlyAvailable
+                        ? `${plan.yearlyLabel} with yearly billing${plan.currency ? ` in ${plan.currency.toUpperCase()}` : ""}`
+                        : "Annual billing is not currently configured"}
                   </p>
                 </div>
 
@@ -431,7 +434,11 @@ export default function HomePage() {
                   </ul>
                 </div>
 
-                <BillingPlanButton planId={plan.id} />
+                <BillingPlanButton
+                  planId={plan.id}
+                  monthlyAvailable={plan.monthlyAvailable}
+                  yearlyAvailable={plan.yearlyAvailable}
+                />
               </div>
             ))}
           </div>

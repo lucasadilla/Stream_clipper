@@ -80,7 +80,10 @@ export function OperationProgress({
     setDisplayedProgress(null);
   }, [resetKey]);
   useEffect(() => {
-    if (incomingProgress === null || incomingProgress <= 0) return;
+    if (incomingProgress === null || incomingProgress <= 0) {
+      setDisplayedProgress(null);
+      return;
+    }
     setDisplayedProgress((current) => Math.max(current ?? 0, incomingProgress));
   }, [incomingProgress]);
   const realProgress = displayedProgress;

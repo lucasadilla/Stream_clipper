@@ -14,8 +14,16 @@ import {
 
 export type TranscriptionWorkload = "live" | "vod";
 
-function liveProviderPreference(): "auto" | "deepgram" | "whisper" {
-  const value = process.env.TRANSCRIPTION_LIVE_PROVIDER?.trim().toLowerCase();
+function providerPreference(
+  workload: TranscriptionWorkload
+): "auto" | "deepgram" | "whisper" {
+  const value = (
+    workload === "live"
+      ? process.env.TRANSCRIPTION_LIVE_PROVIDER
+      : process.env.TRANSCRIPTION_VOD_PROVIDER
+  )
+    ?.trim()
+    .toLowerCase();
   if (value === "deepgram" || value === "whisper") return value;
   return "auto";
 }
@@ -31,6 +39,15 @@ export function configuredTranscriptionProviders(): string[] {
   ];
 }
 
+export function shouldUseDeepgramForWorkload(
+  workload: TranscriptionWorkload
+): boolean {
+  return (
+    isDeepgramConfigured() &&
+    providerPreference(workload) !== "whisper"
+  );
+}
+
 export async function transcribeAudioWithRouter(
   audioPath: string,
   timeOffsetSeconds: number,
@@ -44,11 +61,8 @@ export async function transcribeAudioWithRouter(
     prompt: options.context?.prompt,
     language: options.context?.language ?? getTranscriptionLanguage(),
   };
-  const preference = liveProviderPreference();
-  const useDeepgram =
-    isDeepgramConfigured() &&
-    (options.workload === "live" || !isWhisperAvailable()) &&
-    preference !== "whisper";
+  const preference = providerPreference(options.workload);
+  const useDeepgram = shouldUseDeepgramForWorkload(options.workload);
 
   if (useDeepgram) {
     try {

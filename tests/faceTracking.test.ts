@@ -16,6 +16,10 @@ function detection(
   };
 }
 
+function appearance(index: number): number[] {
+  return Array.from({ length: 8 }, (_, item) => (item === index ? 1 : 0));
+}
+
 describe("buildFaceTracks", () => {
   it("groups a stable face into one track", () => {
     const detections = Array.from({ length: 10 }, (_, i) =>
@@ -115,5 +119,83 @@ describe("buildFaceTracks", () => {
     expect(tracks[0]!.points[0]!.speakingActivity).toBe(0.72);
     expect(tracks[0]!.points[1]!.speakingActivity).toBe(0.64);
     expect(tracks[0]!.points[0]!.audioActivity).toBe(0.81);
+  });
+
+  it("uses clip-local appearance to preserve identities when faces cross", () => {
+    const detections: FaceDetection[] = [];
+    const samples = [
+      [0, 0.1, 0.7],
+      [0.25, 0.2, 0.6],
+      [0.5, 0.32, 0.48],
+      [0.75, 0.44, 0.36],
+      [1, 0.56, 0.24],
+    ];
+    for (const [time, firstX, secondX] of samples) {
+      detections.push({
+        ...detection(time, firstX, 0.3, 0.12),
+        appearanceDescriptor: appearance(0),
+      });
+      // Reverse array order around the crossing so input order cannot preserve
+      // identity by accident.
+      detections.unshift({
+        ...detection(time, secondX, 0.3, 0.12),
+        appearanceDescriptor: appearance(1),
+      });
+    }
+
+    const tracks = buildFaceTracks(detections);
+    expect(tracks).toHaveLength(2);
+    const firstIdentity = tracks.find(
+      (track) => track.points[0]!.rect.x < 0.2
+    )!;
+    const secondIdentity = tracks.find(
+      (track) => track.points[0]!.rect.x > 0.6
+    )!;
+    expect(firstIdentity.points).toHaveLength(5);
+    expect(secondIdentity.points).toHaveLength(5);
+    expect(firstIdentity.points.at(-1)!.rect.x).toBeGreaterThan(0.5);
+    expect(secondIdentity.points.at(-1)!.rect.x).toBeLessThan(0.3);
+  });
+
+  it("does not merge different-looking faces at the same position", () => {
+    const tracks = buildFaceTracks([
+      {
+        ...detection(0, 0.4, 0.3),
+        appearanceDescriptor: appearance(0),
+      },
+      {
+        ...detection(0.25, 0.4, 0.3),
+        appearanceDescriptor: appearance(1),
+      },
+    ]);
+    expect(tracks).toHaveLength(2);
+  });
+
+  it("continues an established track with a lower-confidence detection", () => {
+    const tracks = buildFaceTracks([
+      detection(0, 0.4, 0.3, 0.12, 0.94),
+      detection(0.25, 0.41, 0.3, 0.12, 0.58),
+    ]);
+    expect(tracks).toHaveLength(1);
+    expect(tracks[0]!.points).toHaveLength(2);
+  });
+
+  it("starts a new identity at a hard scene boundary", () => {
+    const tracks = buildFaceTracks([
+      { ...detection(0, 0.4, 0.3), sceneId: 0 },
+      { ...detection(0.25, 0.4, 0.3), sceneId: 1 },
+    ]);
+    expect(tracks).toHaveLength(2);
+  });
+
+  it("preserves landmark head direction for professional composition", () => {
+    const tracks = buildFaceTracks([
+      { ...detection(0, 0.4, 0.3), lookDirectionX: 0.7 },
+      { ...detection(0.25, 0.4, 0.3), lookDirectionX: 0.6 },
+    ]);
+    expect(tracks[0]!.points.map((point) => point.lookDirectionX)).toEqual([
+      0.7,
+      0.6,
+    ]);
   });
 });

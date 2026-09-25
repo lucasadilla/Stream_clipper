@@ -203,6 +203,7 @@ export interface YoutubeCaptureStrategy {
     | "provider"
     | "live-hls"
     | "tv"
+    | "public-default"
     | "public-no-cookie";
   extractorArgs: string | null;
   includeCookies: boolean;
@@ -244,6 +245,13 @@ export function getYoutubeCaptureStrategies(): YoutubeCaptureStrategy[] {
       id: "tv",
       extractorArgs: "player_client=tv",
       includeCookies: true,
+    },
+    // Cookie-backed clients can hide HD formats on otherwise public videos.
+    // Retry the normal client set without cookies before the Android fallback.
+    {
+      id: "public-default",
+      extractorArgs: null,
+      includeCookies: false,
     },
     // Invalid/rotated cookies commonly poison web clients with CDN 403s.
     // Plain android (no cookies) works; android_vr alone often 403s without a PO token.
@@ -618,6 +626,7 @@ export async function runYtDlp(
     platform?: StreamPlatform | "unknown";
     includeCookies?: boolean;
     timeoutMs?: number;
+    onOutputLine?: (line: string) => void;
   }
 ): Promise<{ stdout: string; stderr: string }> {
   const invocation = await resolveYtDlpInvocation();
@@ -645,7 +654,10 @@ export async function runYtDlp(
           ...extraArgs,
           url,
         ],
-        { timeoutMs: options?.timeoutMs }
+        {
+          timeoutMs: options?.timeoutMs,
+          onOutputLine: options?.onOutputLine,
+        }
       );
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
@@ -666,28 +678,56 @@ function getYtDlpJsRuntimeArg(): string {
   return `node:${process.execPath}`;
 }
 
-function sourceMaxHeight(): number {
+function sourceMaxHeight(options?: { agent?: boolean }): number {
   const configured = Number.parseInt(
     process.env.SOURCE_MAX_HEIGHT?.trim() ?? "",
     10
   );
   if (Number.isFinite(configured) && configured >= 240) return configured;
+  // Agent prep needs transcript ASAP; HD is reserved for final render fetches.
+  if (options?.agent) return 480;
   // Railway only needs a lightweight analysis/editing copy. Final render
   // segments can still be fetched separately at higher quality.
   return process.env.NODE_ENV === "production" ? 480 : 1080;
 }
 
-function sourceFormatChains(): string[] {
-  const height = sourceMaxHeight();
+function sourceFormatChains(height = sourceMaxHeight()): string[] {
+  const audio = preferredBestAudio();
+  const aacAudio = preferredBestAudio("[acodec^=mp4a]");
   // Avoid bare "best" / pre-merged progressive formats — YouTube CDN often
   // returns HTTP 403 for those. Prefer separate video+audio (merged by ffmpeg).
+  // Prefer original-language audio so AI dubs never replace the spoken track.
   return [
-    `bestvideo[vcodec^=avc1][height<=${height}]+bestaudio[acodec^=mp4a]/bestvideo[height<=${height}]+bestaudio`,
-    `bestvideo[vcodec^=avc1][height<=${height}]+bestaudio/bestvideo[height<=${height}]+bestaudio`,
-    `bestvideo[height<=${height}]+bestaudio`,
-    "bestvideo*+bestaudio/b",
+    `bestvideo[vcodec^=avc1][height<=${height}]+${aacAudio}/bestvideo[height<=${height}]+${audio}`,
+    `bestvideo[vcodec^=avc1][height<=${height}]+${audio}/bestvideo[height<=${height}]+${audio}`,
+    `bestvideo[height<=${height}]+${audio}`,
+    `bestvideo*+${audio}/b`,
     "b",
   ];
+}
+
+/**
+ * Prefer the stream's original spoken audio over YouTube AI dubs.
+ * Optional PREFERRED_AUDIO_LANGUAGE (ISO-639-1) pins a specific dub/track.
+ */
+export function preferredBestAudio(extraFilters = ""): string {
+  const preferredLang = process.env.PREFERRED_AUDIO_LANGUAGE?.trim().toLowerCase();
+  if (preferredLang && /^[a-z]{2,3}(-[a-z0-9]+)?$/i.test(preferredLang)) {
+    return (
+      `(bestaudio[language^=${preferredLang}]${extraFilters}/` +
+      `bestaudio[format_note*=original]${extraFilters}/` +
+      `bestaudio${extraFilters})`
+    );
+  }
+  // Keep the fallback grouped whenever callers combine it with bestvideo.
+  // Without parentheses, `bestvideo+originalAudio/bestAudio` can resolve to
+  // audio-only when YouTube does not label a track as "original".
+  return `(bestaudio[format_note*=original]${extraFilters}/bestaudio${extraFilters})`;
+}
+
+/** Format-sort fields for final downloads — lang first so dubs lose to original. */
+export function renderSourceFormatSort(): string {
+  return "lang,res,fps,br,codec:vp9:av01:avc1";
 }
 
 async function runYtDlpWithFormatFallback(
@@ -700,6 +740,9 @@ async function runYtDlpWithFormatFallback(
     maxAttempts?: number;
     retriesPerFormat?: number;
     preferDefaultClient?: boolean;
+    minVideoHeight?: number;
+    onProgress?: (progress: number) => void;
+    onAttempt?: (attempt: number) => void;
   }
 ): Promise<void> {
   let lastError: Error | null = null;
@@ -714,14 +757,16 @@ async function runYtDlpWithFormatFallback(
   const strategies =
     platform === "youtube" && options?.preferDefaultClient
       ? [
+          ...availableStrategies.filter((strategy) => strategy.id === "public-default"),
           ...availableStrategies.filter(
-            (strategy) => strategy.extractorArgs === null
+            (strategy) => strategy.extractorArgs === null && strategy.id !== "public-default"
           ),
           ...availableStrategies.filter(
             (strategy) => strategy.extractorArgs !== null
           ),
         ]
       : availableStrategies;
+  let totalAttempts = 0;
 
   for (const strategy of strategies) {
     let strategyAttempts = 0;
@@ -737,6 +782,8 @@ async function runYtDlpWithFormatFallback(
         throw new Error("yt-dlp source download timed out");
       }
       strategyAttempts += 1;
+      totalAttempts += 1;
+      options?.onAttempt?.(totalAttempts);
       const args = withYoutubeExtractorArgs(
         baseArgs,
         platform === "youtube" ? strategy.extractorArgs : undefined
@@ -774,12 +821,25 @@ async function runYtDlpWithFormatFallback(
           includeCookies: strategy.includeCookies,
           retries: options?.retriesPerFormat,
           timeoutMs: attemptTimeoutMs,
+          onOutputLine: (line) => {
+            const progress = parseYtDlpProgress(line);
+            if (progress != null) options?.onProgress?.(progress);
+          },
         });
         if (outputPath && !(await canDecodeVideoFrame(outputPath))) {
           await fs.unlink(outputPath).catch(() => {});
           throw new Error(
             `yt-dlp produced video that FFmpeg could not decode for format ${format}`
           );
+        }
+        if (outputPath && options?.minVideoHeight) {
+          const probe = await probeMedia(outputPath);
+          if ((probe.height ?? 0) < options.minVideoHeight) {
+            await fs.unlink(outputPath).catch(() => {});
+            throw new Error(
+              `yt-dlp returned ${probe.width}x${probe.height} for format ${format}; need at least ${options.minVideoHeight}p`
+            );
+          }
         }
         return;
       } catch (err) {
@@ -805,25 +865,52 @@ export function renderSourceMaxHeight(): number {
     : 2160;
 }
 
+/** Hard floor for final exports — never treat a 360p proxy as master quality. */
+export function minFinalSourceHeight(): number {
+  const configured = Number.parseInt(
+    process.env.RENDER_SOURCE_MIN_HEIGHT?.trim() ?? "",
+    10
+  );
+  return Number.isFinite(configured) && configured >= 360
+    ? configured
+    : 720;
+}
+
+/**
+ * Height that is "good enough" to reuse without forcing another download.
+ * Most VODs top out at 1080p60; insisting on 2160 would redownload forever.
+ */
+export function acceptableFinalSourceHeight(): number {
+  return Math.min(1080, renderSourceMaxHeight());
+}
+
+/** Parse Clipper's yt-dlp progress template into a stable zero-to-one value. */
+export function parseYtDlpProgress(line: string): number | null {
+  const match = /clipper-progress:\s*([0-9]+(?:\.[0-9]+)?)%/i.exec(line);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? Math.min(1, Math.max(0, value / 100)) : null;
+}
+
 export function renderSourceFormatChains(
   renderHeight = renderSourceMaxHeight()
 ): string[] {
-  // Avoid bare "best" progressive/pre-merged picks — they frequently 403 on CDN.
-  // Short-range exports need seekable HLS first. YouTube's DASH URLs can
-  // return 403 when FFmpeg opens them for --download-sections, while the HLS
-  // variants seek directly to the requested media chunks. Prefer VP9 so a
-  // 1440p/4K source stays sharp after a narrow 9:16 crop, then fall back to
-  // AVC and finally merged formats that are not a bare progressive "best".
+  // Short-range exports need seekable HLS first. YouTube's DASH URLs may make
+  // FFmpeg read most of a long VOD before reaching --download-sections, while
+  // HLS seeks directly to the requested fragments. This preserves the same
+  // maximum resolution and frame rate while avoiding multi-minute stalls.
+  // HLS VP9 is named "vp09", so vcodec^=vp9 selectors miss it.
+  // Always prefer original audio — bare bestaudio can pick a YouTube AI dub
+  // while the studio preview still uses the live/original track.
+  const audio = preferredBestAudio();
+  const hlsAudio = preferredBestAudio("[protocol^=m3u8]");
   return [
-    `bestvideo[protocol^=m3u8][vcodec^=vp9][height<=${renderHeight}]+bestaudio[protocol^=m3u8]`,
-    `bestvideo[protocol^=m3u8][vcodec^=avc1][height<=${renderHeight}]+bestaudio[protocol^=m3u8]`,
-    `bestvideo[protocol^=m3u8][height<=${renderHeight}]+bestaudio[protocol^=m3u8]`,
-    `bestvideo[vcodec^=vp9][height<=${renderHeight}]+bestaudio/bestvideo[height<=${renderHeight}]+bestaudio`,
-    `bestvideo[vcodec^=avc1][height<=${renderHeight}]+bestaudio[acodec^=mp4a]/bestvideo[height<=${renderHeight}]+bestaudio`,
-    `bestvideo[vcodec^=avc1][height<=${renderHeight}]+bestaudio/bestvideo[height<=${renderHeight}]+bestaudio`,
-    `bestvideo[height<=${renderHeight}]+bestaudio`,
-    "bestvideo*+bestaudio/b",
-    "b",
+    `bestvideo[protocol^=m3u8][height<=${renderHeight}][fps>50]+${hlsAudio}/bestvideo[protocol^=m3u8][height<=${renderHeight}]+${hlsAudio}`,
+    `bestvideo[protocol^=m3u8][height<=${renderHeight}]+${hlsAudio}`,
+    `bestvideo[protocol^=m3u8][height<=${renderHeight}]+${audio}`,
+    `bestvideo[height<=${renderHeight}][fps>50]+${audio}/bestvideo[height<=${renderHeight}]+${audio}`,
+    `bestvideo[height<=${renderHeight}]+${audio}`,
+    `best[height<=${renderHeight}]`,
   ];
 }
 
@@ -916,16 +1003,38 @@ export async function downloadSourceFromYouTube(streamSessionId: string) {
   const outputPath = path.join(uploadDir, "source.mp4");
   const captureUrl = resolveStreamCaptureUrl(session);
   const platform = detectDownloadPlatform(captureUrl);
+  const agentPrep = session.mode === "agent";
+  const formatHeight = sourceMaxHeight({ agent: agentPrep });
+  const formatFallbacks = sourceFormatChains(formatHeight);
+  // Unbounded VOD downloads left Agent Mode on "Preparing your video" for 15–20+ minutes.
+  const downloadTimeoutMs = Number.parseInt(
+    process.env.SOURCE_DOWNLOAD_TIMEOUT_MS?.trim() ?? "",
+    10
+  );
+  const timeoutMs =
+    Number.isFinite(downloadTimeoutMs) && downloadTimeoutMs >= 60_000
+      ? downloadTimeoutMs
+      : agentPrep
+        ? 8 * 60_000
+        : 12 * 60_000;
 
   await runYtDlpWithFormatFallback(
     [
       ...baseYtDlpArgs({ platform, url: captureUrl }),
       "-f",
-      sourceFormatChains()[0]!,
+      formatFallbacks[0]!,
       "-o",
       outputPath,
     ],
-    captureUrl
+    captureUrl,
+    formatFallbacks,
+    {
+      timeoutMs,
+      attemptTimeoutMs: Math.min(3 * 60_000, timeoutMs),
+      maxAttempts: 6,
+      retriesPerFormat: 1,
+      preferDefaultClient: agentPrep,
+    }
   );
 
   // yt-dlp may write source.mp4 or source.f140.m4a etc. — find the output file
@@ -996,6 +1105,9 @@ export async function downloadClipSegmentFromStream(
     liveFromStart?: boolean;
     timeoutMs?: number;
     attemptTimeoutMs?: number;
+    minVideoHeight?: number;
+    onProgress?: (progress: number) => void;
+    onAttempt?: (attempt: number) => void;
   }
 ) {
   const available = await isYtDlpAvailable();
@@ -1008,6 +1120,7 @@ export async function downloadClipSegmentFromStream(
   // Analysis copies stay deliberately small, but a final render downloads only
   // its selected range and should use every pixel the source can provide.
   const formatFallbacks = renderSourceFormatChains();
+  const minVideoHeight = options?.minVideoHeight ?? minFinalSourceHeight();
 
   const deadline = options?.timeoutMs
     ? Date.now() + Math.max(1_000, options.timeoutMs)
@@ -1023,6 +1136,12 @@ export async function downloadClipSegmentFromStream(
         ...(liveFromStart ? ["--live-from-start"] : ["--no-live-from-start"]),
         "--download-sections",
         section,
+        "--newline",
+        "--progress-template",
+        "download:clipper-progress:%(progress._percent_str)s",
+        "--format-sort-force",
+        "-S",
+        renderSourceFormatSort(),
         "-f",
         formatFallbacks[0]!,
         "-o",
@@ -1033,9 +1152,13 @@ export async function downloadClipSegmentFromStream(
       {
         timeoutMs: remainingMs,
         attemptTimeoutMs: options?.attemptTimeoutMs,
-        maxAttempts: options?.timeoutMs ? 4 : undefined,
+        // Allow enough format×client attempts to escape a 360p-only client.
+        maxAttempts: options?.timeoutMs ? 8 : undefined,
         retriesPerFormat: options?.timeoutMs ? 1 : undefined,
         preferDefaultClient: true,
+        minVideoHeight,
+        onProgress: options?.onProgress,
+        onAttempt: options?.onAttempt,
       }
     );
   };

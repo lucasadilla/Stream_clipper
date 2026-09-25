@@ -43,7 +43,7 @@ Open [http://localhost:3000](http://localhost:3000).
 1. Create a project at [supabase.com](https://supabase.com)
 2. **Database → Extensions** → enable **vector**
 3. **Project Settings → Database** → copy connection strings into `.env`:
-   - **Transaction pooler** (port `6543`) → `DATABASE_URL` (add `?pgbouncer=true` at the end)
+   - **Transaction pooler** (port `6543`) → `DATABASE_URL` (add `?pgbouncer=true&connection_limit=5&pool_timeout=20&connect_timeout=10` at the end)
    - **Direct connection** (port `5432`) → `DIRECT_URL`
 4. Replace `[YOUR-PASSWORD]` with your database password
 
@@ -98,8 +98,11 @@ storage/          # Local uploads, frames, renders
 | `DATABASE_URL` | PostgreSQL connection string |
 | `OPENAI_API_KEY` | OpenAI API key (optional if using OpenRouter) |
 | `OPENROUTER_API_KEY` | OpenRouter key — routes chat/embeddings/Whisper through cheaper models |
-| `DEEPGRAM_API_KEY` | Deepgram key — enables fast Nova-3 transcription for live streams |
+| `DEEPGRAM_API_KEY` | Deepgram key — enables Nova-3 word timing and diarization for live streams and VODs |
 | `TRANSCRIPTION_LIVE_PROVIDER` | `auto` (default), `deepgram`, or `whisper` |
+| `TRANSCRIPTION_VOD_PROVIDER` | `auto` (default, prefers diarized Deepgram), `deepgram`, or `whisper` |
+| `DEEPGRAM_DIARIZE` | Speaker diarization is on by default; set `false` to opt out |
+| `DEEPGRAM_DIARIZE_MODEL` | Deepgram diarizer version; defaults to `latest` |
 | `CLIP_TRANSCRIPT_REFINEMENT_MODEL` | High-accuracy model used when a clip is opened (default: `gpt-transcribe`; set `off` to disable) |
 | `OPENROUTER_CHAT_MODEL` | Chat model slug (default: `google/gemini-2.0-flash-001`) |
 | `YOUTUBE_API_KEY` | YouTube Data API v3 key |

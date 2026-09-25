@@ -1,7 +1,55 @@
 import { describe, expect, it } from "vitest";
-import { parseDeepgramTranscription } from "@/services/deepgramTranscription";
+import {
+  buildDeepgramUrl,
+  parseDeepgramTranscription,
+} from "@/services/deepgramTranscription";
+import { shouldUseDeepgramForWorkload } from "@/services/transcriptionRouterService";
 
 describe("Deepgram transcription parsing", () => {
+  it("uses the current versioned diarizer by default with an explicit opt-out", () => {
+    const previousDiarize = process.env.DEEPGRAM_DIARIZE;
+    const previousModel = process.env.DEEPGRAM_DIARIZE_MODEL;
+    try {
+      delete process.env.DEEPGRAM_DIARIZE;
+      delete process.env.DEEPGRAM_DIARIZE_MODEL;
+      expect(new URL(buildDeepgramUrl({ keyterms: [] })).searchParams.get("diarize_model"))
+        .toBe("latest");
+      process.env.DEEPGRAM_DIARIZE_MODEL = "v2";
+      expect(new URL(buildDeepgramUrl({ keyterms: [] })).searchParams.get("diarize_model"))
+        .toBe("v2");
+      process.env.DEEPGRAM_DIARIZE = "false";
+      expect(new URL(buildDeepgramUrl({ keyterms: [] })).searchParams.has("diarize_model"))
+        .toBe(false);
+    } finally {
+      if (previousDiarize === undefined) delete process.env.DEEPGRAM_DIARIZE;
+      else process.env.DEEPGRAM_DIARIZE = previousDiarize;
+      if (previousModel === undefined) delete process.env.DEEPGRAM_DIARIZE_MODEL;
+      else process.env.DEEPGRAM_DIARIZE_MODEL = previousModel;
+    }
+  });
+
+  it("prefers diarized transcription for both live and VOD unless explicitly overridden", () => {
+    const previousKey = process.env.DEEPGRAM_API_KEY;
+    const previousLive = process.env.TRANSCRIPTION_LIVE_PROVIDER;
+    const previousVod = process.env.TRANSCRIPTION_VOD_PROVIDER;
+    try {
+      process.env.DEEPGRAM_API_KEY = "test-key";
+      delete process.env.TRANSCRIPTION_LIVE_PROVIDER;
+      delete process.env.TRANSCRIPTION_VOD_PROVIDER;
+      expect(shouldUseDeepgramForWorkload("live")).toBe(true);
+      expect(shouldUseDeepgramForWorkload("vod")).toBe(true);
+      process.env.TRANSCRIPTION_VOD_PROVIDER = "whisper";
+      expect(shouldUseDeepgramForWorkload("vod")).toBe(false);
+    } finally {
+      if (previousKey === undefined) delete process.env.DEEPGRAM_API_KEY;
+      else process.env.DEEPGRAM_API_KEY = previousKey;
+      if (previousLive === undefined) delete process.env.TRANSCRIPTION_LIVE_PROVIDER;
+      else process.env.TRANSCRIPTION_LIVE_PROVIDER = previousLive;
+      if (previousVod === undefined) delete process.env.TRANSCRIPTION_VOD_PROVIDER;
+      else process.env.TRANSCRIPTION_VOD_PROVIDER = previousVod;
+    }
+  });
+
   it("preserves absolute word timing, confidence, and speaker metadata", () => {
     const segments = parseDeepgramTranscription(
       {

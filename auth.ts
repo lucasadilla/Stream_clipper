@@ -5,6 +5,7 @@ import { prisma } from "@/lib/db";
 import { authConfig } from "@/auth.config";
 import { ensureBillingAccountForAuthUser } from "@/services/authAccountService";
 import { verifyUserPassword } from "@/services/passwordAuthService";
+import { getPostHogClient } from "@/lib/posthog-server";
 
 class PasswordSignInError extends CredentialsSignin {
   constructor(message: string) {
@@ -50,15 +51,32 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   // for account linking; session rows are no longer the source of truth.
   session: { strategy: "jwt", maxAge: 60 * 60 * 24 * 30 },
   events: {
-    async signIn({ user, account }) {
+    async signIn({ user, account, isNewUser }) {
       if (!user.id) return;
-      await ensureBillingAccountForAuthUser({
+      const billing = await ensureBillingAccountForAuthUser({
         userId: user.id,
         email: user.email,
         name: user.name,
         provider: account?.provider ?? "credentials",
         providerAccountId: account?.providerAccountId ?? user.id,
       });
+      getPostHogClient().capture({
+        distinctId: billing.id,
+        event: "login_completed",
+        properties: {
+          method: account?.provider ?? "credentials",
+        },
+      });
+      if (isNewUser) {
+        getPostHogClient().capture({
+          distinctId: billing.id,
+          event: "signup_completed",
+          properties: {
+            method: account?.provider ?? "credentials",
+            $insert_id: `${billing.id}:signup_completed`,
+          },
+        });
+      }
     },
   },
   callbacks: {

@@ -5,6 +5,10 @@ import { createManualClip } from "@/services/suggestClipsService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import { getBillingAccountIdFromRequest } from "@/services/billingService";
 import { getPostHogClient } from "@/lib/posthog-server";
+import {
+  ensureSessionBillingAccess,
+  SessionAccessError,
+} from "@/services/sessionAccessService";
 
 const clipSchema = z.object({
   title: z.string().min(1),
@@ -19,6 +23,8 @@ export async function POST(
 ) {
   try {
     const { sessionId } = await params;
+    const billingAccountId = getBillingAccountIdFromRequest(request);
+    await ensureSessionBillingAccess(sessionId, billingAccountId);
     const body = await request.json();
     const data = clipSchema.parse(body);
 
@@ -28,7 +34,6 @@ export async function POST(
     if (!session) return errorResponse("Session not found", 404);
 
     const clip = await createManualClip(sessionId, data);
-    const billingAccountId = getBillingAccountIdFromRequest(request);
     if (billingAccountId) {
       getPostHogClient().capture({
         distinctId: billingAccountId,
@@ -41,6 +46,9 @@ export async function POST(
     }
     return jsonResponse({ clip }, 201);
   } catch (error) {
+    if (error instanceof SessionAccessError) {
+      return errorResponse(error.message, error.status);
+    }
     if (error instanceof z.ZodError) {
       return errorResponse(error.errors[0]?.message ?? "Invalid input", 400);
     }

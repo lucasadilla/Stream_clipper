@@ -785,7 +785,6 @@ function VerticalPlatformPreview({
   platform,
   title,
   caption,
-  hashtags,
   children,
   lookPresetId,
   frameUrl,
@@ -867,8 +866,9 @@ function VerticalPlatformPreview({
           {!isYouTube && <span className="rounded border border-white/80 px-1.5 py-0.5 text-[9px]">Follow</span>}
           {isYouTube && <span className="rounded-full bg-white px-2 py-1 text-[9px] text-black">Subscribe</span>}
         </div>
-        <p className="line-clamp-2 text-[10px] font-medium leading-relaxed">{isYouTube ? title : caption}</p>
-        <p className="mt-0.5 truncate text-[10px] font-semibold">{hashtags.join(" ")}</p>
+        <p className="line-clamp-3 text-[10px] font-medium leading-relaxed">
+          {isYouTube ? title : caption}
+        </p>
         {!isYouTube && (
           <p className="mt-1 flex items-center gap-1 truncate text-[9px]"><Music2 className="h-3 w-3" /> Original audio · Clipper</p>
         )}
@@ -889,7 +889,6 @@ function VerticalPlatformPreview({
 function InstagramFeedPreview({
   title,
   caption,
-  hashtags,
   children,
   lookPresetId,
   frameUrl,
@@ -910,7 +909,7 @@ function InstagramFeedPreview({
       <div className="space-y-2.5 px-3 pb-4 pt-3">
         <div className="flex items-center justify-between"><div className="flex gap-4"><Heart className="h-5 w-5" /><MessageCircle className="h-5 w-5" /><Send className="h-5 w-5" /></div><Bookmark className="h-5 w-5" /></div>
         <p className="text-[11px] font-bold">12,428 likes</p>
-        <p className="text-[11px] leading-relaxed"><span className="mr-1 font-bold">clipper</span>{caption} <span className="font-semibold text-[#a8b7ca]">{hashtags.join(" ")}</span></p>
+        <p className="text-[11px] leading-relaxed"><span className="mr-1 font-bold">clipper</span>{caption}</p>
         <p className="text-[10px] text-white/50">View all 328 comments</p>
         <p className="text-[9px] uppercase tracking-wide text-white/40">2 minutes ago</p>
         <p className="sr-only">{title}</p>
@@ -922,7 +921,6 @@ function InstagramFeedPreview({
 function XPostPreview({
   title,
   postText,
-  hashtags,
   children,
   lookPresetId,
   frameUrl,
@@ -937,7 +935,7 @@ function XPostPreview({
         <PreviewAvatar size="lg" />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1 text-[13px]"><span className="font-bold">Clipper</span><span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-[#1d9bf0] text-[8px] font-black">✓</span><span className="text-[#71767b]">@clipper · 2m</span><MoreHorizontal className="ml-auto h-5 w-5 text-[#71767b]" /></div>
-          <p className="mt-1 text-[14px] leading-relaxed">{postText || title} <span className="text-[#1d9bf0]">{hashtags.join(" ")}</span></p>
+          <p className="mt-1 text-[14px] leading-relaxed">{postText || title}</p>
           <PreviewMedia lookPresetId={lookPresetId} frameUrl={frameUrl} includeCaptions={includeCaptions} captionCue={captionCue} captionTime={captionTime} captionAppearance={captionAppearance} captionSafeZone={PLATFORM_SAFE_ZONES.x} className="mt-3 aspect-video w-full rounded-2xl border border-[#2f3336]">
             {children}
           </PreviewMedia>
@@ -956,7 +954,6 @@ function XPostPreview({
 function YouTubeWatchPreview({
   title,
   description,
-  hashtags,
   pinnedComment,
   children,
   lookPresetId,
@@ -978,7 +975,7 @@ function YouTubeWatchPreview({
           <div className="flex items-center gap-2"><PreviewAvatar size="lg" /><div><p className="text-xs font-bold">Clipper</p><p className="text-[9px] text-white/55">48.2K subscribers</p></div><span className="ml-2 rounded-full bg-white px-3 py-1.5 text-[10px] font-bold text-black">Subscribe</span></div>
           <div className="flex gap-2"><span className="flex items-center gap-1 rounded-full bg-[#272727] px-3 py-1.5 text-[10px] font-semibold"><ThumbsUp className="h-4 w-4" />12K</span><span className="flex items-center gap-1 rounded-full bg-[#272727] px-3 py-1.5 text-[10px] font-semibold"><Share2 className="h-4 w-4" />Share</span></div>
         </div>
-        <div className="rounded-xl bg-[#272727] p-3 text-[11px] leading-relaxed"><p className="font-bold">18K views · 2 minutes ago</p><p className="mt-1 line-clamp-2">{description} <span className="text-[#3ea6ff]">{hashtags.join(" ")}</span></p></div>
+        <div className="rounded-xl bg-[#272727] p-3 text-[11px] leading-relaxed"><p className="font-bold">18K views · 2 minutes ago</p><p className="mt-1 line-clamp-2">{description}</p></div>
         {pinnedComment ? (
           <div className="flex items-start gap-2"><PreviewAvatar size="sm" /><div><p className="text-[9px] font-semibold text-white/55">Pinned by Clipper</p><p className="text-[11px]">{pinnedComment}</p></div></div>
         ) : null}

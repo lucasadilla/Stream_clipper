@@ -52,7 +52,8 @@ import {
   defaultVerticalLayoutSelection,
   type VerticalLayoutSelection,
 } from "@/components/VerticalLayoutPicker";
-import { triggerFileDownload } from "@/lib/clientDownload";
+import { prepareFileDownload } from "@/lib/clientDownload";
+import { videoDownloadFilename } from "@/lib/downloadFilename";
 import { LIVE_TICK_MS } from "@/lib/timelineConstants";
 import { mergeClipSuggestions } from "@/lib/clipSuggestionMerge";
 import type { SessionMode } from "@/lib/sessionMode";
@@ -90,6 +91,49 @@ type ChatTurn =
 const MIN_TRANSCRIPT_SECONDS = 20;
 const MIN_SEARCHABLE_CHUNKS = 1;
 const VOD_SUGGEST_ROLL_SECONDS = 180;
+/** Abort hung /transcribe so Agent Mode keeps polling (mirrors Timeline). */
+const TRANSCRIBE_HANG_MS = 90_000;
+/** Client-side cap for the initial source download POST. */
+const SOURCE_DOWNLOAD_CLIENT_TIMEOUT_MS = 9 * 60_000;
+
+function transcriptionStatusMessage(data: {
+  error?: string;
+  reason?: string;
+}): string | null {
+  if (data.reason === "no_file") {
+    return "Waiting for the source video to finish downloading…";
+  }
+  if (data.reason === "no_audio") {
+    return "Waiting for audio — fetching the soundtrack…";
+  }
+  if (
+    data.reason === "no_transcription_provider" ||
+    data.reason === "no_openai_key"
+  ) {
+    return "Set DEEPGRAM_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY in .env";
+  }
+  if (data.reason === "too_short") {
+    return "Waiting for enough audio to transcribe…";
+  }
+  if (data.reason === "audio_not_ready") {
+    return "Buffering capture — transcription will resume shortly";
+  }
+  if (data.reason === "sync_in_progress") {
+    return "Transcription is running in the background…";
+  }
+  if (data.reason === "provider_unavailable") {
+    const detail = data.error?.trim();
+    return /quota/i.test(detail ?? "")
+      ? "AI provider quota exceeded — add credits and transcription will resume"
+      : detail
+        ? `Transcription unavailable (${detail}) — retrying`
+        : "AI provider unreachable — retrying";
+  }
+  if (data.error?.toLowerCase().includes("enough audio")) {
+    return "Waiting for enough audio to transcribe…";
+  }
+  return data.error ?? null;
+}
 
 interface AgentWorkspaceProps {
   sessionId: string;
@@ -118,6 +162,8 @@ export function AgentWorkspace({
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [sourceError, setSourceError] = useState<string | null>(null);
+  const [sourceDownloading, setSourceDownloading] = useState(false);
+  const [prepareStartedAt] = useState(() => Date.now());
   const [transcriptionError, setTranscriptionError] = useState<string | null>(
     null
   );
@@ -239,14 +285,20 @@ export function AgentWorkspace({
   useEffect(() => {
     if (sourceStarted.current) return;
     sourceStarted.current = true;
+    setSourceDownloading(true);
+    const abort = new AbortController();
+    const timeout = window.setTimeout(
+      () => abort.abort(),
+      SOURCE_DOWNLOAD_CLIENT_TIMEOUT_MS
+    );
     void fetchJson<{
       error?: string;
       recordedSeconds?: number;
       sourceMedia?: { durationSeconds?: number | null } | null;
-    }>(
-      `/api/sessions/${sessionId}/download-source`,
-      { method: "POST" }
-    )
+    }>(`/api/sessions/${sessionId}/download-source`, {
+      method: "POST",
+      signal: abort.signal,
+    })
       .then(({ ok, data }) => {
         if (!ok) {
           setSourceError(
@@ -267,11 +319,21 @@ export function AgentWorkspace({
         void loadSession().catch(() => {});
       })
       .catch((err) => {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          setSourceError(
+            "Source download is taking too long. Refresh to retry, or try a shorter clip of the stream."
+          );
+          return;
+        }
         setSourceError(
           err instanceof Error
             ? `Source download failed: ${err.message}`
             : "Source download failed on the server"
         );
+      })
+      .finally(() => {
+        window.clearTimeout(timeout);
+        setSourceDownloading(false);
       });
   }, [sessionId, loadSession]);
 
@@ -484,26 +546,40 @@ export function AgentWorkspace({
     const tick = async () => {
       if (transcribeInFlight.current) return;
       transcribeInFlight.current = true;
+      const abort = new AbortController();
+      const hangWatchdog = window.setTimeout(
+        () => abort.abort(),
+        TRANSCRIBE_HANG_MS
+      );
       try {
         const { ok, data } = await fetchJson<{
           error?: string;
+          reason?: string;
+          skipped?: boolean;
           transcribedThrough?: number;
           recordedSeconds?: number;
           searchableChunks?: number;
-        }>(`/api/sessions/${sessionId}/transcribe`, { method: "POST" });
+        }>(`/api/sessions/${sessionId}/transcribe`, {
+          method: "POST",
+          signal: abort.signal,
+        });
 
         if (cancelled) return;
 
         if (!ok) {
-          if (data.error?.toLowerCase().includes("enough audio")) {
-            setTranscriptionError("Waiting for enough audio to transcribe…");
-          } else if (data.error) {
-            setTranscriptionError(data.error);
-          }
+          setTranscriptionError(
+            transcriptionStatusMessage(data) ?? "Transcription failed"
+          );
           return;
         }
 
-        setTranscriptionError(null);
+        const status = transcriptionStatusMessage(data);
+        if (data.skipped) {
+          if (status) setTranscriptionError(status);
+        } else {
+          setTranscriptionError(null);
+        }
+
         if (typeof data.transcribedThrough === "number") {
           setTranscribedSeconds((current) =>
             Math.max(current, data.transcribedThrough ?? 0)
@@ -519,9 +595,16 @@ export function AgentWorkspace({
         if (typeof data.searchableChunks === "number") {
           setSearchableChunks(data.searchableChunks);
         }
-      } catch {
-        // worker may still be progressing
+      } catch (err) {
+        if (cancelled) return;
+        if (err instanceof DOMException && err.name === "AbortError") {
+          setTranscriptionError(
+            "Transcription wave timed out — retrying automatically"
+          );
+        }
+        // Otherwise the GET poll / next wave will catch up.
       } finally {
+        window.clearTimeout(hangWatchdog);
         transcribeInFlight.current = false;
       }
     };
@@ -535,12 +618,7 @@ export function AgentWorkspace({
       cancelled = true;
       clearInterval(id);
     };
-  }, [
-    sessionId,
-    session?.id,
-    transcriptionBehind,
-    transcribedSeconds,
-  ]);
+  }, [sessionId, session?.id, transcriptionBehind]);
 
   // Observe committed transcript chunks while the longer POST request is still
   // transcribing. This keeps time and percentage moving instead of updating in bursts.
@@ -780,6 +858,7 @@ export function AgentWorkspace({
 
   async function renderActiveClip() {
     if (!activeClip) return;
+    const preparedDownload = prepareFileDownload();
     setExporting(true);
     setExportError(null);
     setExportDoneUrl(null);
@@ -854,11 +933,12 @@ export function AgentWorkspace({
           c.id === activeClip.id ? { ...c, status: "rendered" } : c
         )
       );
-      await triggerFileDownload(
+      await preparedDownload.start(
         url,
-        `${activeClip.title.slice(0, 40) || "short"}.mp4`
+        videoDownloadFilename(activeClip.title)
       );
     } catch (err) {
+      preparedDownload.cancel();
       setExportError(err instanceof Error ? err.message : "Render failed");
     } finally {
       setExporting(false);
@@ -1047,6 +1127,8 @@ export function AgentWorkspace({
                 progressPct={progressPct}
                 transcriptionError={sourceError ?? transcriptionError}
                 phase="transcribing"
+                sourceDownloading={sourceDownloading && recordedSeconds <= 0}
+                startedAt={prepareStartedAt}
               />
             </div>
           )}
@@ -1072,6 +1154,8 @@ export function AgentWorkspace({
                     ? "finding_clips"
                     : "transcribing"
                 }
+                sourceDownloading={sourceDownloading && recordedSeconds <= 0}
+                startedAt={prepareStartedAt}
               />
               {!suggesting && (transcriptionError || suggestionError) && (
                 <Button
@@ -1492,36 +1576,51 @@ function TranscriptionProgressCard({
   progressPct,
   transcriptionError,
   phase = "transcribing",
+  sourceDownloading = false,
+  startedAt,
 }: {
   transcribedSeconds: number;
   recordedSeconds: number;
   progressPct: number;
   transcriptionError: string | null;
   phase?: "transcribing" | "finding_clips";
+  sourceDownloading?: boolean;
+  startedAt?: number;
 }) {
   const finding = phase === "finding_clips";
+  const downloading = sourceDownloading || recordedSeconds <= 0;
+  const title = finding
+    ? "Finding the strongest moments"
+    : downloading
+      ? "Downloading your video"
+      : "Preparing your video";
+  const detail = finding
+    ? recordedSeconds > 0
+      ? `Transcript ready · scoring moments from ${formatSeconds(recordedSeconds)}`
+      : "Scoring punchy moments…"
+    : downloading
+      ? "Fetching a lightweight copy for transcription. Long VODs can take a few minutes…"
+      : `${formatSeconds(transcribedSeconds)} of ${formatSeconds(recordedSeconds)} ready`;
+
   return (
     <div className="w-full space-y-3 border-y border-white/[0.09] py-4 text-left">
       <OperationProgress
-        title={finding ? "Finding the strongest moments" : "Preparing your video"}
-        detail={
-          recordedSeconds > 0
-            ? `${formatSeconds(transcribedSeconds)} of ${formatSeconds(recordedSeconds)} ready`
-            : "Reading source media and waiting for the first transcript chunk…"
-        }
-        progress={finding || recordedSeconds <= 0 ? null : progressPct}
+        title={title}
+        detail={detail}
+        progress={finding || downloading ? null : progressPct}
         stages={
           finding
             ? FINDING_CLIP_TIPS
-            : recordedSeconds > 0
-              ? []
-              : [
-                  "Reading source media…",
-                  "Extracting the first audio window…",
-                  "Starting transcription…",
+            : downloading
+              ? [
+                  "Connecting to the stream host…",
+                  "Downloading video and audio…",
+                  "Almost ready to transcribe…",
                 ]
+              : []
         }
-        resetKey={phase}
+        resetKey={`${phase}-${downloading ? "dl" : "tx"}`}
+        startedAt={startedAt}
       />
 
       {transcriptionError && (

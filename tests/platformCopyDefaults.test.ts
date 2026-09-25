@@ -27,18 +27,34 @@ describe("platform-ready fallback copy", () => {
     expect(copy.description).toContain("surprise song");
     expect(copy.description).not.toMatch(/candidate|24:37/i);
     expect(copy.caption).toBeNull();
-    expect(copy.hashtags).toContain("#TaylorSwift");
-    expect(copy.tags).toContain("Taylor Swift");
-    expect(copy.thumbnailText).toBeTruthy();
+    expect(copy.hashtags).toEqual([]);
+    expect(copy.tags).toEqual([]);
+    expect(copy.thumbnailText).toBeNull();
     expect(copy.pinnedComment).toContain("Taylor Swift");
+  });
+
+  it("folds hashtags into TikTok/Instagram captions", () => {
+    const tiktok = buildFallbackPlatformCopy({ platform: "tiktok", ...context });
+    expect(tiktok.caption).toBeTruthy();
+    expect(tiktok.caption).toMatch(/#/);
+    expect(tiktok.hashtags).toEqual([]);
+    expect(tiktok.title).toBeNull();
+
+    const reels = buildFallbackPlatformCopy({
+      platform: "instagram_reels",
+      ...context,
+    });
+    expect(reels.caption).toMatch(/#/);
+    expect(reels.hashtags).toEqual([]);
   });
 
   it("creates an X package within the platform limit without irrelevant fields", () => {
     const copy = buildFallbackPlatformCopy({ platform: "x", ...context });
     expect(copy.postText?.length).toBeLessThanOrEqual(280);
+    expect(copy.postText).toMatch(/#/);
     expect(copy.caption).toBeNull();
     expect(copy.description).toBeNull();
-    expect(copy.hashtags.length).toBeLessThanOrEqual(2);
+    expect(copy.hashtags).toEqual([]);
   });
 
   it("extracts searchable proper names ahead of generic stream words", () => {

@@ -4,6 +4,7 @@ import {
   buildAudioVisualActiveSpeakerTimeline,
   type ActiveSpeakerTimeline,
 } from "@/lib/activeSpeaker";
+import type { SpeakerContext } from "@/lib/speakerContext";
 import {
   computeTrackMetrics,
   scoreEmbeddedFacecam,
@@ -148,6 +149,7 @@ export interface ProfessionalReframeInput {
   primaryTrackId?: string;
   lockedTrackId?: string;
   sceneChanges?: SceneChange[];
+  speakerContext?: SpeakerContext;
   style?: ReframeStyle;
   manualKeyframes?: ManualReframeKeyframe[];
 }
@@ -776,6 +778,19 @@ function smoothCompositionTargets(
       ? median(futurePoints.map((point) => rectCenter(point.rect).x))
       : stableX;
     let predictedX = stableX * 0.78 + futureX * 0.22;
+    const lookDirections = points
+      .map((point) => point.lookDirectionX)
+      .filter(
+        (value): value is number =>
+          typeof value === "number" && Number.isFinite(value)
+      );
+    if (lookDirections.length > 0) {
+      // Leave subtle lead room in the direction the person is facing. Keep the
+      // offset restrained so noisy landmarks cannot make the virtual camera
+      // drift or crop the opposite side of the face.
+      const lookDirection = clamp(median(lookDirections), -1, 1);
+      predictedX += lookDirection * Math.min(cropWidth * 0.08, 0.035);
+    }
     const eyeY = sample.point
       ? sample.point.rect.y + sample.point.rect.height * 0.38
       : 0.35;
@@ -1231,6 +1246,7 @@ export function generateProfessionalReframePlan(
           clipEndSeconds: input.clipEndSeconds,
           primaryTrackId: input.primaryTrackId,
           sceneChanges: input.sceneChanges,
+          speakerContext: input.speakerContext,
         })
       : undefined;
   const selected = selectSubjects(

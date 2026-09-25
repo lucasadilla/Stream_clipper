@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { z } from "zod";
+import { prisma } from "@/lib/db";
 import { createStreamSession } from "@/services/youtubeService";
 import {
   listSessionsWithStorage,
@@ -7,7 +8,12 @@ import {
   withAccountSessionLock,
 } from "@/services/sessionCleanupService";
 import { parseStreamUrl } from "@/lib/streamPlatform";
-import { errorResponse, jsonResponse, parseRequestJson } from "@/lib/utils";
+import {
+  errorResponse,
+  jsonResponse,
+  parseRequestJson,
+  toJsonValue,
+} from "@/lib/utils";
 import { canCreateStreamSession } from "@/services/usageService";
 import { getBillingAccountIdFromRequest } from "@/services/billingService";
 import { getPostHogClient } from "@/lib/posthog-server";
@@ -17,6 +23,7 @@ const createSessionSchema = z.object({
   streamUrl: z.string().min(1).optional(),
   youtubeUrl: z.string().min(1).optional(),
   mode: z.enum(SESSION_MODES).optional().default("timeline"),
+  requestedAction: z.string().trim().max(500).optional(),
 });
 
 export async function GET(request: NextRequest) {
@@ -71,6 +78,21 @@ export async function POST(request: NextRequest) {
         usageGate.snapshot.entitlements?.maxSourceDurationSeconds,
         parsed.mode
       );
+      if (parsed.mode === "agent" && parsed.requestedAction) {
+        const metadata =
+          created.metadataJson && typeof created.metadataJson === "object"
+            ? { ...(created.metadataJson as Record<string, unknown>) }
+            : {};
+        await prisma.streamSession.update({
+          where: { id: created.id },
+          data: {
+            metadataJson: toJsonValue({
+              ...metadata,
+              onboardingAgentPrompt: parsed.requestedAction,
+            }),
+          },
+        });
+      }
       if (billingAccountId) {
         await replacePriorSessionsForAccount(billingAccountId, created.id);
       }

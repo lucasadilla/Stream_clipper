@@ -22,6 +22,8 @@ import { cn } from "@/lib/cn";
 import { parseAutomationSource } from "@/lib/liveAutomation";
 import type { SocialPlatform } from "@/lib/social/types";
 import { OperationProgress } from "@/components/ui/operation-progress";
+import posthog from "posthog-js";
+import type { OnboardingIntent } from "@/lib/onboardingIntent";
 
 interface AutomationView {
   id: string;
@@ -153,10 +155,14 @@ export function StreamAutomationWorkspace() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await fetch("/api/stream-automation", {
-        cache: "no-store",
-      });
+      const [response, intentResponse] = await Promise.all([
+        fetch("/api/stream-automation", { cache: "no-store" }),
+        fetch("/api/onboarding/intent", { cache: "no-store" }),
+      ]);
       const body = (await response.json()) as AutomationResponse;
+      const intentBody = (await intentResponse.json().catch(() => ({}))) as {
+        intent?: OnboardingIntent | null;
+      };
       if (!response.ok) throw new Error(body.error || "Could not load Autopilot");
       setAutomation(body.automation);
       setDestinations(body.destinations || []);
@@ -167,6 +173,12 @@ export function StreamAutomationWorkspace() {
         setAutoPublishEnabled(body.automation.autoPublishEnabled);
         setClipsPerBroadcast(body.automation.clipsPerBroadcast);
         setDestinationIds(body.automation.destinationAccountIds);
+      } else if (
+        intentBody.intent?.workflow === "autopilot" &&
+        intentBody.intent.streamUrl
+      ) {
+        setSourceUrl(intentBody.intent.streamUrl);
+        posthog.capture("autopilot_setup_started");
       }
       setError(null);
     } catch (err) {
@@ -215,6 +227,13 @@ export function StreamAutomationWorkspace() {
           ? "Autopilot is on. Clipper will start checking this channel now."
           : "Autopilot settings saved."
       );
+      if (body.automation.enabled) {
+        posthog.capture("autopilot_enabled", {
+          auto_publish: body.automation.autoPublishEnabled,
+          destination_count: body.automation.destinationAccountIds.length,
+        });
+      }
+      await fetch("/api/onboarding/intent", { method: "DELETE" });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save Autopilot");
     } finally {

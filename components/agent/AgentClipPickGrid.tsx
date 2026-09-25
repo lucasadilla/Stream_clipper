@@ -272,10 +272,10 @@ export function AgentClipPickGrid({
                   <img
                     src={clip.thumbnailUrl}
                     alt={`Preview for ${clip.title}`}
-                    className="absolute inset-0 h-full w-full object-cover object-center opacity-0 transition-[transform,filter,opacity] duration-500 ease-out group-hover:scale-[1.055] group-hover:brightness-110 group-hover:saturate-[1.08] motion-reduce:group-hover:scale-100"
+                    className="absolute inset-0 h-full w-full object-cover object-center opacity-0 transition-[transform,filter,opacity] duration-500 ease-out group-hover:scale-[1.045] group-hover:brightness-110 group-hover:saturate-[1.08] motion-reduce:group-hover:scale-100"
                     loading="lazy"
                     onLoad={(event) => {
-                      event.currentTarget.style.opacity = "0.9";
+                      event.currentTarget.style.opacity = "1";
                     }}
                     onError={(event) => {
                       const image = event.currentTarget;
@@ -316,7 +316,7 @@ export function AgentClipPickGrid({
                 style={{ height: "9.75rem" }}
               >
                 <h2
-                  className="line-clamp-2 overflow-hidden text-sm font-semibold leading-5 text-white"
+                  className="line-clamp-2 overflow-hidden text-[15px] font-bold leading-5 text-white"
                   style={{ height: "2.5rem" }}
                 >
                   {clip.title}

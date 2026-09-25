@@ -3,7 +3,14 @@ export interface TranscriptWord {
   end: number;
   word: string;
   confidence?: number;
+  /** Provider-local diarization label. Never treat this as source-global. */
   speaker?: string;
+  /** Stable source-level identity resolved by SpeakerContextService. */
+  speakerId?: string;
+  speakerConfidence?: number;
+  overlappingSpeakerIds?: string[];
+  alignmentConfidence?: number;
+  speakerAssignmentSource?: "provider" | "word_alignment" | "creator_override";
 }
 
 export interface TranscriptSegment {
@@ -18,6 +25,7 @@ export interface TranscriptSegmentWithMeta extends TranscriptSegment {
   provider?: "openai" | "openrouter" | "deepgram";
   model?: string;
   timingModel?: string;
+  diarizationModel?: string;
   confidence?: number;
   rawText?: string;
 }
