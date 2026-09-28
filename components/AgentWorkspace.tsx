@@ -60,6 +60,10 @@ import type { SessionMode } from "@/lib/sessionMode";
 import { OperationProgress } from "@/components/ui/operation-progress";
 import { renderClip } from "@/lib/clipActions";
 import { EditorWorkspaceSkeleton } from "@/components/EditorWorkspaceSkeleton";
+import {
+  isBackgroundTranscriptionStatus,
+  transcriptionStatusMessage,
+} from "@/lib/transcriptionStatus";
 
 interface AgentSessionData {
   id: string;
@@ -96,45 +100,6 @@ const TRANSCRIBE_HANG_MS = 90_000;
 /** Client-side cap for the initial source download POST. */
 const SOURCE_DOWNLOAD_CLIENT_TIMEOUT_MS = 9 * 60_000;
 
-function transcriptionStatusMessage(data: {
-  error?: string;
-  reason?: string;
-}): string | null {
-  if (data.reason === "no_file") {
-    return "Waiting for the source video to finish downloading…";
-  }
-  if (data.reason === "no_audio") {
-    return "Waiting for audio — fetching the soundtrack…";
-  }
-  if (
-    data.reason === "no_transcription_provider" ||
-    data.reason === "no_openai_key"
-  ) {
-    return "Set DEEPGRAM_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY in .env";
-  }
-  if (data.reason === "too_short") {
-    return "Waiting for enough audio to transcribe…";
-  }
-  if (data.reason === "audio_not_ready") {
-    return "Buffering capture — transcription will resume shortly";
-  }
-  if (data.reason === "sync_in_progress") {
-    return "Transcription is running in the background…";
-  }
-  if (data.reason === "provider_unavailable") {
-    const detail = data.error?.trim();
-    return /quota/i.test(detail ?? "")
-      ? "AI provider quota exceeded — add credits and transcription will resume"
-      : detail
-        ? `Transcription unavailable (${detail}) — retrying`
-        : "AI provider unreachable — retrying";
-  }
-  if (data.error?.toLowerCase().includes("enough audio")) {
-    return "Waiting for enough audio to transcribe…";
-  }
-  return data.error ?? null;
-}
-
 interface AgentWorkspaceProps {
   sessionId: string;
   modeSwitching?: boolean;
@@ -165,6 +130,9 @@ export function AgentWorkspace({
   const [sourceDownloading, setSourceDownloading] = useState(false);
   const [prepareStartedAt] = useState(() => Date.now());
   const [transcriptionError, setTranscriptionError] = useState<string | null>(
+    null
+  );
+  const [transcriptionStatus, setTranscriptionStatus] = useState<string | null>(
     null
   );
   const [suggestionError, setSuggestionError] = useState<string | null>(null);
@@ -574,9 +542,14 @@ export function AgentWorkspace({
         }
 
         const status = transcriptionStatusMessage(data);
-        if (data.skipped) {
+        if (data.skipped && isBackgroundTranscriptionStatus(data)) {
+          setTranscriptionStatus(status);
+          setTranscriptionError(null);
+        } else if (data.skipped) {
+          setTranscriptionStatus(null);
           if (status) setTranscriptionError(status);
         } else {
+          setTranscriptionStatus(null);
           setTranscriptionError(null);
         }
 
@@ -598,9 +571,10 @@ export function AgentWorkspace({
       } catch (err) {
         if (cancelled) return;
         if (err instanceof DOMException && err.name === "AbortError") {
-          setTranscriptionError(
-            "Transcription wave timed out — retrying automatically"
-          );
+          // The request can outlive the browser watchdog. Keep observing its
+          // committed chunks and let the next tick retry without blocking clips.
+          setTranscriptionStatus("Transcription is continuing in the background…");
+          setTranscriptionError(null);
         }
         // Otherwise the GET poll / next wave will catch up.
       } finally {
@@ -636,12 +610,14 @@ export function AgentWorkspace({
           searchableChunks?: number;
         }>(`/api/sessions/${sessionId}/transcribe`);
         if (!cancelled && ok) {
+          const nextTranscribed = data.transcribedSeconds ?? 0;
           setRecordedSecondsHint((current) =>
             Math.max(current, data.recordedSeconds ?? 0)
           );
           setTranscribedSeconds((current) =>
-            Math.max(current, data.transcribedSeconds ?? 0)
+            Math.max(current, nextTranscribed)
           );
+          if (nextTranscribed > 0) setTranscriptionStatus(null);
           setSearchableChunks((current) =>
             Math.max(current, data.searchableChunks ?? 0)
           );
@@ -1125,7 +1101,7 @@ export function AgentWorkspace({
                 transcribedSeconds={transcribedSeconds}
                 recordedSeconds={recordedSeconds}
                 progressPct={progressPct}
-                transcriptionError={sourceError ?? transcriptionError}
+                transcriptionError={sourceError ?? transcriptionError ?? transcriptionStatus}
                 phase="transcribing"
                 sourceDownloading={sourceDownloading && recordedSeconds <= 0}
                 startedAt={prepareStartedAt}
@@ -1148,7 +1124,7 @@ export function AgentWorkspace({
                 transcribedSeconds={transcribedSeconds}
                 recordedSeconds={recordedSeconds}
                 progressPct={progressPct}
-                transcriptionError={sourceError ?? transcriptionError ?? suggestionError}
+                transcriptionError={sourceError ?? transcriptionError ?? suggestionError ?? transcriptionStatus}
                 phase={
                   findingClips || suggesting || awaitingSuggestRetry
                     ? "finding_clips"

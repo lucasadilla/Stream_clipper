@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { getAiClient, getChatModel, hasAnyAiKey } from "@/lib/aiProvider";
+import { getAiClient, hasAnyAiKey } from "@/lib/aiProvider";
+import { getHookEnginePolicy } from "@/lib/aiModelPolicy";
 import { prisma } from "@/lib/db";
 import {
   buildFallbackPlatformCopy,
@@ -7,18 +8,17 @@ import {
 } from "@/lib/platformCopyDefaults";
 import { PLATFORM_PRESETS } from "@/lib/platforms/presets";
 import type { PlatformCopy, PlatformKey } from "@/lib/platforms/types";
+import {
+  buildPackagingDNA,
+  platformPackagingCandidateSchema,
+  rankPlatformPackagingCandidate,
+  type PlatformPackagingCandidate,
+  type RankedPlatformPackage,
+} from "@/lib/packagingIntelligence";
 import { getTranscriptChunksForRange } from "@/services/transcriptService";
 
-const platformCopySchema = z.object({
-  title: z.string().nullable().optional(),
-  caption: z.string().nullable().optional(),
-  postText: z.string().nullable().optional(),
-  description: z.string().nullable().optional(),
-  hashtags: z.array(z.string()).optional(),
-  tags: z.array(z.string()).optional(),
-  quoteText: z.string().nullable().optional(),
-  thumbnailText: z.string().nullable().optional(),
-  pinnedComment: z.string().nullable().optional(),
+const platformPackagingResponseSchema = z.object({
+  candidates: z.array(platformPackagingCandidateSchema).min(3).max(20),
 });
 
 export interface GeneratePlatformCopyInput {
@@ -37,6 +37,15 @@ function cleanHashtag(value: string): string {
   return cleaned ? `#${cleaned}` : "";
 }
 
+function cleanKeyword(value: string): string {
+  return value
+    .trim()
+    .replace(/^#+/, "")
+    .replace(/[^a-zA-Z0-9 _-]/g, "")
+    .replace(/\s+/g, " ")
+    .slice(0, 60);
+}
+
 function fallbackCopy(input: GeneratePlatformCopyInput): PlatformCopy {
   return buildFallbackPlatformCopy(input);
 }
@@ -51,7 +60,7 @@ function parseJson(content: string): unknown {
 }
 
 function normalizeCopy(
-  raw: z.infer<typeof platformCopySchema>,
+  raw: PlatformPackagingCandidate,
   fallback: PlatformCopy,
   platform: PlatformKey
 ): PlatformCopy {
@@ -71,6 +80,10 @@ function normalizeCopy(
     .map(cleanHashtag)
     .filter(Boolean))]
     .slice(0, preset.hashtagRange?.hardMax ?? preset.hashtagRange?.max ?? 8);
+  const rawTags = [...new Set([...(raw.tags ?? []), ...fallback.tags]
+    .map(cleanKeyword)
+    .filter(Boolean))]
+    .slice(0, 10);
 
   let caption =
     isX || isYouTube
@@ -102,8 +115,8 @@ function normalizeCopy(
     description: isYouTube
       ? cleanText(raw.description, fallback.description)?.slice(0, 5000) ?? null
       : null,
-    hashtags: [],
-    tags: [],
+    hashtags: rawHashtags,
+    tags: isYouTube ? rawTags : [],
     quoteText: cleanText(raw.quoteText, fallback.quoteText)?.slice(0, 180) ?? null,
     thumbnailText: null,
     pinnedComment: isYouTube
@@ -112,14 +125,77 @@ function normalizeCopy(
   };
 }
 
-export async function generatePlatformCopy(
+function sourceContext(input: GeneratePlatformCopyInput): string {
+  return [
+    input.clipTitle,
+    stripInternalClipCopy(input.clipReason),
+    input.transcriptText,
+    input.chatSignals,
+    input.streamTitle,
+    input.streamerName,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function fallbackCandidate(
+  input: GeneratePlatformCopyInput,
+  fallback: PlatformCopy
+): PlatformPackagingCandidate {
+  const evidence =
+    input.transcriptText.trim().split(/\s+/).slice(0, 10).join(" ") ||
+    input.clipTitle;
+  return platformPackagingCandidateSchema.parse({
+    candidateId: "local-specific-fact",
+    strategy: "specific_fact",
+    ...fallback,
+    evidence: [evidence],
+    specificity: 72,
+    curiosity: 55,
+    accuracy: 94,
+    brevity: 82,
+    naturalness: 82,
+    keywordRelevance: 76,
+    platformSuitability: 78,
+    spoilerRisk: 12,
+    clickbaitRisk: 4,
+  });
+}
+
+export async function generatePlatformCopyPackage(
   input: GeneratePlatformCopyInput
-): Promise<PlatformCopy> {
+): Promise<RankedPlatformPackage> {
   const fallback = fallbackCopy(input);
-  if (!hasAnyAiKey()) return fallback;
+  const localCandidate = fallbackCandidate(input, fallback);
+  const context = sourceContext(input);
+  const localRank = rankPlatformPackagingCandidate(
+    localCandidate,
+    fallback,
+    context
+  );
+  const localPackage = (): RankedPlatformPackage => ({
+    copy: fallback,
+    packagingDNA: buildPackagingDNA({
+      platform: input.platform,
+      selected: localCandidate,
+      copy: fallback,
+      alternatives: [
+        {
+          candidate: localCandidate,
+          copy: fallback,
+          rankScore: localRank.rankScore,
+          warnings: localRank.warnings,
+        },
+      ],
+      modelVersion: "local-packaging-v1",
+    }),
+    warnings: localRank.warnings,
+    reasoningEvidence: localCandidate.evidence,
+  });
+  if (!hasAnyAiKey()) return localPackage();
 
   const preset = PLATFORM_PRESETS[input.platform];
-  const prompt = `Create a complete, ready-to-publish post package for ${preset.name}. Sound native to the platform, specific to the clip, and human. Avoid corporate language and fake claims.
+  const prompt = `Generate 8-12 distinct, ready-to-publish packages for ${preset.name}, then let application code rank them. Each option must sound native to the platform, specific to this exact clip, and human.
 
 Limits:
 - title: ${preset.titleLimit ?? 100} characters maximum when used
@@ -132,11 +208,14 @@ Editorial requirements:
 - Use searchable proper names, people, games, shows, products, teams, events, or pop-culture topics when they are supported by the transcript or source metadata.
 - Never invent a name, keyword, quote, outcome, or controversy.
 - Make the title/caption worth clicking without vague clickbait.
+- Vary strategies across specific_fact, curiosity, result, conflict, quote, unexpected_outcome, challenge, explanation, and reaction.
 - Fill every field that ${preset.name} actually uses. Keep irrelevant fields null.
-- For TikTok, Instagram, Facebook, and X: put hashtags INLINE at the end of caption/postText. Do not rely on a separate hashtags array.
-- For YouTube Shorts: provide title, description, and pinnedComment only. Leave hashtags, tags, and thumbnailText null/empty.
+- For TikTok, Instagram, Facebook, and X: write platform-native caption/postText and include only a few relevant hashtags.
+- For YouTube: provide a specific title, a non-redundant description, up to 3 relevant hashtags, up to 8 search keywords, and a grounded pinned comment.
 - Description should explain what happens and why it matters without discussing the clipping process.
 - Pinned comments should ask a specific conversation-starting question about this clip.
+- EVIDENCE must be an exact 2-12 word phrase copied from the transcript below.
+- Score each option honestly from 0-100. Accuracy is factual support, never predicted virality.
 
 Grounded working title: ${fallback.title}
 Why it matters: ${stripInternalClipCopy(input.clipReason) || fallback.description || fallback.caption || "Use the transcript context"}
@@ -146,29 +225,84 @@ Duration: ${Math.round(input.durationSeconds)} seconds
 Transcript: ${input.transcriptText.slice(0, 7000) || "Unavailable"}
 Chat signals: ${(input.chatSignals ?? "Unavailable").slice(0, 1200)}
 
-Return only JSON with keys: title, caption, postText, description, hashtags, tags, quoteText, thumbnailText, pinnedComment. Use null when a field is irrelevant.`;
+Return only JSON in this structure:
+{"candidates":[{"candidateId":"stable-id","strategy":"specific_fact","title":"...","caption":null,"postText":null,"description":"...","hashtags":["#Relevant"],"tags":["relevant keyword"],"quoteText":"...","thumbnailText":null,"pinnedComment":"...","evidence":["exact source phrase"],"specificity":90,"curiosity":75,"accuracy":98,"brevity":88,"naturalness":92,"keywordRelevance":85,"platformSuitability":94,"spoilerRisk":12,"clickbaitRisk":3}]}
+Use null when a field is irrelevant.`;
 
   try {
-    const response = await getAiClient().chat.completions.create({
-      model: getChatModel(),
-      temperature: 0.65,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: "You are a sharp social video producer. Return valid JSON only.",
-        },
-        { role: "user", content: prompt },
-      ],
-    });
+    const policy = getHookEnginePolicy();
+    const response = await getAiClient().chat.completions.create(
+      {
+        model: policy.strong.model,
+        temperature: policy.strong.temperature,
+        max_tokens: policy.strong.maxTokens,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a skeptical short-form packaging editor. Accuracy and specificity outrank hype. Return valid JSON only.",
+          },
+          { role: "user", content: prompt },
+        ],
+      },
+      { timeout: policy.strong.timeoutMs }
+    );
     const content = response.choices[0]?.message?.content;
-    if (!content) return fallback;
-    const parsed = platformCopySchema.parse(parseJson(content));
-    return normalizeCopy(parsed, fallback, input.platform);
+    if (!content) return localPackage();
+    const parsed = platformPackagingResponseSchema.parse(parseJson(content));
+    const ranked = [
+      ...parsed.candidates.map((candidate) => {
+        const copy = normalizeCopy(candidate, fallback, input.platform);
+        const quality = rankPlatformPackagingCandidate(
+          candidate,
+          copy,
+          context
+        );
+        return { candidate, copy, ...quality };
+      }),
+      {
+        candidate: localCandidate,
+        copy: fallback,
+        rankScore: localRank.rankScore,
+        warnings: localRank.warnings,
+      },
+    ]
+      .filter(
+        (item, index, all) =>
+          all.findIndex(
+            (other) =>
+              (other.copy.title ?? other.copy.caption ?? other.copy.postText ?? "")
+                .toLocaleLowerCase() ===
+              (item.copy.title ?? item.copy.caption ?? item.copy.postText ?? "")
+                .toLocaleLowerCase()
+          ) === index
+      )
+      .sort((a, b) => b.rankScore - a.rankScore);
+    const selected = ranked[0];
+    if (!selected) return localPackage();
+    return {
+      copy: selected.copy,
+      packagingDNA: buildPackagingDNA({
+        platform: input.platform,
+        selected: selected.candidate,
+        copy: selected.copy,
+        alternatives: ranked,
+        modelVersion: `${policy.strong.provider}:${policy.strong.model}`,
+      }),
+      warnings: selected.warnings,
+      reasoningEvidence: selected.candidate.evidence,
+    };
   } catch (error) {
     console.warn("[platform-copy] using fallback:", error);
-    return fallback;
+    return localPackage();
   }
+}
+
+export async function generatePlatformCopy(
+  input: GeneratePlatformCopyInput
+): Promise<PlatformCopy> {
+  return (await generatePlatformCopyPackage(input)).copy;
 }
 
 /** Generate preview-ready copy from the same context used by export workers. */

@@ -75,10 +75,9 @@ export const PLATFORM_PRESETS: Record<PlatformKey, PlatformPreset> = {
   x: {
     key: "x",
     name: "X / Twitter",
-    description: "Landscape or vertical post with concise copy and optional quote-card treatment.",
+    description: "Full-frame landscape post with concise copy and optional quote-card treatment.",
     outputs: [
       { id: "landscape", label: "16:9", width: 1920, height: 1080, aspectRatio: "16:9" },
-      { id: "vertical", label: "9:16", width: 1080, height: 1920, aspectRatio: "9:16" },
     ],
     hardDuration: { max: 140 },
     postTextLimit: 280,

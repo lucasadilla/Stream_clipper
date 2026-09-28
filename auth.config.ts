@@ -40,8 +40,7 @@ export const authConfig = {
   ],
   callbacks: {
     authorized() {
-      return true;
-    },
+      return true;    },
   },
   trustHost: true,
 } satisfies NextAuthConfig;

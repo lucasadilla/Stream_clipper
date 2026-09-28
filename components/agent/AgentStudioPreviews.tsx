@@ -216,8 +216,11 @@ export function LookVideoStage({
   zoom = 1,
   layoutOverride,
   cameraKeyframes,
+  cameraTargetsGameplay = false,
+  dynamicLayoutSegments = [],
   cameraStartSeconds = 0,
   cameraBaseCropWidth,
+  preserveFullFrame = false,
 }: {
   presetId: ContentLookPresetId;
   playbackUrl: string | null;
@@ -243,12 +246,38 @@ export function LookVideoStage({
   layoutOverride?: VerticalLayout | null;
   /** Shared camera plan, sampled against decoded video frames without CSS lag. */
   cameraKeyframes?: PreviewCropKeyframe[];
+  /** Apply the camera plan to the gameplay layer in stacked and PiP layouts. */
+  cameraTargetsGameplay?: boolean;
+  /** Relative clip-time layout changes from the stored gameplay plan. */
+  dynamicLayoutSegments?: Array<{
+    startTimeSeconds: number;
+    endTimeSeconds: number;
+    family: "pip" | "stacked";
+  }>;
   /** Absolute source time corresponding to camera keyframe zero. */
   cameraStartSeconds?: number;
   /** Unzoomed 9:16 source crop width used to reproduce planned zoom. */
   cameraBaseCropWidth?: number | null;
+  /** Show a landscape source without smart reframing, zooming, or cropping. */
+  preserveFullFrame?: boolean;
 }) {
-  const layout = layoutOverride ?? getContentLookPreset(presetId).layout;
+  const configuredLayout =
+    layoutOverride ?? getContentLookPreset(presetId).layout;
+  const [activeDynamicFamily, setActiveDynamicFamily] = useState<
+    "pip" | "stacked" | null
+  >(null);
+  const plannedDynamicFamily =
+    dynamicLayoutSegments.length > 0
+      ? activeDynamicFamily ?? dynamicLayoutSegments[0]?.family ?? null
+      : null;
+  const layout =
+    !preserveFullFrame && cameraTargetsGameplay && plannedDynamicFamily
+      ? plannedDynamicFamily === "pip"
+        ? "facecam_pip"
+        : "facecam_top_gameplay_bottom"
+      : preserveFullFrame
+        ? "center_crop"
+        : configuredLayout;
   const faceCanvasRef = useRef<HTMLCanvasElement>(null);
   const drawFacePanelRef = useRef<(() => void) | null>(null);
   const isStacked =
@@ -277,7 +306,9 @@ export function LookVideoStage({
     [cameraKeyframes]
   );
   const frameSyncedCamera =
-    layout === "subject_aware_crop" && orderedCameraKeyframes.length > 0;
+    !preserveFullFrame &&
+    (layout === "subject_aware_crop" || cameraTargetsGameplay) &&
+    orderedCameraKeyframes.length > 0;
 
   useEffect(() => {
     const video = videoRef.current;
@@ -295,6 +326,17 @@ export function LookVideoStage({
         true
       );
       if (!frame) return;
+      const relativeTime = Math.max(0, sourceTime - cameraStartSeconds);
+      const dynamicSegment = dynamicLayoutSegments.find(
+        (segment) =>
+          relativeTime >= segment.startTimeSeconds &&
+          relativeTime < segment.endTimeSeconds
+      );
+      if (dynamicSegment) {
+        setActiveDynamicFamily((current) =>
+          current === dynamicSegment.family ? current : dynamicSegment.family
+        );
+      }
       const position = faceObjectPosition(
         faceRect,
         frame.centerX,
@@ -339,6 +381,8 @@ export function LookVideoStage({
   }, [
     cameraBaseCropWidth,
     cameraStartSeconds,
+    cameraTargetsGameplay,
+    dynamicLayoutSegments,
     faceRect,
     frameSyncedCamera,
     orderedCameraKeyframes,
@@ -476,7 +520,9 @@ export function LookVideoStage({
         : undefined;
 
   const primaryVideoClass =
-    layout === "gameplay_full"
+    preserveFullFrame
+      ? "block h-full w-full object-contain"
+      : layout === "gameplay_full"
       ? "block h-full w-full scale-[1.35] object-cover"
       : "block h-full w-full object-cover";
 
@@ -503,7 +549,7 @@ export function LookVideoStage({
   return (
     <div
       className={cn("relative overflow-hidden bg-black", className)}
-      style={{ aspectRatio: "9 / 16" }}
+      style={{ aspectRatio: preserveFullFrame ? "16 / 9" : "9 / 16" }}
     >
       {!playbackUrl && (
         <div className="flex h-full items-center justify-center text-sm text-[var(--color-muted)]">
@@ -564,7 +610,9 @@ export function LookVideoStage({
             )}
             style={{
               objectPosition:
-                layout === "facecam_top_gameplay_bottom" ||
+                preserveFullFrame
+                  ? "center"
+                  : layout === "facecam_top_gameplay_bottom" ||
                 layout === "facecam_bottom_gameplay_top"
                   ? stackedGameplayPosition
                   : layout === "subject_aware_crop" ||
@@ -574,11 +622,11 @@ export function LookVideoStage({
                   ? facePos
                   : "center",
               transform:
-                layout === "subject_aware_crop"
+                !preserveFullFrame && layout === "subject_aware_crop"
                   ? `scale(${safeZoom.toFixed(4)})`
                   : undefined,
               transformOrigin:
-                layout === "subject_aware_crop" ? facePos : undefined,
+                !preserveFullFrame && layout === "subject_aware_crop" ? facePos : undefined,
             }}
             playsInline
             preload={preload}

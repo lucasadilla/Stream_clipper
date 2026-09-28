@@ -468,6 +468,14 @@ describe("parseVerticalLayoutRequest", () => {
     expect(parsed!.reframe?.style).toBe("professional");
   });
 
+  it("preserves a creator decision to disable reaction emphasis", () => {
+    const parsed = parseVerticalLayoutRequest({
+      layout: "auto",
+      reframe: { reactionEmphasis: false },
+    });
+    expect(parsed?.reframe?.reactionEmphasis).toBe(false);
+  });
+
   it("rejects invalid manual rects", () => {
     const parsed = parseVerticalLayoutRequest({
       layout: "facecam_pip",

@@ -31,6 +31,23 @@ describe("platform render quality", () => {
     expect(filters[0]).toContain("flags=lanczos");
   });
 
+  it("preserves the entire X landscape frame without cropping", () => {
+    const input = {
+      ...renderInput(false),
+      platform: "x" as const,
+      settings: platformSettings("x", {
+        includeCaptions: true,
+        burnSubtitles: true,
+        generateCopy: true,
+        xQuoteCard: false,
+      }),
+    };
+    const filters = buildPlatformVideoFilters(input, false);
+    expect(filters[0]).toContain("force_original_aspect_ratio=decrease");
+    expect(filters[0]).toContain("pad=1920:1080");
+    expect(filters[0]).not.toContain("crop=");
+  });
+
   it("does not burn captions twice when the master already has them", () => {
     const filters = buildPlatformVideoFilters(renderInput(true), false);
     expect(filters).toHaveLength(1);

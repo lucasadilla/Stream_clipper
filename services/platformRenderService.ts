@@ -61,7 +61,11 @@ function wrapQuote(value: string, lineLength = 34): string {
 
 function standardVideoFilter(settings: PlatformExportSettings): string {
   const { width, height } = settings;
-  if (settings.aspectRatio === "4:5" || settings.aspectRatio === "1:1") {
+  if (
+    settings.aspectRatio === "16:9" ||
+    settings.aspectRatio === "4:5" ||
+    settings.aspectRatio === "1:1"
+  ) {
     return `scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=#050805`;
   }
   return `scale=${width}:${height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width}:${height}`;

@@ -1,4 +1,4 @@
-export const VISUAL_ANALYSIS_VERSION = "visual-context-v1";
+export const VISUAL_ANALYSIS_VERSION = "visual-context-v2";
 
 export type LocalVisualEventType =
   | "scene_change"
@@ -61,6 +61,12 @@ export interface StructuredVisualEvent {
   description: string;
   confidence: number;
   evidenceTimestampSeconds?: number;
+  importanceRegions?: Array<{
+    rect: { x: number; y: number; width: number; height: number };
+    category: "action" | "visual_focus" | "hud" | "outcome" | "context";
+    strength: number;
+    label?: string;
+  }>;
 }
 
 export interface VisualEvidenceRequest {
@@ -463,6 +469,26 @@ export function sanitizeStructuredVisualContext(
         timeSeconds: Math.max(start - 15, Math.min(end + 15, event.timeSeconds)),
         confidence: clamp01(event.confidence),
         description: event.description.trim().slice(0, 320),
+        importanceRegions: event.importanceRegions
+          ?.map((region) => ({
+            ...region,
+            rect: {
+              x: clamp01(region.rect.x),
+              y: clamp01(region.rect.y),
+              width: clamp01(region.rect.width),
+              height: clamp01(region.rect.height),
+            },
+            strength: clamp01(region.strength),
+            label: region.label?.trim().slice(0, 100),
+          }))
+          .filter(
+            (region) =>
+              region.rect.width >= 0.02 &&
+              region.rect.height >= 0.02 &&
+              region.rect.x + region.rect.width <= 1.02 &&
+              region.rect.y + region.rect.height <= 1.02
+          )
+          .slice(0, 4),
       }))
       .slice(0, 12),
   };

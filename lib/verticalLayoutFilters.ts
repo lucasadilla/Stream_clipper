@@ -66,6 +66,14 @@ export type ResolvedVerticalLayout = {
   stacked?: ResolvedStackedSettings;
   pip?: ResolvedPipSettings;
   subjectCrop?: ResolvedSubjectCropSettings;
+  /** Time-aligned crop for the gameplay branch in stacked and PiP layouts. */
+  gameplayCrop?: ResolvedSubjectCropSettings;
+  /** Relative clip-time segments used for restrained PiP/stacked reaction changes. */
+  dynamicSegments?: Array<{
+    startTimeSeconds: number;
+    endTimeSeconds: number;
+    family: "pip" | "stacked";
+  }>;
   centerCrop?: ResolvedCenterCropSettings;
 };
 
@@ -250,7 +258,8 @@ export function buildStackedFacecamFilter(
   facecamRect: NormalizedRect,
   settings: Partial<ResolvedStackedSettings> = {},
   originalFacecamRect?: NormalizedRect,
-  faceRect?: NormalizedRect
+  faceRect?: NormalizedRect,
+  gameplayCrop?: ResolvedSubjectCropSettings
 ): string {
   assertContext(ctx);
   const cfg = { ...DEFAULT_STACKED_SETTINGS, ...settings };
@@ -303,8 +312,10 @@ export function buildStackedFacecamFilter(
     originalFacecamRect ?? rect
   );
   filters.push(
-    `[${gameIn}]scale=${outW}:${gamePanelH}:force_original_aspect_ratio=increase:${scaleFlags(ctx)},` +
-      `crop=${outW}:${gamePanelH}:x=${cropX}:y=(ih-oh)/2,setsar=1[game${suffix}]`
+    gameplayCrop?.keyframes.length
+      ? `[${gameIn}]${gameplayCoverFilter(ctx, outW, gamePanelH, gameplayCrop)}[game${suffix}]`
+      : `[${gameIn}]scale=${outW}:${gamePanelH}:force_original_aspect_ratio=increase:${scaleFlags(ctx)},` +
+        `crop=${outW}:${gamePanelH}:x=${cropX}:y=(ih-oh)/2,setsar=1[game${suffix}]`
   );
 
   const stackOrder =
@@ -324,7 +335,8 @@ export function buildPictureInPictureFilter(
   facecamRect: NormalizedRect,
   settings: Partial<ResolvedPipSettings> = {},
   originalFacecamRect?: NormalizedRect,
-  faceRect?: NormalizedRect
+  faceRect?: NormalizedRect,
+  gameplayCrop?: ResolvedSubjectCropSettings
 ): string {
   assertContext(ctx);
   const cfg = { ...DEFAULT_PIP_SETTINGS, ...settings };
@@ -394,8 +406,10 @@ export function buildPictureInPictureFilter(
     originalFacecamRect ?? rect
   );
   filters.push(
-    `[${baseIn}]scale=${outW}:${outH}:force_original_aspect_ratio=increase:${scaleFlags(ctx)},` +
-      `crop=${outW}:${outH}:x=${cropX},setsar=1[base${suffix}]`
+    gameplayCrop?.keyframes.length
+      ? `[${baseIn}]${gameplayCoverFilter(ctx, outW, outH, gameplayCrop)}[base${suffix}]`
+      : `[${baseIn}]scale=${outW}:${outH}:force_original_aspect_ratio=increase:${scaleFlags(ctx)},` +
+        `crop=${outW}:${outH}:x=${cropX},setsar=1[base${suffix}]`
   );
 
   filters.push(
@@ -410,6 +424,55 @@ export function buildPictureInPictureFilter(
 
   filters.push(`[base${suffix}][pip${suffix}]overlay=${x}:${y},format=yuv420p`);
   return filters.join(";");
+}
+
+function buildDynamicReactionFilter(
+  ctx: FilterBuildContext,
+  layout: ResolvedVerticalLayout
+): string {
+  const suffix = ctx.labelSuffix ?? "";
+  const pipCtx = { ...ctx, labelSuffix: `${suffix}_dynamic_pip` };
+  const stackedCtx = { ...ctx, labelSuffix: `${suffix}_dynamic_stacked` };
+  const pipGraph = buildPictureInPictureFilter(
+    pipCtx,
+    layout.facecamRect!,
+    layout.pip,
+    layout.originalFacecamRect,
+    layout.faceRect,
+    layout.gameplayCrop
+  );
+  const stackedGraph = buildStackedFacecamFilter(
+    stackedCtx,
+    layout.facecamRect!,
+    layout.stacked,
+    layout.originalFacecamRect,
+    layout.faceRect,
+    layout.gameplayCrop
+  );
+  const stackedWindows = (layout.dynamicSegments ?? [])
+    .filter(
+      (segment) =>
+        segment.family === "stacked" &&
+        Number.isFinite(segment.startTimeSeconds) &&
+        Number.isFinite(segment.endTimeSeconds) &&
+        segment.endTimeSeconds > segment.startTimeSeconds
+    )
+    .map(
+      (segment) =>
+        `between(t\\,${Math.max(0, segment.startTimeSeconds).toFixed(3)}\\,${Math.max(
+          0,
+          segment.endTimeSeconds
+        ).toFixed(3)})`
+    );
+  if (stackedWindows.length === 0) return pipGraph;
+  return [
+    `split=2[dynamic_pip_input${suffix}][dynamic_stacked_input${suffix}]`,
+    `[dynamic_pip_input${suffix}]${pipGraph}[dynamic_pip${suffix}]`,
+    `[dynamic_stacked_input${suffix}]${stackedGraph}[dynamic_stacked${suffix}]`,
+    `[dynamic_pip${suffix}][dynamic_stacked${suffix}]overlay=0:0:enable='${stackedWindows.join(
+      "+"
+    )}',format=yuv420p`,
+  ].join(";");
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +586,41 @@ export function subjectCropYExpression(
   return subjectCropAxisExpression(keyframes, "y", scaledHeight, cropHeight);
 }
 
+/** Build a cover-scaled, time-aware gameplay crop for any output panel. */
+function gameplayCoverFilter(
+  ctx: FilterBuildContext,
+  targetWidth: number,
+  targetHeight: number,
+  settings: ResolvedSubjectCropSettings
+): string {
+  const scale = Math.max(
+    targetWidth / ctx.sourceWidth,
+    targetHeight / ctx.sourceHeight
+  );
+  const scaledWidth = Math.max(
+    targetWidth,
+    toEven(Math.ceil(ctx.sourceWidth * scale) + 1)
+  );
+  const scaledHeight = Math.max(
+    targetHeight,
+    toEven(Math.ceil(ctx.sourceHeight * scale) + 1)
+  );
+  const xExpr = subjectCropXExpression(
+    settings.keyframes,
+    scaledWidth,
+    targetWidth
+  );
+  const yExpr = subjectCropYExpression(
+    settings.keyframes,
+    scaledHeight,
+    targetHeight
+  );
+  return (
+    `scale=${scaledWidth}:${scaledHeight}:${scaleFlags(ctx)},` +
+    `crop=${targetWidth}:${targetHeight}:x='${xExpr}':y='${yExpr}',setsar=1`
+  );
+}
+
 export function buildSubjectAwareCropFilter(
   ctx: FilterBuildContext,
   settings: ResolvedSubjectCropSettings
@@ -589,6 +687,9 @@ export function buildVerticalLayoutFilter(
     case "facecam_top_gameplay_bottom":
     case "facecam_bottom_gameplay_top": {
       if (!layout.facecamRect) return buildCenterCropFilter(ctx, layout.centerCrop);
+      if (layout.dynamicSegments?.some((segment) => segment.family === "stacked")) {
+        return buildDynamicReactionFilter(ctx, layout);
+      }
       const stacked: Partial<ResolvedStackedSettings> = {
         ...layout.stacked,
         facecamPosition:
@@ -599,7 +700,8 @@ export function buildVerticalLayoutFilter(
         layout.facecamRect,
         stacked,
         layout.originalFacecamRect,
-        layout.faceRect
+        layout.faceRect,
+        layout.gameplayCrop
       );
     }
     case "facecam_pip": {
@@ -609,7 +711,8 @@ export function buildVerticalLayoutFilter(
         layout.facecamRect,
         layout.pip,
         layout.originalFacecamRect,
-        layout.faceRect
+        layout.faceRect,
+        layout.gameplayCrop
       );
     }
     case "subject_aware_crop": {

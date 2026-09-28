@@ -4,6 +4,18 @@ import { PLATFORM_KEYS, PLATFORM_PRESETS } from "@/lib/platforms/presets";
 import { buildTechnicalQualityReview } from "@/lib/postRenderCritic";
 
 describe("platform render dimensions", () => {
+  it("keeps X as a single full-frame 16:9 export", () => {
+    expect(PLATFORM_PRESETS.x.outputs).toEqual([
+      {
+        id: "landscape",
+        label: "16:9",
+        width: 1920,
+        height: 1080,
+        aspectRatio: "16:9",
+      },
+    ]);
+  });
+
   it.each(PLATFORM_KEYS)("renders and validates every %s output at its actual dimensions", (platform) => {
     for (const output of PLATFORM_PRESETS[platform].outputs) {
       const target = parsePlatformRenderTarget({ platform, outputId: output.id });

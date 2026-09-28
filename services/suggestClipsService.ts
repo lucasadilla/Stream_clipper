@@ -33,8 +33,15 @@ import {
 } from "@/lib/narrativeBeats";
 import type { StructuredVisualContext } from "@/lib/visualAnalysis";
 import { buildCandidateVisualContexts } from "@/services/visualContextService";
+import { getHookEnginePolicy } from "@/lib/aiModelPolicy";
+import {
+  clipPackageSchema,
+  shouldApplyHookDecision,
+  type ClipPackage,
+} from "@/lib/hookIntelligence";
+import { buildHookPackages } from "@/services/hookEngineService";
 
-export const CLIP_SUGGESTION_VERSION = 7;
+export const CLIP_SUGGESTION_VERSION = 8;
 
 const MIN_SCORE = 6;
 const OVERLAP_RATIO = 0.45;
@@ -58,6 +65,7 @@ type ClipCandidate = {
   narrativePlan?: NarrativePlan;
   narrativeSource?: "deterministic" | "ai";
   visualContext?: StructuredVisualContext;
+  hookPackage?: ClipPackage;
 };
 
 function rankingCandidateId(candidate: ClipCandidate, index: number): string {
@@ -1015,6 +1023,65 @@ export async function autoSuggestClips(
     });
   }
 
+  const hookPolicy = getHookEnginePolicy();
+  const hookInputs = selected.map((candidate, index) => {
+    const momentId = rankingCandidateId(candidate, index);
+    const hookTranscriptChunks =
+      candidate.narrativePlan?.contextChunks.length
+        ? candidate.narrativePlan.contextChunks
+        : usableTranscriptChunks.filter(
+            (chunk) =>
+              chunk.endTimeSeconds >= candidate.start - 4 &&
+              chunk.startTimeSeconds <= candidate.end + 4
+          );
+    return {
+      momentId,
+      creator: session?.channelTitle,
+      contentCategory: candidate.contentType,
+      title: candidate.title,
+      startTimeSeconds: candidate.start,
+      endTimeSeconds: candidate.end,
+      focusTimeSeconds: candidate.focusTimeSeconds,
+      momentQuality: candidate.worth,
+      transcriptChunks: hookTranscriptChunks,
+      visualContext: candidate.visualContext,
+      narrativePlan: candidate.narrativePlan,
+      mode: hookPolicy.mode,
+    };
+  });
+  const hookPackages = await buildHookPackages(hookInputs).catch((error) => {
+    console.warn(
+      "[suggest-clips] hook engine unavailable; preserving existing decisions:",
+      error instanceof Error ? error.message : error
+    );
+    return new Map<string, ClipPackage>();
+  });
+  selected.forEach((candidate, index) => {
+    const input = hookInputs[index];
+    if (!input) return;
+    const clipPackage = hookPackages.get(input.momentId);
+    if (!clipPackage) return;
+    candidate.hookPackage = clipPackage;
+    if (
+      shouldApplyHookDecision(
+        hookPolicy.mode,
+        input.momentId,
+        hookPolicy.abPercent
+      ) &&
+      !clipPackage.selectedHook.requiresTemporalReordering &&
+      clipPackage.qualityReview.passed
+    ) {
+      candidate.start = Math.max(
+        candidate.start,
+        clipPackage.selectedHook.openingStartTimestamp
+      );
+      const selectedTitle = clipPackage.titleCandidates.find(
+        (title) => title.id === clipPackage.selectedTitleCandidateId
+      );
+      if (selectedTitle) candidate.title = selectedTitle.title;
+    }
+  });
+
   const created = await Promise.all(
     selected.map((candidate) =>
       prisma.clipSuggestion.create({
@@ -1040,6 +1107,10 @@ export async function autoSuggestClips(
             boundaryAdjusted: candidate.boundaryAdjusted,
             endingComplete: candidate.endingComplete,
             visualContext: candidate.visualContext,
+            hookEngineVersion: candidate.hookPackage?.version,
+            hookEngineMode: candidate.hookPackage?.mode ?? hookPolicy.mode,
+            hookPackage: candidate.hookPackage,
+            hookDNA: candidate.hookPackage?.hookDNA,
             narrativeEngineVersion: 2,
             narrativeSource: candidate.narrativeSource,
             narrative: candidate.narrativePlan
@@ -1126,6 +1197,46 @@ export async function updateClipSuggestion(
     throw new Error(`Clips must be ${MAX_CLIP_SECONDS / 60} minutes or shorter`);
   }
 
+  const raw =
+    existing.rawAiJson &&
+    typeof existing.rawAiJson === "object" &&
+    !Array.isArray(existing.rawAiJson)
+      ? (existing.rawAiJson as Record<string, unknown>)
+      : {};
+  const parsedHookPackage = clipPackageSchema.safeParse(raw.hookPackage);
+  const creatorOverrides = [
+    ...(data.title != null && data.title.trim() !== existing.title
+      ? ["title_changed"]
+      : []),
+    ...(data.startTimeSeconds != null &&
+    Math.abs(data.startTimeSeconds - existing.startTimeSeconds) > 0.01
+      ? ["opening_changed"]
+      : []),
+    ...(data.endTimeSeconds != null &&
+    Math.abs(data.endTimeSeconds - existing.endTimeSeconds) > 0.01
+      ? ["ending_changed"]
+      : []),
+    ...(data.suggestedLayout != null &&
+    data.suggestedLayout !== existing.suggestedLayout
+      ? ["layout_changed"]
+      : []),
+  ];
+  const nextHookPackage =
+    parsedHookPackage.success && creatorOverrides.length > 0
+      ? clipPackageSchema.parse({
+          ...parsedHookPackage.data,
+          hookDNA: {
+            ...parsedHookPackage.data.hookDNA,
+            creatorOverrides: [
+              ...new Set([
+                ...parsedHookPackage.data.hookDNA.creatorOverrides,
+                ...creatorOverrides,
+              ]),
+            ],
+          },
+        })
+      : null;
+
   return prisma.clipSuggestion.update({
     where: { id: clipSuggestionId },
     data: {
@@ -1137,6 +1248,15 @@ export async function updateClipSuggestion(
       ...(data.status != null ? { status: data.status } : {}),
       startTimeSeconds: start,
       endTimeSeconds: end,
+      ...(nextHookPackage
+        ? {
+            rawAiJson: toJsonValue({
+              ...raw,
+              hookPackage: nextHookPackage,
+              hookDNA: nextHookPackage.hookDNA,
+            }),
+          }
+        : {}),
     },
   });
 }

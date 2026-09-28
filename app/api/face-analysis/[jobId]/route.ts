@@ -147,6 +147,8 @@ export async function GET(
         recommendation: result.recommendation,
         warnings: result.warnings,
         previewKeyframes,
+        gameplayPreviewKeyframes:
+          result.gameplayLayoutPlan?.gameplayCropKeyframes ?? [],
         professionalPlan: requestedPlan
           ? {
               version: requestedPlan.version,
@@ -167,6 +169,9 @@ export async function GET(
                 : null,
             }
           : null,
+        gameplayImportanceMap: result.gameplayImportanceMap ?? null,
+        gameplayLayoutPlan: result.gameplayLayoutPlan ?? null,
+        gameplayMetrics: result.gameplayMetrics ?? null,
         frameUrl: result.frameStoragePath
           ? `/api/storage/${result.frameStoragePath.replace(/\\/g, "/")}?inline=1`
           : null,

@@ -586,6 +586,9 @@ export async function executeRenderJob(
   let subtitlePath: string | undefined;
   let burnedCaptionCueCount = 0;
   const platformOutput = params.platformTarget ? platformRenderDimensions(params.platformTarget) : undefined;
+  const preserveFullFrame =
+    params.platformTarget?.platform === "x" &&
+    platformOutput?.aspectRatio === "16:9";
   const outputHeight = preview
     ? PREVIEW_HEIGHT
     : platformOutput?.height ?? (format === "vertical"
@@ -611,7 +614,7 @@ export async function executeRenderJob(
   let resolvedVerticalLayout:
     | Awaited<ReturnType<typeof resolveVerticalLayout>>
     | null = null;
-  if (format === "vertical" && verticalLayoutRequest) {
+  if (format === "vertical" && verticalLayoutRequest && !preserveFullFrame) {
     try {
       resolvedVerticalLayout = await resolveVerticalLayout(verticalLayoutRequest, {
         streamSessionId,
@@ -630,15 +633,17 @@ export async function executeRenderJob(
       );
       // Move captions into the layout's safe zone so they never cover the
       // facecam panel or PiP window.
-      const safeZone = captionSafeZoneForLayout({
-        layout: resolvedVerticalLayout.effectiveLayout,
-        captionPosition: verticalLayoutRequest.captions?.position,
-        stackedFacecamPosition:
-          resolvedVerticalLayout.resolved.stacked?.facecamPosition,
-        stackedFacecamHeightRatio:
-          resolvedVerticalLayout.resolved.stacked?.facecamHeightRatio,
-        pipPosition: resolvedVerticalLayout.resolved.pip?.position,
-      });
+      const safeZone =
+        resolvedVerticalLayout.captionSafeZone ??
+        captionSafeZoneForLayout({
+          layout: resolvedVerticalLayout.effectiveLayout,
+          captionPosition: verticalLayoutRequest.captions?.position,
+          stackedFacecamPosition:
+            resolvedVerticalLayout.resolved.stacked?.facecamPosition,
+          stackedFacecamHeightRatio:
+            resolvedVerticalLayout.resolved.stacked?.facecamHeightRatio,
+          pipPosition: resolvedVerticalLayout.resolved.pip?.position,
+        });
       appearance = {
         ...appearance,
         vertical: safeZone.vertical,
@@ -1009,6 +1014,7 @@ export async function executeRenderJob(
       normalizeAudio: editorState.settings.normalizeAudio,
       denoiseAudio: editorState.settings.denoiseAudio,
       verticalBackground: editorState.settings.verticalBackground,
+      preserveFullFrame,
       mediaOverlays,
       onProgress: encodingProgress.report,
     });
@@ -1030,6 +1036,7 @@ export async function executeRenderJob(
       captionAppearance: appearance,
       verticalLayout: resolvedVerticalLayout?.resolved,
       previewQuality: preview,
+      preserveFullFrame,
       onProgress: encodingProgress.report,
       facecamRegion: facecam
         ? {

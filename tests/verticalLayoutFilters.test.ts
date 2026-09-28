@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
 import {
   buildCenterCropFilter,
   buildPictureInPictureFilter,
@@ -87,6 +88,42 @@ describe("buildStackedFacecamFilter", () => {
     expect(() =>
       buildStackedFacecamFilter(ctx, { x: 2, y: 0, width: 0.5, height: 0.5 })
     ).toThrow();
+  });
+
+  it("executes a time-aligned gameplay crop instead of a static center crop", () => {
+    const filter = buildStackedFacecamFilter(
+      ctx,
+      facecam,
+      {},
+      facecam,
+      undefined,
+      {
+        keyframes: [
+          {
+            timestampSeconds: 0,
+            centerX: 0.25,
+            centerY: 0.5,
+            cropWidth: 0.5,
+            cropHeight: 1,
+            interpolation: "hold",
+            reason: "initial_composition",
+            confidence: 0.9,
+          },
+          {
+            timestampSeconds: 3,
+            centerX: 0.75,
+            centerY: 0.5,
+            cropWidth: 0.5,
+            cropHeight: 1,
+            interpolation: "ease_in_out",
+            reason: "subject_motion",
+            confidence: 0.85,
+          },
+        ],
+      }
+    );
+    expect(filter).toContain("if(lt(t,3.000)");
+    expect(filter).toContain("*(3-2*");
   });
 });
 
@@ -287,4 +324,95 @@ describe("buildVerticalLayoutFilter", () => {
       )
     ).toContain("crop=1080:1920:x=");
   });
+
+  it("switches from PiP to stacked only during sustained reaction windows", () => {
+    const filter = buildVerticalLayoutFilter(
+      {
+        layout: "facecam_top_gameplay_bottom",
+        facecamRect: facecam,
+        dynamicSegments: [
+          { startTimeSeconds: 0, endTimeSeconds: 4, family: "pip" },
+          { startTimeSeconds: 4, endTimeSeconds: 6.5, family: "stacked" },
+          { startTimeSeconds: 6.5, endTimeSeconds: 10, family: "pip" },
+        ],
+      },
+      ctx
+    );
+    expect(filter).toContain("dynamic_pip_input");
+    expect(filter).toContain("dynamic_stacked_input");
+    expect(filter).toContain("enable='between(t\\,4.000\\,6.500)'");
+  });
+
+  it.runIf(process.env.RUN_FFMPEG_LAYOUT_VERIFY === "1")(
+    "executes the dynamic gameplay graph in FFmpeg",
+    () => {
+      const graph = buildVerticalLayoutFilter(
+        {
+          layout: "facecam_top_gameplay_bottom",
+          facecamRect: { x: 0.76, y: 0.04, width: 0.2, height: 0.25 },
+          originalFacecamRect: {
+            x: 0.76,
+            y: 0.04,
+            width: 0.2,
+            height: 0.25,
+          },
+          stacked: {
+            facecamPosition: "top",
+            facecamHeightRatio: 0.34,
+            dividerSize: 0,
+            dividerColor: "#000000",
+            hideOriginalFacecam: "crop_out",
+          },
+          pip: {
+            position: "top_left",
+            widthRatio: 0.3,
+            margin: 0.04,
+            borderSize: 2,
+            borderColor: "#ffffff",
+            hideOriginalFacecam: "crop_out",
+          },
+          gameplayCrop: {
+            keyframes: [
+              { timestampSeconds: 0, centerX: 0.3, centerY: 0.5 },
+              {
+                timestampSeconds: 1,
+                centerX: 0.7,
+                centerY: 0.5,
+                interpolation: "ease_in_out",
+              },
+            ],
+          },
+          dynamicSegments: [
+            { startTimeSeconds: 0, endTimeSeconds: 0.75, family: "pip" },
+            { startTimeSeconds: 0.75, endTimeSeconds: 1.5, family: "stacked" },
+          ],
+        },
+        {
+          sourceWidth: 320,
+          sourceHeight: 180,
+          outputWidth: 180,
+          outputHeight: 320,
+          scaleFlags: "lanczos",
+        }
+      );
+      expect(() =>
+        execFileSync(process.env.FFMPEG_VERIFY_PATH ?? "ffmpeg", [
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-f",
+          "lavfi",
+          "-i",
+          "testsrc2=size=320x180:rate=12:duration=1.5",
+          "-vf",
+          graph,
+          "-frames:v",
+          "18",
+          "-f",
+          "null",
+          "-",
+        ])
+      ).not.toThrow();
+    }
+  );
 });

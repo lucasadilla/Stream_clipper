@@ -6,7 +6,6 @@ import { renderJobDownloadUrl } from "@/lib/downloadUrls";
 import { triggerFileDownload } from "@/lib/clientDownload";
 import { videoDownloadFilename } from "@/lib/downloadFilename";
 import type { RenderJobLogEntry } from "@/lib/renderJobLogs";
-import type { PostRenderQualityReview } from "@/lib/postRenderCritic";
 import { OperationProgress } from "@/components/ui/operation-progress";
 
 interface RenderJob {
@@ -20,7 +19,6 @@ interface RenderJob {
   startedAt?: string | null;
   completedAt?: string | null;
   logs?: RenderJobLogEntry[] | null;
-  qualityReview?: PostRenderQualityReview | null;
   downloadFilename?: string;
 }
 
@@ -163,32 +161,6 @@ export function RenderJobStatus({
           >
             {downloading ? "Downloading…" : "Download Short"}
           </button>
-          {job.qualityReview && (
-            <div className="mt-3 border-t border-[var(--color-card-border)] pt-3">
-              <div className="flex items-center justify-between gap-3">
-                <span className="font-semibold text-white">
-                  {job.qualityReview.reviewer === "ai_visual"
-                    ? "AI export critic"
-                    : "Export quality check"}
-                </span>
-                <span
-                  className={cn(
-                    "font-semibold tabular-nums",
-                    job.qualityReview.verdict === "pass"
-                      ? "text-[var(--color-success)]"
-                      : job.qualityReview.verdict === "fail"
-                        ? "text-[var(--color-danger)]"
-                        : "text-[var(--color-warning)]"
-                  )}
-                >
-                  {job.qualityReview.score}/100
-                </span>
-              </div>
-              <p className="mt-1 leading-relaxed text-[var(--color-muted)]">
-                {job.qualityReview.summary}
-              </p>
-            </div>
-          )}
         </>
       )}
       {job.status === "failed" && job.errorMessage && (

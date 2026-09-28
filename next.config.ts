@@ -8,6 +8,9 @@ const posthogIngestHost = getPosthogIngestHost();
 const posthogAssetHost = getPosthogAssetHost(posthogIngestHost);
 
 const nextConfig: NextConfig = {
+  // Lets local recovery runs bypass a damaged generated cache without touching
+  // the user's normal .next directory. Production keeps the standard path.
+  distDir: process.env.NEXT_DIST_DIR?.trim() || ".next",
   experimental: {
     serverActions: {
       bodySizeLimit: "500mb",

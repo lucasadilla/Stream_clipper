@@ -72,6 +72,7 @@ export interface VerticalLayoutSelection {
   reframe: {
     style: ReframeStyle;
     lockSubject: boolean;
+    reactionEmphasis: boolean;
     lockedTrackId?: string;
     manualKeyframes?: Array<{
       timestampSeconds: number;
@@ -121,6 +122,7 @@ export function defaultVerticalLayoutSelection(): VerticalLayoutSelection {
     reframe: {
       style: "professional",
       lockSubject: false,
+      reactionEmphasis: true,
     },
     centerCrop: { focalPointX: 0.5, zoom: 1, useBlurredBackground: false },
     captions: { enabled: true, position: "lower" },

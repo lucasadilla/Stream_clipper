@@ -28,7 +28,7 @@ describe("platform-ready fallback copy", () => {
     expect(copy.description).not.toMatch(/candidate|24:37/i);
     expect(copy.caption).toBeNull();
     expect(copy.hashtags).toEqual([]);
-    expect(copy.tags).toEqual([]);
+    expect(copy.tags).toContain("Taylor Swift");
     expect(copy.thumbnailText).toBeNull();
     expect(copy.pinnedComment).toContain("Taylor Swift");
   });
@@ -37,7 +37,7 @@ describe("platform-ready fallback copy", () => {
     const tiktok = buildFallbackPlatformCopy({ platform: "tiktok", ...context });
     expect(tiktok.caption).toBeTruthy();
     expect(tiktok.caption).toMatch(/#/);
-    expect(tiktok.hashtags).toEqual([]);
+    expect(tiktok.hashtags.length).toBeGreaterThan(0);
     expect(tiktok.title).toBeNull();
 
     const reels = buildFallbackPlatformCopy({
@@ -45,7 +45,7 @@ describe("platform-ready fallback copy", () => {
       ...context,
     });
     expect(reels.caption).toMatch(/#/);
-    expect(reels.hashtags).toEqual([]);
+    expect(reels.hashtags.length).toBeGreaterThan(0);
   });
 
   it("creates an X package within the platform limit without irrelevant fields", () => {
@@ -54,7 +54,7 @@ describe("platform-ready fallback copy", () => {
     expect(copy.postText).toMatch(/#/);
     expect(copy.caption).toBeNull();
     expect(copy.description).toBeNull();
-    expect(copy.hashtags).toEqual([]);
+    expect(copy.hashtags.length).toBeLessThanOrEqual(2);
   });
 
   it("extracts searchable proper names ahead of generic stream words", () => {

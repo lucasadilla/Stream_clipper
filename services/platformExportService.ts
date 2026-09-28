@@ -24,7 +24,7 @@ import {
   toRelativeStoragePath,
 } from "@/lib/storage";
 import { toJsonValue } from "@/lib/utils";
-import { generatePlatformCopy } from "@/services/platformCopyService";
+import { generatePlatformCopyPackage } from "@/services/platformCopyService";
 import { renderPlatformVideo } from "@/services/platformRenderService";
 import { validateCompletedPlatformExport } from "@/services/platformValidationService";
 import { getTranscriptChunksForRange } from "@/services/transcriptService";
@@ -431,11 +431,15 @@ export async function executePlatformExport(platformExportId: string) {
   const { platformExport, copyInput, transcriptChunks } = context;
   const settings = parseSettings(platformExport.exportSettings);
   const platform = platformExport.platform as PlatformKey;
+  const generatedPackage =
+    !settings.useCopyOverride && settings.generateCopy
+      ? await generatePlatformCopyPackage(copyInput)
+      : null;
   const copy = settings.useCopyOverride
     ? storedCopyData(platformExport)
-    : settings.generateCopy
-    ? await generatePlatformCopy(copyInput)
-    : {
+    : generatedPackage
+      ? generatedPackage.copy
+      : {
         title: null,
         caption: null,
         postText: null,
@@ -445,11 +449,35 @@ export async function executePlatformExport(platformExportId: string) {
         quoteText: copyInput.transcriptText.slice(0, 120) || copyInput.clipReason.slice(0, 120),
         thumbnailText: null,
         pinnedComment: null,
-      };
+        };
+
+  const existingSettings =
+    platformExport.exportSettings &&
+    typeof platformExport.exportSettings === "object" &&
+    !Array.isArray(platformExport.exportSettings)
+      ? (platformExport.exportSettings as Record<string, unknown>)
+      : {};
 
   await prisma.platformExport.update({
     where: { id: platformExportId },
-    data: { ...copyData(copy), progress: 25, lockedAt: new Date() },
+    data: {
+      ...copyData(copy),
+      progress: 25,
+      lockedAt: new Date(),
+      exportSettings: toJsonValue({
+        ...existingSettings,
+        ...(generatedPackage
+          ? {
+              packagingDNA: generatedPackage.packagingDNA,
+              packagingWarnings: generatedPackage.warnings,
+              packagingEvidence: generatedPackage.reasoningEvidence,
+            }
+          : {}),
+        ...(settings.useCopyOverride
+          ? { creatorPackagingOverrides: ["copy_override"] }
+          : {}),
+      }),
+    },
   });
 
   const renderJob = platformExport.renderJobId
@@ -574,7 +602,8 @@ export async function failPlatformExport(
 
 export async function regeneratePlatformExportCopy(platformExportId: string) {
   const { platformExport, copyInput } = await buildCopyContext(platformExportId);
-  const copy = await generatePlatformCopy(copyInput);
+  const generatedPackage = await generatePlatformCopyPackage(copyInput);
+  const copy = generatedPackage.copy;
   const settings = parseSettings(platformExport.exportSettings);
   const warnings = validateCompletedPlatformExport({
     platform: platformExport.platform as PlatformKey,
@@ -592,6 +621,16 @@ export async function regeneratePlatformExportCopy(platformExportId: string) {
     data: {
       ...copyData(copy),
       validationWarnings: toJsonValue(warnings),
+      exportSettings: toJsonValue({
+        ...(platformExport.exportSettings &&
+        typeof platformExport.exportSettings === "object" &&
+        !Array.isArray(platformExport.exportSettings)
+          ? (platformExport.exportSettings as Record<string, unknown>)
+          : {}),
+        packagingDNA: generatedPackage.packagingDNA,
+        packagingWarnings: generatedPackage.warnings,
+        packagingEvidence: generatedPackage.reasoningEvidence,
+      }),
     },
   });
 }

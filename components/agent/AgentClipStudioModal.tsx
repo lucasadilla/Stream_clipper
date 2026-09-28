@@ -18,10 +18,9 @@ import {
   Play,
   RotateCcw,
   Send,
-  ShieldCheck,
   SlidersHorizontal,
+  Sparkles,
   Smartphone,
-  TriangleAlert,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -75,6 +74,10 @@ import type {
   ReframeStyle,
 } from "@/lib/professionalReframe";
 import type { VerticalLayout } from "@/lib/verticalLayout";
+import type {
+  GameplayLayoutFamily,
+  GameplayLayoutSegment,
+} from "@/lib/gameplayLayout";
 import {
   previewCameraFrameAt,
   type PreviewCropKeyframe,
@@ -85,7 +88,6 @@ import {
   loadClipStudioCaptions,
   updateClipStudioCaptionCache,
 } from "@/lib/clipStudioPreload";
-import type { PostRenderQualityReview } from "@/lib/postRenderCritic";
 import type { SpeakerContext } from "@/lib/speakerContext";
 import { OperationProgress } from "@/components/ui/operation-progress";
 import { SpeakerManager } from "@/components/SpeakerManager";
@@ -98,8 +100,20 @@ import {
   mediaTimeForTimeline,
   timelineTimeForMedia,
 } from "@/lib/clipPlaybackTime";
+import type { ClipPackage } from "@/lib/hookIntelligence";
 
 type StudioTab = "edit" | "preview" | "export";
+
+function previewLayoutForGameplayFamily(
+  family: GameplayLayoutFamily
+): VerticalLayout {
+  if (family === "stacked" || family === "dynamic_reaction") {
+    return "facecam_top_gameplay_bottom";
+  }
+  if (family === "pip") return "facecam_pip";
+  if (family === "gameplay_only") return "subject_aware_crop";
+  return "center_crop";
+}
 
 function mergeManualPreviewKeyframes(
   automatic: PreviewCropKeyframe[],
@@ -126,6 +140,18 @@ const PREVIEW_PLATFORMS: PlatformKey[] = [
   "x",
 ];
 const ALL_PLATFORM_KEYS = Object.keys(PLATFORM_PRESETS) as PlatformKey[];
+
+const HOOK_TYPE_LABELS: Record<
+  ClipPackage["selectedHook"]["hookType"],
+  string
+> = {
+  natural: "Natural",
+  action_first: "Action first",
+  reaction_first: "Reaction first",
+  quote_first: "Quote first",
+  payoff_tease: "Payoff tease",
+  context_compressed: "Tighter setup",
+};
 
 const EXPORT_TO_SOCIAL: Partial<Record<PlatformKey, SocialPlatform>> = {
   youtube_shorts: "youtube",
@@ -185,68 +211,6 @@ function socialContentFromCopy(
   };
 }
 
-function RenderQualityReport({
-  review,
-}: {
-  review: PostRenderQualityReview;
-}) {
-  const passed = review.verdict === "pass";
-  const failed = review.verdict === "fail";
-  const ReviewIcon = passed ? ShieldCheck : TriangleAlert;
-  const tone = passed
-    ? "text-[var(--color-accent)]"
-    : failed
-      ? "text-[var(--color-danger)]"
-      : "text-[var(--color-warning)]";
-
-  return (
-    <div className="mt-4 border-t border-[var(--color-card-border)] pt-4">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex min-w-0 items-start gap-2.5">
-          <ReviewIcon className={cn("mt-0.5 h-4 w-4 shrink-0", tone)} />
-          <div className="min-w-0">
-            <p className="text-xs font-semibold text-white">
-              {review.reviewer === "ai_visual"
-                ? "AI export critic"
-                : "Export quality check"}
-            </p>
-            <p className="mt-1 text-xs leading-relaxed text-[var(--color-muted)]">
-              {review.summary}
-            </p>
-          </div>
-        </div>
-        <div className={cn("shrink-0 text-right", tone)}>
-          <span className="text-lg font-semibold tabular-nums">{review.score}</span>
-          <span className="text-[10px] text-[var(--color-muted)]">/100</span>
-        </div>
-      </div>
-
-      {review.issues.length > 0 && (
-        <div className="mt-3 space-y-2">
-          {review.issues.slice(0, 3).map((issue, index) => (
-            <div
-              key={`${issue.category}-${issue.timestampSeconds ?? "all"}-${index}`}
-              className="border-l-2 border-[var(--color-card-border)] pl-3"
-            >
-              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                <span className="text-xs font-medium text-white">{issue.title}</span>
-                {issue.timestampSeconds !== null && (
-                  <span className="font-mono text-[10px] text-[var(--color-accent)]">
-                    {formatSeconds(issue.timestampSeconds)}
-                  </span>
-                )}
-              </div>
-              <p className="mt-0.5 text-[11px] leading-relaxed text-[var(--color-muted)]">
-                {issue.recommendation}
-              </p>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 interface SocialAccount {
   id: string;
   platform: SocialPlatform;
@@ -276,7 +240,8 @@ function buildVerticalSelection(
   captionsEnabled: boolean,
   reframeStyle: ReframeStyle = "professional",
   lockSubject = false,
-  manualKeyframes: ManualReframeKeyframe[] = []
+  manualKeyframes: ManualReframeKeyframe[] = [],
+  reactionEmphasis = true
 ): VerticalLayoutSelection {
   const preset = getContentLookPreset(presetId);
   const base = defaultVerticalLayoutSelection();
@@ -289,6 +254,7 @@ function buildVerticalSelection(
       ...base.reframe,
       style: reframeStyle,
       lockSubject,
+      reactionEmphasis,
       manualKeyframes,
     },
     stacked: {
@@ -336,6 +302,7 @@ export function AgentClipStudioModal({
   const [lookPreset, setLookPreset] = useState<ContentLookPresetId>("auto");
   const reframeStyle: ReframeStyle = "professional";
   const [lockSubject, setLockSubject] = useState(false);
+  const [reactionEmphasis, setReactionEmphasis] = useState(true);
   const [faceJobId, setFaceJobId] = useState<string | null>(null);
   const [faceRect, setFaceRect] = useState<{
     x: number;
@@ -368,6 +335,16 @@ export function AgentClipStudioModal({
     height: number;
   } | null>(null);
   const [faceKeyframes, setFaceKeyframes] = useState<PreviewCropKeyframe[]>([]);
+  const [gameplayKeyframes, setGameplayKeyframes] = useState<
+    PreviewCropKeyframe[]
+  >([]);
+  const [gameplayLayoutFamily, setGameplayLayoutFamily] =
+    useState<GameplayLayoutFamily | null>(null);
+  const [reactionFallbackFamily, setReactionFallbackFamily] =
+    useState<GameplayLayoutFamily | null>(null);
+  const [gameplayLayoutSegments, setGameplayLayoutSegments] = useState<
+    GameplayLayoutSegment[]
+  >([]);
   const [faceBaseCropWidth, setFaceBaseCropWidth] = useState<number | null>(null);
   const [autoResolvedLayout, setAutoResolvedLayout] =
     useState<VerticalLayout | null>(null);
@@ -427,8 +404,6 @@ export function AgentClipStudioModal({
   const [renderProgress, setRenderProgress] = useState(0);
   const [renderStage, setRenderStage] = useState("queued");
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
-  const [qualityReview, setQualityReview] =
-    useState<PostRenderQualityReview | null>(null);
   const [packing, setPacking] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [downloadingPlatform, setDownloadingPlatform] =
@@ -438,6 +413,10 @@ export function AgentClipStudioModal({
   >({});
   const [platformCaptions, setPlatformCaptions] = useState<Partial<Record<PlatformKey, boolean>>>({});
   const platformCaptionsEnabled = platformCaptions[previewPlatform] ?? includeCaptions;
+  const [hookPackage, setHookPackage] = useState<ClipPackage | null>(null);
+  const [hookPackageLoading, setHookPackageLoading] = useState(false);
+  const [hookSelectionLoading, setHookSelectionLoading] = useState<string | null>(null);
+  const [hookPackageError, setHookPackageError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -475,6 +454,79 @@ export function AgentClipStudioModal({
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  useEffect(() => {
+    if (!open) {
+      setHookPackage(null);
+      setHookPackageError(null);
+      return;
+    }
+    let cancelled = false;
+    setHookPackageLoading(true);
+    setHookPackageError(null);
+    void fetchJson<{ hookPackage?: ClipPackage | null; error?: string }>(
+      `/api/clips/${clip.id}/hook-package`
+    )
+      .then(({ ok, data }) => {
+        if (cancelled) return;
+        if (!ok) throw new Error(data.error ?? "Could not load AI openings");
+        setHookPackage(data.hookPackage ?? null);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setHookPackageError(
+            error instanceof Error ? error.message : "Could not load AI openings"
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setHookPackageLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, clip.id]);
+
+  const applyHookSelection = useCallback(
+    async (options: {
+      hookCandidateId?: string;
+      titleCandidateId?: string | null;
+      restoreRecommendation?: boolean;
+    }) => {
+      const loadingKey = options.restoreRecommendation
+        ? "restore"
+        : options.titleCandidateId ?? options.hookCandidateId ?? "selection";
+      setHookSelectionLoading(loadingKey);
+      setHookPackageError(null);
+      try {
+        const { ok, data } = await fetchJson<{
+          hookPackage?: ClipPackage;
+          clip?: ClipSuggestionData;
+          error?: string;
+        }>(`/api/clips/${clip.id}/hook-package`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(options),
+        });
+        if (!ok || !data.hookPackage || !data.clip) {
+          throw new Error(data.error ?? "Could not apply the AI opening");
+        }
+        setHookPackage(data.hookPackage);
+        setDownloadUrl(null);
+        setPlatformDownloadUrls({});
+        setPreparedPlayback(null);
+        setPlaybackPrepareAttempt((value) => value + 1);
+        onClipChange(data.clip);
+      } catch (error) {
+        setHookPackageError(
+          error instanceof Error ? error.message : "Could not apply the AI opening"
+        );
+      } finally {
+        setHookSelectionLoading(null);
+      }
+    },
+    [clip.id, onClipChange]
+  );
 
   useEffect(() => {
     if (!open) {
@@ -608,7 +660,6 @@ export function AgentClipStudioModal({
     userChoseLookRef.current = false;
     setTab("edit");
     setDownloadUrl(null);
-    setQualityReview(null);
     setCaptionDirectionPlan(null);
     setCaptionDirectorLoading(false);
     setRenderStage("queued");
@@ -629,6 +680,7 @@ export function AgentClipStudioModal({
     setPreviewPlaying(false);
     setLookPreset("auto");
     setLockSubject(false);
+    setReactionEmphasis(true);
     setFaceJobId(null);
     setFaceRect(null);
     setFacecamRect(null);
@@ -636,6 +688,10 @@ export function AgentClipStudioModal({
     setGamingFacecamRect(null);
     setInstantFaceRect(null);
     setFaceKeyframes([]);
+    setGameplayKeyframes([]);
+    setGameplayLayoutFamily(null);
+    setReactionFallbackFamily(null);
+    setGameplayLayoutSegments([]);
     setFaceBaseCropWidth(null);
     setAutoResolvedLayout(null);
     manualReframeKeyframesRef.current = [];
@@ -680,6 +736,16 @@ export function AgentClipStudioModal({
               cropHeight?: number;
               interpolation?: "hold" | "ease_in_out" | "linear" | "cut";
             }>;
+            gameplayPreviewKeyframes?: PreviewCropKeyframe[];
+            gameplayLayoutPlan?: {
+              selectedFamily?: GameplayLayoutFamily;
+              segments?: GameplayLayoutSegment[];
+              candidates?: Array<{
+                family: GameplayLayoutFamily;
+                score: number;
+                validation: { valid: boolean };
+              }>;
+            } | null;
             warnings?: string[];
             sourceWidth?: number;
             sourceHeight?: number;
@@ -764,6 +830,25 @@ export function AgentClipStudioModal({
             manualReframeKeyframesRef.current
           )
         );
+        setGameplayKeyframes(
+          (job.gameplayPreviewKeyframes ?? []).filter(
+            (keyframe) =>
+              Number.isFinite(keyframe.timestampSeconds) &&
+              Number.isFinite(keyframe.centerX)
+          )
+        );
+        setGameplayLayoutFamily(
+          job.gameplayLayoutPlan?.selectedFamily ?? null
+        );
+        setGameplayLayoutSegments(job.gameplayLayoutPlan?.segments ?? []);
+        setReactionFallbackFamily(
+          job.gameplayLayoutPlan?.candidates?.find(
+            (candidate) =>
+              candidate.family !== "dynamic_reaction" &&
+              candidate.validation.valid &&
+              candidate.score > 0
+          )?.family ?? null
+        );
         setAnalyzingFace(false);
         setAnalysisProgress(100);
         setFaceTrackingReady(Boolean(rect || keyframes.length > 0));
@@ -820,6 +905,7 @@ export function AgentClipStudioModal({
             reframe?: {
               style?: ReframeStyle;
               lockSubject?: boolean;
+              reactionEmphasis?: boolean;
               manualKeyframes?: ManualReframeKeyframe[];
             };
           };
@@ -829,9 +915,12 @@ export function AgentClipStudioModal({
         const savedStyle: ReframeStyle = "professional";
         const savedLock =
           data.configuration.settings?.reframe?.lockSubject ?? false;
+        const savedReactionEmphasis =
+          data.configuration.settings?.reframe?.reactionEmphasis ?? true;
         const savedManual =
           data.configuration.settings?.reframe?.manualKeyframes ?? [];
         setLockSubject(savedLock);
+        setReactionEmphasis(savedReactionEmphasis);
         manualReframeKeyframesRef.current = savedManual;
         setManualReframeKeyframes(savedManual);
         if (
@@ -937,6 +1026,16 @@ export function AgentClipStudioModal({
       job?: {
         status?: string;
         previewKeyframes?: PreviewCropKeyframe[];
+        gameplayPreviewKeyframes?: PreviewCropKeyframe[];
+        gameplayLayoutPlan?: {
+          selectedFamily?: GameplayLayoutFamily;
+          segments?: GameplayLayoutSegment[];
+          candidates?: Array<{
+            family: GameplayLayoutFamily;
+            score: number;
+            validation: { valid: boolean };
+          }>;
+        } | null;
         sourceWidth?: number;
         sourceHeight?: number;
       };
@@ -957,6 +1056,25 @@ export function AgentClipStudioModal({
           ),
           manualReframeKeyframes
         )
+      );
+      setGameplayKeyframes(
+        (data.job.gameplayPreviewKeyframes ?? []).filter(
+          (keyframe) =>
+            Number.isFinite(keyframe.timestampSeconds) &&
+            Number.isFinite(keyframe.centerX)
+        )
+      );
+      setGameplayLayoutFamily(
+        data.job.gameplayLayoutPlan?.selectedFamily ?? null
+      );
+      setGameplayLayoutSegments(data.job.gameplayLayoutPlan?.segments ?? []);
+      setReactionFallbackFamily(
+        data.job.gameplayLayoutPlan?.candidates?.find(
+          (candidate) =>
+            candidate.family !== "dynamic_reaction" &&
+            candidate.validation.valid &&
+            candidate.score > 0
+        )?.family ?? null
       );
       if (data.job.sourceWidth && data.job.sourceHeight) {
         setFaceBaseCropWidth(
@@ -1168,7 +1286,6 @@ export function AgentClipStudioModal({
     if (!open) return;
     // A rendered URL is only valid for the caption configuration that made it.
     setDownloadUrl(null);
-    setQualityReview(null);
     setPlatformDownloadUrls({});
   }, [
     open,
@@ -1178,8 +1295,10 @@ export function AgentClipStudioModal({
     platformCaptionEdits,
     lookPreset,
     faceJobId,
+    faceTrackingReady,
     manualReframeKeyframes,
     lockSubject,
+    reactionEmphasis,
     clip.startTimeSeconds,
     clip.endTimeSeconds,
   ]);
@@ -1190,6 +1309,61 @@ export function AgentClipStudioModal({
     lookPreset === "gaming" ? gamingFaceRect ?? faceRect : faceRect;
   const selectedFacecamRect =
     lookPreset === "gaming" ? gamingFacecamRect ?? facecamRect : facecamRect;
+  const previewAutoResolvedLayout =
+    !reactionEmphasis &&
+    gameplayLayoutFamily === "dynamic_reaction" &&
+    reactionFallbackFamily
+      ? previewLayoutForGameplayFamily(reactionFallbackFamily)
+      : autoResolvedLayout;
+  const resolvedPreviewLayout =
+    (lookPreset === "auto" ? previewAutoResolvedLayout : null) ??
+    getContentLookPreset(lookPreset).layout;
+  const cameraTargetsGameplay =
+    gameplayKeyframes.length > 0 &&
+    (resolvedPreviewLayout === "facecam_top_gameplay_bottom" ||
+      resolvedPreviewLayout === "facecam_bottom_gameplay_top" ||
+      resolvedPreviewLayout === "facecam_pip" ||
+      resolvedPreviewLayout === "gameplay_full" ||
+      (resolvedPreviewLayout === "subject_aware_crop" &&
+        (lookPreset === "gameplay_only" ||
+          (lookPreset === "auto" &&
+            gameplayLayoutFamily === "gameplay_only"))));
+  const previewGameplayKeyframes = useMemo(
+    () =>
+      mergeManualPreviewKeyframes(
+        gameplayKeyframes,
+        manualReframeKeyframes
+      ),
+    [gameplayKeyframes, manualReframeKeyframes]
+  );
+  const previewDynamicLayoutSegments = useMemo(
+    () =>
+      reactionEmphasis && gameplayLayoutFamily === "dynamic_reaction"
+        ? gameplayLayoutSegments.flatMap((segment) =>
+            segment.family === "pip" || segment.family === "stacked"
+              ? [
+                  {
+                    startTimeSeconds: Math.max(
+                      0,
+                      segment.startTimeSeconds - clip.startTimeSeconds
+                    ),
+                    endTimeSeconds: Math.max(
+                      0,
+                      segment.endTimeSeconds - clip.startTimeSeconds
+                    ),
+                    family: segment.family,
+                  },
+                ]
+              : []
+          )
+        : [],
+    [
+      clip.startTimeSeconds,
+      gameplayLayoutFamily,
+      gameplayLayoutSegments,
+      reactionEmphasis,
+    ]
+  );
 
   const duration = clip.endTimeSeconds - clip.startTimeSeconds;
   const activePlatformCopy = platformCopies[previewPlatform];
@@ -1407,7 +1581,8 @@ export function AgentClipStudioModal({
       jobId: string | null,
       style: ReframeStyle = reframeStyle,
       locked: boolean = lockSubject,
-      manual: ManualReframeKeyframe[] = manualReframeKeyframes
+      manual: ManualReframeKeyframe[] = manualReframeKeyframes,
+      emphasizeReaction: boolean = reactionEmphasis
     ) => {
       const selection = buildVerticalSelection(
         presetId,
@@ -1415,7 +1590,8 @@ export function AgentClipStudioModal({
         includeCaptions,
         style,
         locked,
-        manual
+        manual,
+        emphasizeReaction
       );
       await fetchJson(`/api/clips/${clip.id}/vertical-layout`, {
         method: "PUT",
@@ -1430,6 +1606,7 @@ export function AgentClipStudioModal({
       reframeStyle,
       lockSubject,
       manualReframeKeyframes,
+      reactionEmphasis,
     ]
   );
 
@@ -1470,6 +1647,26 @@ export function AgentClipStudioModal({
     setLockSubject(next);
     void saveLayout(lookPreset, faceJobId, reframeStyle, next);
   }, [faceJobId, lockSubject, lookPreset, reframeStyle, saveLayout]);
+
+  const toggleReactionEmphasis = useCallback(() => {
+    const next = !reactionEmphasis;
+    setReactionEmphasis(next);
+    void saveLayout(
+      lookPreset,
+      faceJobId,
+      reframeStyle,
+      lockSubject,
+      manualReframeKeyframesRef.current,
+      next
+    );
+  }, [
+    faceJobId,
+    lockSubject,
+    lookPreset,
+    reactionEmphasis,
+    reframeStyle,
+    saveLayout,
+  ]);
 
   const upsertManualCameraKeyframe = useCallback(
     (keyframe: ManualReframeKeyframe) => {
@@ -1559,7 +1756,8 @@ export function AgentClipStudioModal({
         includeCaptions,
         reframeStyle,
         lockSubject,
-        manualReframeKeyframes
+        manualReframeKeyframes,
+        reactionEmphasis
       );
       const result = await renderClip(
         clip.id,
@@ -1580,7 +1778,6 @@ export function AgentClipStudioModal({
         selection
       );
       setDownloadUrl(result.downloadUrl);
-      setQualityReview(result.qualityReview);
       await preparedDownload.start(
         result.downloadUrl,
         videoDownloadFilename(clip.title)
@@ -1613,7 +1810,8 @@ export function AgentClipStudioModal({
         includeCaptions,
         reframeStyle,
         lockSubject,
-        manualReframeKeyframes
+        manualReframeKeyframes,
+        reactionEmphasis
       );
       const result = await renderClip(
         clip.id,
@@ -1634,7 +1832,6 @@ export function AgentClipStudioModal({
         selection
       );
       setDownloadUrl(result.downloadUrl);
-      setQualityReview(result.qualityReview);
       onClipChange({ ...clip, status: "rendered" });
       return true;
     } catch (err) {
@@ -2051,6 +2248,138 @@ export function AgentClipStudioModal({
             <div className="p-4 pb-8 sm:p-5 lg:p-6 lg:pb-10">
           <div className={cn(tab !== "edit" && "hidden")} aria-hidden={tab !== "edit"}>
             <div className="space-y-6">
+              {(hookPackageLoading || hookPackage || hookPackageError) && (
+                <section className="border-b border-white/[0.08] pb-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--color-accent)]">
+                        <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+                        AI recommended opening
+                      </p>
+                      <p className="mt-1 text-xs text-[var(--color-muted)]">
+                        Grounded alternatives ranked for the first three seconds.
+                      </p>
+                    </div>
+                    {hookPackage?.creatorSelection && (
+                      <button
+                        type="button"
+                        disabled={hookSelectionLoading !== null}
+                        onClick={() =>
+                          void applyHookSelection({ restoreRecommendation: true })
+                        }
+                        className="text-[11px] font-semibold text-[var(--color-accent)] hover:text-white disabled:opacity-50"
+                      >
+                        {hookSelectionLoading === "restore"
+                          ? "Restoring…"
+                          : "Restore AI choice"}
+                      </button>
+                    )}
+                  </div>
+
+                  {hookPackageLoading ? (
+                    <p className="mt-3 text-xs text-[var(--color-muted)]">
+                      Loading opening analysis…
+                    </p>
+                  ) : hookPackage ? (
+                    <>
+                      <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                        {hookPackage.hookCandidates.map((candidate) => {
+                          const active =
+                            candidate.candidateId ===
+                            hookPackage.selectedHook.candidateId;
+                          const recommended =
+                            candidate.candidateId ===
+                            hookPackage.recommendedHookCandidateId;
+                          const blocked = candidate.requiresTemporalReordering;
+                          return (
+                            <button
+                              key={candidate.candidateId}
+                              type="button"
+                              disabled={blocked || hookSelectionLoading !== null}
+                              onClick={() =>
+                                void applyHookSelection({
+                                  hookCandidateId: candidate.candidateId,
+                                })
+                              }
+                              className={cn(
+                                "rounded-lg border px-3 py-2.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-55",
+                                active
+                                  ? "border-[var(--color-accent)]/60 bg-[var(--color-accent)]/[0.08]"
+                                  : "border-white/[0.08] bg-[#080a08] hover:border-white/20"
+                              )}
+                            >
+                              <span className="flex items-center justify-between gap-2">
+                                <span className="text-xs font-semibold text-white">
+                                  {HOOK_TYPE_LABELS[candidate.hookType]}
+                                </span>
+                                <span className="text-[9px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+                                  {blocked
+                                    ? "Shadow"
+                                    : recommended
+                                      ? "Recommended"
+                                      : `${candidate.rankScore}/100`}
+                                </span>
+                              </span>
+                              <span className="mt-1 block line-clamp-2 text-[10px] leading-4 text-[var(--color-muted)]">
+                                {candidate.firstCaptionText ||
+                                  candidate.reasoningEvidence[0]}
+                              </span>
+                              <span className="mt-1.5 block text-[9px] text-white/45">
+                                Starts {formatSeconds(candidate.openingStartTimestamp)} · clarity {candidate.clarity}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div className="mt-3 border-t border-white/[0.06] pt-3">
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-white/60">
+                          Title alternatives
+                        </p>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {hookPackage.titleCandidates.slice(0, 6).map((title) => {
+                            const active =
+                              title.id === hookPackage.selectedTitleCandidateId;
+                            return (
+                              <button
+                                key={title.id}
+                                type="button"
+                                disabled={hookSelectionLoading !== null}
+                                onClick={() =>
+                                  void applyHookSelection({
+                                    titleCandidateId: title.id,
+                                  })
+                                }
+                                className={cn(
+                                  "rounded-md border px-2.5 py-1.5 text-[10px] font-medium transition-colors disabled:opacity-50",
+                                  active
+                                    ? "border-[var(--color-accent)]/55 bg-[var(--color-accent)]/10 text-white"
+                                    : "border-white/[0.08] text-[var(--color-muted)] hover:border-white/20 hover:text-white"
+                                )}
+                              >
+                                {title.title}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {hookPackage.modelDecision && (
+                        <p className="mt-2 text-[9px] text-white/35">
+                          Reviewed by {hookPackage.modelDecision.model} · first-three-second hook score {hookPackage.selectedMoment.hookability}/100
+                        </p>
+                      )}
+                    </>
+                  ) : null}
+
+                  {hookPackageError && (
+                    <p className="mt-2 text-xs text-[var(--color-warning,#e6b84d)]">
+                      {hookPackageError}
+                    </p>
+                  )}
+                </section>
+              )}
+
               <section className="border-b border-white/[0.08] pb-5">
                 <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
                   <div>
@@ -2108,7 +2437,27 @@ export function AgentClipStudioModal({
                   })}
                 </div>
                 {(lookPreset === "just_chatting" || lookPreset === "auto") && (
-                  <div className="mt-3 flex justify-end border-t border-white/[0.06] pt-3">
+                  <div className="mt-3 flex flex-wrap justify-end gap-2 border-t border-white/[0.06] pt-3">
+                    {lookPreset === "auto" && (
+                      <button
+                        type="button"
+                        onClick={toggleReactionEmphasis}
+                        className={cn(
+                          "flex shrink-0 items-center justify-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] font-semibold transition-colors",
+                          reactionEmphasis
+                            ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
+                            : "border-[var(--color-card-border)] text-[var(--color-muted)] hover:text-[var(--color-foreground)]"
+                        )}
+                      >
+                        <SlidersHorizontal
+                          className="h-3.5 w-3.5"
+                          aria-hidden="true"
+                        />
+                        {reactionEmphasis
+                          ? "Reaction emphasis on"
+                          : "Reaction emphasis off"}
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={toggleSubjectLock}
@@ -2210,8 +2559,11 @@ export function AgentClipStudioModal({
                 faceRect={selectedFaceRect}
                 facecamRect={selectedFacecamRect}
                 faceKeyframes={faceKeyframes}
+                gameplayKeyframes={previewGameplayKeyframes}
+                cameraTargetsGameplay={cameraTargetsGameplay}
+                dynamicLayoutSegments={previewDynamicLayoutSegments}
                 faceBaseCropWidth={faceBaseCropWidth}
-                autoResolvedLayout={autoResolvedLayout}
+                autoResolvedLayout={previewAutoResolvedLayout}
                 manualCameraKeyframeCount={manualReframeKeyframes.length}
                 onAddCameraKeyframe={upsertManualCameraKeyframe}
                 onDeleteCameraKeyframe={deleteManualCameraKeyframe}
@@ -2291,14 +2643,23 @@ export function AgentClipStudioModal({
                         faceCenterY={platformCameraFrame?.centerY}
                         zoom={platformCameraZoom}
                         layoutOverride={
-                          lookPreset === "auto" ? autoResolvedLayout : null
+                          lookPreset === "auto"
+                            ? previewAutoResolvedLayout
+                            : null
                         }
-                        cameraKeyframes={faceKeyframes}
+                        cameraKeyframes={
+                          cameraTargetsGameplay
+                            ? previewGameplayKeyframes
+                            : faceKeyframes
+                        }
+                        cameraTargetsGameplay={cameraTargetsGameplay}
+                        dynamicLayoutSegments={previewDynamicLayoutSegments}
                         cameraStartSeconds={mediaTimeForTimeline(
                           clip.startTimeSeconds,
                           playbackTimelineOffsetSeconds
                         )}
                         cameraBaseCropWidth={faceBaseCropWidth}
+                        preserveFullFrame={previewPlatform === "x"}
                         className="h-full w-full rounded-none border-0"
                         onTimeUpdate={onPlatformPreviewTimeUpdate}
                         onPlay={() => setPreviewPlaying(true)}
@@ -2396,14 +2757,14 @@ export function AgentClipStudioModal({
                 <div className="flex flex-wrap items-center gap-2">
                   <label className="flex items-center gap-2 text-xs">
                     <input type="checkbox" checked={platformCaptionsEnabled}
-                      disabled={Boolean(downloadingPlatform) || rendering || publishing || packing}
+                      disabled={Boolean(downloadingPlatform) || rendering || publishing || packing || analyzingFace}
                       onChange={(event) => changePlatformCaptions(previewPlatform, event.target.checked)}
                       className="accent-[var(--color-accent)]" />
                     Captions for {previewMeta.name}
                   </label>
                   <button
                     type="button"
-                    disabled={Boolean(downloadingPlatform) || rendering || publishing}
+                    disabled={Boolean(downloadingPlatform) || rendering || publishing || analyzingFace}
                     onClick={() => void handlePlatformPreviewDownload()}
                     className="inline-flex h-10 items-center gap-2 border border-[var(--color-card-border)] px-3 text-xs font-semibold text-[var(--color-foreground)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-45"
                   >
@@ -2418,7 +2779,7 @@ export function AgentClipStudioModal({
                   {activePlatformAccount ? (
                     <button
                       type="button"
-                      disabled={publishing || Boolean(downloadingPlatform) || rendering}
+                      disabled={publishing || Boolean(downloadingPlatform) || rendering || analyzingFace}
                       onClick={() => void handlePlatformPreviewPost()}
                       className="inline-flex h-10 items-center gap-2 bg-[var(--color-accent)] px-4 text-xs font-semibold text-black transition-colors hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-45"
                     >
@@ -2471,14 +2832,14 @@ export function AgentClipStudioModal({
                 <div className="mt-3 flex flex-wrap gap-2">
                   <label className="flex items-center gap-2 text-xs">
                     <input type="checkbox" checked={includeCaptions}
-                      disabled={rendering || packing || publishing || Boolean(downloadingPlatform)}
+                      disabled={rendering || packing || publishing || Boolean(downloadingPlatform) || analyzingFace}
                       onChange={(event) => onIncludeCaptionsChange(event.target.checked)}
                       className="accent-[var(--color-accent)]" />
                     Captions for general download
                   </label>
                   <Button
                     type="button"
-                    disabled={rendering || packing || publishing || Boolean(downloadingPlatform)}
+                    disabled={rendering || packing || publishing || Boolean(downloadingPlatform) || analyzingFace}
                     onClick={() => void handleRenderDownload()}
                   >
                     {rendering
@@ -2517,7 +2878,6 @@ export function AgentClipStudioModal({
                     className="mt-4"
                   />
                 )}
-                {qualityReview && <RenderQualityReport review={qualityReview} />}
               </div>
 
               <div className="rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-4">
@@ -2552,7 +2912,7 @@ export function AgentClipStudioModal({
                         <label className="flex items-center gap-1.5">
                           <input type="checkbox" checked={platformCaptions[key] ?? includeCaptions}
                             aria-label={`Captions for ${p.name}`}
-                            disabled={packing || rendering || publishing || Boolean(downloadingPlatform)}
+                            disabled={packing || rendering || publishing || Boolean(downloadingPlatform) || analyzingFace}
                             onChange={(event) => changePlatformCaptions(key, event.target.checked)}
                             className="accent-[var(--color-accent)]" />
                           Captions
@@ -2565,7 +2925,7 @@ export function AgentClipStudioModal({
                   type="button"
                   className="mt-3"
                   variant="outline"
-                  disabled={packing || rendering || selectedPlatforms.length === 0}
+                  disabled={packing || rendering || analyzingFace || selectedPlatforms.length === 0}
                   onClick={() => void handlePlatformPack()}
                 >
                   {packing ? "Creating packs…" : "Create platform packs"}
@@ -2619,6 +2979,7 @@ export function AgentClipStudioModal({
                   disabled={
                     publishing ||
                     rendering ||
+                    analyzingFace ||
                     selectedAccountIds.length === 0
                   }
                   onClick={() => void handleAutoPost()}

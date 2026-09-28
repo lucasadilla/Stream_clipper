@@ -28,7 +28,6 @@ export function StreamUrlInput() {
   const [signedIn, setSignedIn] = useState(false);
   const [modeModalOpen, setModeModalOpen] = useState(false);
   const [selectedMode, setSelectedMode] = useState<ClippingEntryMode | null>(null);
-  const [agentPrompt, setAgentPrompt] = useState("");
   const [preview, setPreview] = useState<{
     title: string;
     creator: string | null;
@@ -135,7 +134,6 @@ export function StreamUrlInput() {
             body: JSON.stringify({
               workflow: mode,
               streamUrl: normalized,
-              requestedAction: mode === "agent" ? agentPrompt : null,
               attribution: captureClientAttribution(),
             }),
           }
@@ -148,16 +146,6 @@ export function StreamUrlInput() {
         return;
       }
 
-      if (mode === "autopilot") {
-        await fetchJson("/api/onboarding/intent", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ workflow: mode, streamUrl: normalized }),
-        });
-        router.push("/settings/autopilot?onboarding=1");
-        return;
-      }
-
       const { ok, data } = await fetchJson<{
         session?: SessionBootstrap;
         error?: string;
@@ -167,7 +155,6 @@ export function StreamUrlInput() {
         body: JSON.stringify({
           streamUrl: normalized,
           mode,
-          requestedAction: mode === "agent" ? agentPrompt : undefined,
         }),
       });
 
@@ -237,8 +224,6 @@ export function StreamUrlInput() {
         open={modeModalOpen}
         loading={loading}
         selectedMode={selectedMode}
-        agentPrompt={agentPrompt}
-        onAgentPromptChange={setAgentPrompt}
         preview={preview}
         onClose={() => {
           if (!loading) {

@@ -20,7 +20,7 @@ const PLATFORMS: PlatformCardDefinition[] = [
   { key: "instagram_feed", short: "IG", name: "Instagram Feed", detail: "Portrait or square feed video with polished contextual copy.", outputs: [{ id: "portrait", label: "4:5" }, { id: "square", label: "1:1" }] },
   { key: "facebook_reels", short: "FB:R", name: "Facebook Reels", detail: "Vertical Reel tuned for broad discovery and conversation.", outputs: [{ id: "vertical", label: "9:16" }] },
   { key: "facebook_feed", short: "FB", name: "Facebook Feed", detail: "Portrait, landscape, or square video with discussion-ready text.", outputs: [{ id: "portrait", label: "4:5" }, { id: "landscape", label: "16:9" }, { id: "square", label: "1:1" }] },
-  { key: "x", short: "X", name: "X / Twitter", detail: "Concise post copy with an optional editorial quote-card layout.", outputs: [{ id: "landscape", label: "16:9" }, { id: "vertical", label: "9:16" }] },
+  { key: "x", short: "X", name: "X / Twitter", detail: "Full-frame 16:9 video with concise post copy and an optional editorial quote-card layout.", outputs: [{ id: "landscape", label: "16:9" }] },
 ];
 
 const DEFAULT_SELECTED: PlatformKey[] = [

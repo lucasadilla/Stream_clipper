@@ -2,19 +2,17 @@
 
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { Clapperboard, Loader2, Radio, Sparkles, X } from "lucide-react";
+import { Clapperboard, Loader2, Sparkles, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import type { SessionMode } from "@/lib/sessionMode";
 import { Button } from "@/components/ui/button";
 
-export type ClippingEntryMode = SessionMode | "autopilot";
+export type ClippingEntryMode = SessionMode;
 
 interface ClippingModeModalProps {
   open: boolean;
   loading?: boolean;
   selectedMode?: ClippingEntryMode | null;
-  agentPrompt?: string;
-  onAgentPromptChange?: (value: string) => void;
   preview?: {
     title: string;
     creator: string | null;
@@ -47,22 +45,12 @@ const MODES: Array<{
       "Auto clips for VODs and live — as moments happen, or after the stream ends.",
     icon: Sparkles,
   },
-  {
-    id: "autopilot",
-    label: "Autopilot",
-    tagline: "Hands-free",
-    description:
-      "Connect your channel once, then let Clipper monitor, create, and publish.",
-    icon: Radio,
-  },
 ];
 
 export function ClippingModeModal({
   open,
   loading,
   selectedMode = null,
-  agentPrompt = "",
-  onAgentPromptChange,
   preview,
   onClose,
   onSelect,
@@ -167,7 +155,7 @@ export function ClippingModeModal({
           ) : null}
         </div>
 
-        <div className="grid gap-3 p-4 sm:grid-cols-3 sm:p-5">
+        <div className="grid gap-3 p-4 sm:grid-cols-2 sm:p-5">
           {MODES.map((mode) => {
             const Icon = mode.icon;
             const selected = (loading ? selectedMode : pendingMode) === mode.id;
@@ -232,21 +220,6 @@ export function ClippingModeModal({
             );
           })}
         </div>
-
-        {pendingMode === "agent" && !loading ? (
-          <div className="border-t border-[var(--color-card-border)] px-5 py-4">
-            <label htmlFor="agent-onboarding-prompt" className="text-xs font-semibold text-white">
-              Tell Clipper what you&apos;re looking for
-            </label>
-            <input
-              id="agent-onboarding-prompt"
-              value={agentPrompt}
-              onChange={(event) => onAgentPromptChange?.(event.target.value)}
-              placeholder="Find the funniest moments"
-              className="mt-2 h-11 w-full border border-[var(--color-card-border)] bg-[#020302] px-3 text-sm text-white placeholder:text-white/30 focus:border-[var(--color-accent)] focus:outline-none"
-            />
-          </div>
-        ) : null}
 
         {!loading ? (
           <div className="flex justify-end gap-2 border-t border-[var(--color-card-border)] px-4 py-3">

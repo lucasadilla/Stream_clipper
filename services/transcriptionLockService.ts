@@ -1,6 +1,10 @@
 import { prisma } from "@/lib/db";
+import { fileExists } from "@/lib/storage";
 
-const DEFAULT_STALE_MS = 10 * 60 * 1000;
+// The transcription API has a five-minute execution ceiling. A lock older
+// than six minutes cannot belong to a healthy request and must not strand a session.
+const DEFAULT_STALE_MS = 6 * 60 * 1000;
+const INTERACTIVE_PREEMPT_MS = 15_000;
 
 function staleMs(): number {
   return Math.max(
@@ -8,6 +12,23 @@ function staleMs(): number {
     Number.parseInt(process.env.WORKER_STALE_MS || String(DEFAULT_STALE_MS), 10) ||
       DEFAULT_STALE_MS
   );
+}
+
+export function canPreemptTranscriptionLock(input: {
+  requester: string;
+  holder: string | null;
+  lockedAt: Date | null;
+  now?: Date;
+}): boolean {
+  if (
+    !input.requester.startsWith("api-") ||
+    !input.holder?.startsWith("worker-") ||
+    !input.lockedAt
+  ) {
+    return false;
+  }
+  const now = input.now ?? new Date();
+  return now.getTime() - input.lockedAt.getTime() >= INTERACTIVE_PREEMPT_MS;
 }
 
 /** Claim a DB-backed transcription lock for a session. */
@@ -22,11 +43,18 @@ export async function claimTranscriptionLock(
   });
   if (!session) return false;
 
+  const preemptBackground = canPreemptTranscriptionLock({
+    requester: workerId,
+    holder: session.transcribeLockedBy,
+    lockedAt: session.transcribeLockedAt,
+  });
+
   const locked =
     session.transcribeLockedAt &&
     session.transcribeLockedAt > cutoff &&
     session.transcribeLockedBy &&
-    session.transcribeLockedBy !== workerId;
+    session.transcribeLockedBy !== workerId &&
+    !preemptBackground;
   if (locked) return false;
 
   const updated = await prisma.streamSession.updateMany({
@@ -36,6 +64,16 @@ export async function claimTranscriptionLock(
         { transcribeLockedAt: null },
         { transcribeLockedAt: { lt: cutoff } },
         { transcribeLockedBy: workerId },
+        ...(preemptBackground
+          ? [
+              {
+                transcribeLockedBy: { startsWith: "worker-" },
+                transcribeLockedAt: {
+                  lt: new Date(Date.now() - INTERACTIVE_PREEMPT_MS),
+                },
+              },
+            ]
+          : []),
       ],
     },
     data: {
@@ -82,7 +120,7 @@ export async function listSessionsNeedingTranscription(
       sourceMedia: {
         orderBy: { createdAt: "desc" },
         take: 1,
-        select: { durationSeconds: true },
+        select: { durationSeconds: true, filePath: true },
       },
       transcriptChunks: {
         where: {
@@ -99,6 +137,9 @@ export async function listSessionsNeedingTranscription(
 
   const needing: string[] = [];
   for (const session of sessions) {
+    // Background workers may share a database while using different disks.
+    // Never lock a session whose media is not present on this worker.
+    if (!fileExists(session.sourceMedia[0]?.filePath)) continue;
     const recorded = Math.max(
       session.liveRecording?.recordedSeconds ?? 0,
       session.sourceMedia[0]?.durationSeconds ?? 0

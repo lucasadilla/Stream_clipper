@@ -98,6 +98,13 @@ interface AgentClipEditorProps {
   /** Expanded webcam crop used by stacked gaming and PiP layouts. */
   facecamRect?: { x: number; y: number; width: number; height: number } | null;
   faceKeyframes?: PreviewCropKeyframe[];
+  gameplayKeyframes?: PreviewCropKeyframe[];
+  cameraTargetsGameplay?: boolean;
+  dynamicLayoutSegments?: Array<{
+    startTimeSeconds: number;
+    endTimeSeconds: number;
+    family: "pip" | "stacked";
+  }>;
   faceBaseCropWidth?: number | null;
   autoResolvedLayout?: VerticalLayout | null;
   manualCameraKeyframeCount?: number;
@@ -133,6 +140,9 @@ export function AgentClipEditor({
   faceRect = null,
   facecamRect = null,
   faceKeyframes = [],
+  gameplayKeyframes = [],
+  cameraTargetsGameplay = false,
+  dynamicLayoutSegments = [],
   faceBaseCropWidth = null,
   autoResolvedLayout = null,
   manualCameraKeyframeCount = 0,
@@ -788,7 +798,11 @@ export function AgentClipEditor({
             faceCenterY={effectiveFaceCenterY}
             zoom={effectiveZoom}
             layoutOverride={lookPreset === "auto" ? autoResolvedLayout : null}
-            cameraKeyframes={faceKeyframes}
+            cameraKeyframes={
+              cameraTargetsGameplay ? gameplayKeyframes : faceKeyframes
+            }
+            cameraTargetsGameplay={cameraTargetsGameplay}
+            dynamicLayoutSegments={dynamicLayoutSegments}
             cameraStartSeconds={mediaTimeForTimeline(
               clip.startTimeSeconds,
               playbackTimelineOffsetSeconds

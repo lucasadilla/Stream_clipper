@@ -31,6 +31,8 @@ let lastYtDlpProbeError: string | null = null;
 let generatedCookiesPath: string | null = null;
 let generatedTwitchCookiesPath: string | null = null;
 let automaticImpersonationPromise: Promise<boolean> | null = null;
+let warnedInvalidYoutubeCookies = false;
+let warnedInvalidTwitchCookies = false;
 
 const RUNTIME_COOKIES_PATH = "/tmp/youtube-cookies.txt";
 const RUNTIME_TWITCH_COOKIES_PATH = "/tmp/twitch-cookies.txt";
@@ -466,8 +468,18 @@ export async function getYtDlpDeploymentArgs(
   }
 
   if (platform === "twitch" && options?.includeCookies !== false) {
-    const twitchCookies = await resolveTwitchCookiesPath();
-    if (twitchCookies) args.push("--cookies", twitchCookies);
+    try {
+      const twitchCookies = await resolveTwitchCookiesPath();
+      if (twitchCookies) args.push("--cookies", twitchCookies);
+    } catch (error) {
+      if (!warnedInvalidTwitchCookies) {
+        warnedInvalidTwitchCookies = true;
+        console.warn(
+          "[yt-dlp] Twitch cookies are unavailable; continuing with public access:",
+          error instanceof Error ? error.message : error
+        );
+      }
+    }
     return args;
   }
 
@@ -476,8 +488,20 @@ export async function getYtDlpDeploymentArgs(
     options?.includeCookies !== false &&
     (platform === "youtube" || platform === "unknown")
   ) {
-    const cookiesPath = await resolveYoutubeCookiesPath();
-    if (cookiesPath) args.push("--cookies", cookiesPath);
+    try {
+      const cookiesPath = await resolveYoutubeCookiesPath();
+      if (cookiesPath) args.push("--cookies", cookiesPath);
+    } catch (error) {
+      // Cookies improve access to private/restricted media, but a stale local
+      // path must not prevent public videos from downloading at all.
+      if (!warnedInvalidYoutubeCookies) {
+        warnedInvalidYoutubeCookies = true;
+        console.warn(
+          "[yt-dlp] YouTube cookies are unavailable; continuing with public access:",
+          error instanceof Error ? error.message : error
+        );
+      }
+    }
   }
 
   return args;

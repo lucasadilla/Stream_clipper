@@ -1,6 +1,7 @@
 import path from "path";
 import fs from "fs/promises";
 import { existsSync } from "fs";
+import { randomUUID } from "crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { toJsonValue } from "@/lib/utils";
@@ -52,7 +53,8 @@ const audioSourceCache = new Map<string, { path: string; checkedAt: number }>();
 const AUDIO_SOURCE_CACHE_MS = 5 * 60 * 1000;
 
 /** One transcription run per session at a time (browser polls + API can overlap). */
-const activeSyncs = new Set<string>();
+const activeSyncs = new Map<string, { owner: string; startedAt: number }>();
+const LOCAL_SYNC_STALE_MS = 6 * 60 * 1000;
 
 export function clearSessionTranscriptionState(streamSessionId: string) {
   clearCompanionAudioState(streamSessionId);
@@ -766,15 +768,20 @@ export async function syncTranscription(
   if (!isTranscriptionAvailable()) {
     return { skipped: true, reason: "no_transcription_provider" };
   }
-  if (activeSyncs.has(streamSessionId)) {
-    return { skipped: true, reason: "sync_in_progress" };
+  const existingSync = activeSyncs.get(streamSessionId);
+  if (existingSync) {
+    if (Date.now() - existingSync.startedAt < LOCAL_SYNC_STALE_MS) {
+      return { skipped: true, reason: "sync_in_progress" };
+    }
+    activeSyncs.delete(streamSessionId);
   }
 
   const { claimTranscriptionLock, releaseTranscriptionLock } = await import(
     "@/services/transcriptionLockService"
   );
   const lockOwner =
-    options.heldLockOwner ?? `api-${process.pid}-${streamSessionId.slice(0, 8)}`;
+    options.heldLockOwner ??
+    `api-${process.pid}-${streamSessionId.slice(0, 8)}-${randomUUID().slice(0, 8)}`;
   const ownsLock = Boolean(options.heldLockOwner);
   if (!ownsLock) {
     const claimed = await claimTranscriptionLock(streamSessionId, lockOwner);
@@ -783,11 +790,16 @@ export async function syncTranscription(
     }
   }
 
-  activeSyncs.add(streamSessionId);
+  activeSyncs.set(streamSessionId, {
+    owner: lockOwner,
+    startedAt: Date.now(),
+  });
   try {
     return await runSyncTranscription(streamSessionId, options);
   } finally {
-    activeSyncs.delete(streamSessionId);
+    if (activeSyncs.get(streamSessionId)?.owner === lockOwner) {
+      activeSyncs.delete(streamSessionId);
+    }
     if (!ownsLock) {
       await releaseTranscriptionLock(streamSessionId, lockOwner);
     }

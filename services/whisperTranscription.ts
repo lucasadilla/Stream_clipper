@@ -67,9 +67,19 @@ export interface WhisperTranscriptionOptions {
 
 const WHISPER_RETRIES = 3;
 
+function whisperRequestTimeoutMs(): number {
+  const configured = Number.parseInt(
+    process.env.WHISPER_REQUEST_TIMEOUT_MS?.trim() ?? "",
+    10
+  );
+  return Number.isFinite(configured) && configured >= 10_000
+    ? configured
+    : 45_000;
+}
+
 export function isProviderUnavailableError(err: unknown): boolean {
   const msg = err instanceof Error ? `${err.message} ${String(err.cause ?? "")}` : String(err);
-  return /ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE|socket hang up|Connection error|fetch failed|exceeded your current quota|429|402|500|502|503/i.test(
+  return /ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE|socket hang up|Connection error|fetch failed|timed out|TimeoutError|aborted|exceeded your current quota|429|402|500|502|503/i.test(
     msg
   );
 }
@@ -126,6 +136,7 @@ async function transcribeViaOpenRouter(
       response_format: "verbose_json",
       timestamp_granularities: ["word", "segment"],
     }),
+    signal: AbortSignal.timeout(whisperRequestTimeoutMs()),
   });
 
   if (timed.ok) {
@@ -166,6 +177,7 @@ async function transcribeViaOpenRouter(
       "X-Title": process.env.OPENROUTER_APP_NAME?.trim() || "Clipper",
     },
     body: JSON.stringify(baseBody),
+    signal: AbortSignal.timeout(whisperRequestTimeoutMs()),
   });
 
   if (!plain.ok) {
@@ -198,15 +210,18 @@ async function transcribeViaOpenAiDirect(
   const timingFile = await toFile(audioBuffer, path.basename(audioPath), {
     type: "audio/wav",
   });
-  const timing = (await client.audio.transcriptions.create({
-    file: timingFile,
-    model: timingModel,
-    response_format: "verbose_json",
-    timestamp_granularities: ["word", "segment"],
-    temperature: 0,
-    ...(language ? { language } : {}),
-    ...(prompt ? { prompt } : {}),
-  })) as WhisperVerboseResponse;
+  const timing = (await client.audio.transcriptions.create(
+    {
+      file: timingFile,
+      model: timingModel,
+      response_format: "verbose_json",
+      timestamp_granularities: ["word", "segment"],
+      temperature: 0,
+      ...(language ? { language } : {}),
+      ...(prompt ? { prompt } : {}),
+    },
+    { timeout: whisperRequestTimeoutMs() }
+  )) as WhisperVerboseResponse;
   timing.rawText = timing.text;
   timing.provider = "openai";
   timing.model = timingModel;
@@ -249,8 +264,9 @@ async function transcribeViaOpenAiDirect(
       extraContext
         ? ({
             body: { ...qualityParams, ...extraContext },
+            timeout: whisperRequestTimeoutMs(),
           } as Parameters<typeof client.audio.transcriptions.create>[1])
-        : undefined
+        : { timeout: whisperRequestTimeoutMs() }
     )) as { text?: string };
     return reconcileAccurateTextWithTimings(timing, quality.text, qualityModel);
   } catch (error) {

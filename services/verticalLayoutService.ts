@@ -20,6 +20,33 @@ import {
   parseStoredFaceAnalysisResult,
   type StoredFaceAnalysisResult,
 } from "@/services/faceAnalysisService";
+import {
+  buildGameplayCropKeyframes,
+  planGameplayLayout,
+  verticalLayoutForAutomaticPlan,
+} from "@/lib/gameplayLayout";
+import type { CaptionSafeZone } from "@/lib/verticalLayout";
+
+function mergeManualCropKeyframes(
+  automatic: NonNullable<ResolvedVerticalLayout["gameplayCrop"]>["keyframes"],
+  manual: NonNullable<VerticalLayoutRequest["reframe"]>["manualKeyframes"]
+) {
+  if (!manual?.length) return automatic;
+  return [
+    ...automatic.filter(
+      (frame) =>
+        !manual.some(
+          (override) =>
+            Math.abs(override.timestampSeconds - frame.timestampSeconds) < 0.2
+        )
+    ),
+    ...manual.map((frame) => ({
+      ...frame,
+      reason: "manual_override" as const,
+      confidence: 1,
+    })),
+  ].sort((a, b) => a.timestampSeconds - b.timestampSeconds);
+}
 
 export interface VerticalLayoutResolution {
   resolved: ResolvedVerticalLayout;
@@ -27,6 +54,7 @@ export interface VerticalLayoutResolution {
   effectiveLayout: VerticalLayout;
   faceAnalysisJobId?: string;
   warnings: string[];
+  captionSafeZone?: CaptionSafeZone;
 }
 
 function candidateForSelection(
@@ -93,11 +121,87 @@ export async function resolveVerticalLayout(
     }
   }
 
+  // The importance map and source tracking are shared across exports. Layout
+  // planning is cheap, so rerank geometry for the actual target dimensions
+  // instead of forcing square or alternate vertical variants through a 9:16
+  // plan generated during analysis.
+  const analyzedFacecam = analysis
+    ? bestEmbeddedFacecamCandidate([
+        ...(analysis.primaryCandidate ? [analysis.primaryCandidate] : []),
+        ...analysis.alternativeCandidates,
+      ])
+    : undefined;
+  let gameplayPlan = analysis?.gameplayImportanceMap
+    ? planGameplayLayout({
+        map: analysis.gameplayImportanceMap,
+        classification: analysis.classification,
+        facecam: analyzedFacecam,
+        tracks: analysis.tracks,
+        primaryTrackId:
+          analyzedFacecam?.trackId ?? analysis.primaryCandidate?.trackId,
+        sourceWidth: analysis.sourceWidth,
+        sourceHeight: analysis.sourceHeight,
+        outputWidth: options.outputWidth,
+        outputHeight: options.outputHeight,
+      })
+    : analysis?.gameplayLayoutPlan;
+  if (
+    gameplayPlan?.selectedFamily === "dynamic_reaction" &&
+    request.reframe?.reactionEmphasis === false &&
+    analysis?.gameplayImportanceMap
+  ) {
+    const fallback = gameplayPlan.candidates.find(
+      (candidate) =>
+        candidate.family !== "dynamic_reaction" && candidate.validation.valid
+    );
+    if (fallback) {
+      gameplayPlan = {
+        ...gameplayPlan,
+        selectedFamily: fallback.family,
+        selectedCandidateId: fallback.id,
+        reason: `${fallback.reason} Reaction enlargement was disabled by the creator.`,
+        gameplayCropKeyframes: buildGameplayCropKeyframes(
+          analysis.gameplayImportanceMap,
+          fallback.gameplayCropWidth
+        ),
+        captionSafeZone: fallback.captionSafeZone,
+        segments: [
+          {
+            id: "layout-1",
+            startTimeSeconds: options.clipStartSeconds,
+            endTimeSeconds: options.clipEndSeconds,
+            family: fallback.family,
+            transitionIn: "start",
+            reason: "Creator disabled reaction enlargement.",
+          },
+        ],
+      };
+    }
+  }
+
   // Resolve "auto" using the stored recommendation.
+  const automaticRequest = request.layout === "auto";
+  const gameplayOnlyRequest = request.layout === "gameplay_full";
+  const hasReliableFaceTracking = Boolean(
+    analysis &&
+      analysis.confidence >= 0.45 &&
+      analysis.classification !== "no_face" &&
+      analysis.classification !== "already_vertical" &&
+      analysis.classification !== "gameplay_only" &&
+      analysis.tracks.some((track) => track.points.length >= 3)
+  );
   let layout = resolveLayoutName(request.layout);
   if (layout === "auto") {
     if (analysis) {
-      if (analysis.confidence < 0.45) {
+      if (gameplayPlan) {
+        layout = resolveLayoutName(
+          verticalLayoutForAutomaticPlan(
+            gameplayPlan.selectedFamily,
+            analysis.recommendation?.layout,
+            hasReliableFaceTracking
+          )
+        );
+      } else if (analysis.confidence < 0.45) {
         layout = "center_crop";
         warnings.push(
           "Tracking confidence was low, so a stable Center Crop was used."
@@ -117,6 +221,9 @@ export async function resolveVerticalLayout(
         "Face analysis was not available, so Center Crop was used."
       );
     }
+  }
+  if (automaticRequest && layout === "center_crop" && hasReliableFaceTracking) {
+    layout = "subject_aware_crop";
   }
 
   // Resolve the facecam rectangle: manual override wins, then the selected or
@@ -166,6 +273,20 @@ export async function resolveVerticalLayout(
       : facecamRect != null
         ? facecamRect.x + facecamRect.width / 2
         : undefined;
+  const gameplayCropKeyframes = gameplayPlan?.gameplayCropKeyframes.length
+    ? mergeManualCropKeyframes(
+        gameplayPlan.gameplayCropKeyframes,
+        request.reframe?.manualKeyframes
+      )
+    : [];
+  const gameplayCandidate = automaticRequest
+    ? gameplayPlan?.candidates.find(
+        (candidate) => candidate.id === gameplayPlan.selectedCandidateId
+      )
+    : undefined;
+  if (gameplayOnlyRequest && gameplayPlan?.gameplayCropKeyframes.length) {
+    layout = "subject_aware_crop";
+  }
 
   const resolved: ResolvedVerticalLayout = {
     layout: layout as ResolvedVerticalLayout["layout"],
@@ -175,44 +296,120 @@ export async function resolveVerticalLayout(
     // the face panel. Using the generic primary candidate here could target an
     // in-game character while leaving the real webcam visible.
     originalFacecamRect: facecamRect,
-    stacked: request.stacked
+    stacked:
+      request.stacked ||
+      gameplayCandidate?.family === "stacked" ||
+      gameplayCandidate?.family === "dynamic_reaction"
       ? {
           facecamPosition:
             layout === "facecam_bottom_gameplay_top"
               ? "bottom"
-              : request.stacked.facecamPosition,
-          facecamHeightRatio: request.stacked.facecamHeightRatio,
-          dividerSize: request.stacked.dividerSize,
-          dividerColor: request.stacked.dividerColor,
-          hideOriginalFacecam: request.stacked.hideOriginalFacecam,
+              : request.stacked?.facecamPosition ?? "top",
+          facecamHeightRatio:
+            gameplayCandidate?.family === "stacked" ||
+            gameplayCandidate?.family === "dynamic_reaction"
+              ? gameplayCandidate.splitRatio ??
+                request.stacked?.facecamHeightRatio ??
+                0.38
+              : request.stacked?.facecamHeightRatio ?? 0.38,
+          dividerSize: request.stacked?.dividerSize ?? 0,
+          dividerColor: request.stacked?.dividerColor ?? "#000000",
+          hideOriginalFacecam:
+            request.stacked?.hideOriginalFacecam ?? "crop_out",
         }
       : undefined,
-    pip: request.pip,
+    pip:
+      request.pip ||
+      gameplayCandidate?.family === "pip" ||
+      gameplayCandidate?.family === "dynamic_reaction"
+      ? {
+          position: request.pip?.position ?? "top_right",
+          widthRatio: request.pip?.widthRatio ?? 0.34,
+          margin: request.pip?.margin ?? 0.04,
+          borderSize: request.pip?.borderSize ?? 3,
+          borderColor: request.pip?.borderColor ?? "#FFFFFF",
+          hideOriginalFacecam: request.pip?.hideOriginalFacecam ?? "crop_out",
+          ...(gameplayCandidate?.family === "pip" ||
+          gameplayCandidate?.family === "dynamic_reaction"
+            ? {
+                position:
+                  gameplayCandidate.pipPosition ??
+                  request.pip?.position ??
+                  "top_right",
+                widthRatio:
+                  gameplayCandidate.pipWidthRatio ??
+                  request.pip?.widthRatio ??
+                  0.34,
+              }
+            : {}),
+        }
+      : undefined,
+    gameplayCrop: gameplayCropKeyframes.length
+      ? {
+          keyframes: gameplayCropKeyframes,
+          planVersion: gameplayPlan!.version,
+          style: "gameplay_importance",
+        }
+      : undefined,
+    dynamicSegments:
+      automaticRequest && gameplayCandidate?.family === "dynamic_reaction"
+        ? gameplayPlan?.segments
+            .filter(
+              (segment) =>
+                segment.family === "pip" || segment.family === "stacked"
+            )
+            .map((segment) => ({
+              startTimeSeconds: Math.max(
+                0,
+                segment.startTimeSeconds - options.clipStartSeconds
+              ),
+              endTimeSeconds: Math.max(
+                0,
+                segment.endTimeSeconds - options.clipStartSeconds
+              ),
+              family: segment.family as "pip" | "stacked",
+            }))
+        : undefined,
     centerCrop: {
       focalPointX:
         request.centerCrop?.focalPointX ??
         (faceCenterX != null ? faceCenterX : 0.5),
       zoom: request.centerCrop?.zoom ?? 1,
-      useBlurredBackground: request.centerCrop?.useBlurredBackground ?? false,
+      useBlurredBackground:
+        gameplayPlan?.selectedFamily === "conservative"
+          ? true
+          : request.centerCrop?.useBlurredBackground ?? false,
     },
   };
 
   if (layout === "subject_aware_crop") {
-    // Manual selection intentionally locks to one person. Auto selection on a
-    // multi-person clip follows local mouth activity so the crop changes with
-    // the conversation instead of sticking to one whole-clip "best" face.
-    const track =
-      analysis?.tracks.find(
-        (t) => t.id === (request.faceSelection.trackId ?? selectedTrackId)
-      ) ??
-      (analysis && analysis.primaryCandidate
-        ? analysis.tracks.find((t) => t.id === analysis!.primaryCandidate!.trackId)
-        : undefined) ??
-      analysis?.tracks
-        .slice()
-        .sort((a, b) => b.points.length - a.points.length)[0];
+    if (
+      (gameplayPlan?.selectedFamily === "gameplay_only" || gameplayOnlyRequest) &&
+      gameplayCropKeyframes.length > 0
+    ) {
+      resolved.subjectCrop = {
+        keyframes: gameplayCropKeyframes,
+        planVersion: gameplayPlan!.version,
+        style: "gameplay_importance",
+      };
+    } else {
+      // Manual selection intentionally locks to one person. Auto selection on
+      // a multi-person clip follows local mouth activity instead of sticking
+      // to one whole-clip "best" face.
+      const track =
+        analysis?.tracks.find(
+          (t) => t.id === (request.faceSelection.trackId ?? selectedTrackId)
+        ) ??
+        (analysis && analysis.primaryCandidate
+          ? analysis.tracks.find(
+              (t) => t.id === analysis!.primaryCandidate!.trackId
+            )
+          : undefined) ??
+        analysis?.tracks
+          .slice()
+          .sort((a, b) => b.points.length - a.points.length)[0];
 
-    if (track && track.points.length > 0) {
+      if (track && track.points.length > 0) {
       const cropWidthRatio =
         (options.outputWidth / options.outputHeight) *
         ((analysis?.sourceHeight ?? 1080) / (analysis?.sourceWidth ?? 1920));
@@ -289,11 +486,12 @@ export async function resolveVerticalLayout(
         style: professionalPlan?.style,
       };
       if (professionalPlan) warnings.push(...professionalPlan.warnings);
-    } else {
-      warnings.push(
-        "No face track was available for Follow speaker, so Center Crop was used instead."
-      );
-      resolved.layout = "center_crop";
+      } else {
+        warnings.push(
+          "No face track was available for Follow speaker, so Center Crop was used instead."
+        );
+        resolved.layout = "center_crop";
+      }
     }
   }
 
@@ -302,6 +500,7 @@ export async function resolveVerticalLayout(
     effectiveLayout: resolved.layout,
     faceAnalysisJobId,
     warnings,
+    captionSafeZone: automaticRequest ? gameplayPlan?.captionSafeZone : undefined,
   };
 }
 
@@ -313,6 +512,57 @@ export async function saveVerticalLayoutConfiguration(options: {
   faceAnalysisJobId?: string;
 }): Promise<string> {
   const { request } = options;
+  const analysisJobId = options.faceAnalysisJobId ?? request.faceAnalysisJobId;
+  const analysisJob = analysisJobId
+    ? await prisma.faceAnalysisJob.findUnique({
+        where: { id: analysisJobId },
+        select: { resultJson: true },
+      })
+    : null;
+  const storedAnalysis = parseStoredFaceAnalysisResult(analysisJob?.resultJson);
+  const storedHasReliableFaceTracking = Boolean(
+    storedAnalysis &&
+      storedAnalysis.confidence >= 0.45 &&
+      storedAnalysis.classification !== "no_face" &&
+      storedAnalysis.classification !== "already_vertical" &&
+      storedAnalysis.classification !== "gameplay_only" &&
+      storedAnalysis.tracks.some((track) => track.points.length >= 3)
+  );
+  const recommendedLayout = storedAnalysis?.gameplayLayoutPlan
+    ? verticalLayoutForAutomaticPlan(
+        storedAnalysis.gameplayLayoutPlan.selectedFamily,
+        storedAnalysis.recommendation?.layout,
+        storedHasReliableFaceTracking
+      )
+    : storedAnalysis?.recommendation?.layout;
+  const creatorCorrections = [
+    ...(request.layout !== "auto" && request.layout !== recommendedLayout
+      ? ["layout_changed"]
+      : []),
+    ...(request.reframe?.manualKeyframes?.length
+      ? ["gameplay_crop_changed"]
+      : []),
+    ...(request.faceSelection.mode === "manual"
+      ? ["webcam_repositioned"]
+      : []),
+    ...(request.pip?.position &&
+    storedAnalysis?.gameplayLayoutPlan?.candidates.find(
+      (candidate) =>
+        candidate.id === storedAnalysis.gameplayLayoutPlan?.selectedCandidateId
+    )?.pipPosition !== request.pip.position
+      ? ["webcam_repositioned"]
+      : []),
+    ...((request.pip?.widthRatio != null ||
+      request.stacked?.facecamHeightRatio != null) &&
+    request.layout !== "auto"
+      ? ["webcam_resized"]
+      : []),
+    ...(storedAnalysis?.gameplayLayoutPlan?.selectedFamily ===
+      "dynamic_reaction" &&
+    (request.layout !== "auto" || request.reframe?.reactionEmphasis === false)
+      ? ["reaction_expansion_removed"]
+      : []),
+  ];
   const settingsJson = toJsonValue({
     stacked: request.stacked,
     pip: request.pip,
@@ -320,11 +570,73 @@ export async function saveVerticalLayoutConfiguration(options: {
     reframe: request.reframe,
     centerCrop: request.centerCrop,
     captions: request.captions,
+    layoutDna: storedAnalysis?.gameplayLayoutPlan
+      ? {
+          version: storedAnalysis.gameplayLayoutPlan.version,
+          sourceClassification: storedAnalysis.classification,
+          sourceDimensions: {
+            width: storedAnalysis.sourceWidth,
+            height: storedAnalysis.sourceHeight,
+          },
+          selectedFamily: storedAnalysis.gameplayLayoutPlan.selectedFamily,
+          selectedCandidateId:
+            storedAnalysis.gameplayLayoutPlan.selectedCandidateId,
+          alternatives: storedAnalysis.gameplayLayoutPlan.candidates.map(
+            (candidate) => ({
+              id: candidate.id,
+              family: candidate.family,
+              score: candidate.score,
+              valid: candidate.validation.valid,
+            })
+          ),
+          gameplayRegionCount:
+            storedAnalysis.gameplayImportanceMap?.regions.length ?? 0,
+          importantGameplayRegions:
+            storedAnalysis.gameplayImportanceMap?.regions.slice(0, 80),
+          webcamRegion:
+            bestEmbeddedFacecamCandidate([
+              ...(storedAnalysis.primaryCandidate
+                ? [storedAnalysis.primaryCandidate]
+                : []),
+              ...storedAnalysis.alternativeCandidates,
+            ])?.rect ?? null,
+          visiblePeople: storedAnalysis.tracks.length,
+          splitRatio:
+            storedAnalysis.gameplayLayoutPlan.candidates.find(
+              (candidate) =>
+                candidate.id ===
+                storedAnalysis.gameplayLayoutPlan?.selectedCandidateId
+            )?.splitRatio ?? null,
+          pip: (() => {
+            const selected =
+              storedAnalysis.gameplayLayoutPlan?.candidates.find(
+                (candidate) =>
+                  candidate.id ===
+                  storedAnalysis.gameplayLayoutPlan?.selectedCandidateId
+              );
+            return selected?.pipPosition
+              ? {
+                  position: selected.pipPosition,
+                  widthRatio: selected.pipWidthRatio,
+                }
+              : null;
+          })(),
+          cropTrajectory:
+            storedAnalysis.gameplayLayoutPlan.gameplayCropKeyframes,
+          captionSafeZone:
+            storedAnalysis.gameplayLayoutPlan.captionSafeZone,
+          dynamicLayoutChanges: storedAnalysis.gameplayLayoutPlan.segments,
+          analysisMetrics: storedAnalysis.gameplayMetrics,
+          faceModelVersion: storedAnalysis.modelVersion,
+          planConfidence: storedAnalysis.gameplayLayoutPlan.confidence,
+          creatorCorrections: [...new Set(creatorCorrections)],
+        }
+      : undefined,
   }) as Prisma.InputJsonValue;
 
   const data = {
     streamSessionId: options.streamSessionId,
-    faceAnalysisJobId: options.faceAnalysisJobId ?? request.faceAnalysisJobId,
+    faceAnalysisJobId: analysisJobId,
     layout: request.layout,
     faceSelectionMode: request.faceSelection.mode,
     selectedTrackId: request.faceSelection.trackId ?? null,

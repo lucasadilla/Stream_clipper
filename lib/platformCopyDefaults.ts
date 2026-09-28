@@ -273,10 +273,11 @@ export function buildFallbackPlatformCopy(input: PlatformCopyContext): PlatformC
     description: isYouTube
       ? [summary, creatorContext].filter(Boolean).join("\n\n")
       : null,
-    // Studio posts hashtags inline for TikTok/IG/FB/X; keep the array empty so
-    // the UI does not surface a separate hashtag field.
-    hashtags: [],
-    tags: [],
+    // Keep structured metadata even when the platform also expects hashtags
+    // inline. PackagingDNA and later performance learning need the exact tags
+    // that produced a published post.
+    hashtags,
+    tags: isYouTube ? keywords.slice(0, 8) : [],
     quoteText: extractClipHook(cleanSourceText(input.transcriptText)) ?? title,
     thumbnailText: null,
     pinnedComment: isYouTube

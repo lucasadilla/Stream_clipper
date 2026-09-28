@@ -25,6 +25,12 @@ const companionEdgeFallbackDone = new Set<string>();
 const COMPANION_RETRY_MS = 30_000;
 const COMPANION_OUTPUT = "source.audio.m4a";
 
+function rememberCompanionError(streamSessionId: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  companionErrors.set(streamSessionId, message.slice(-8_000));
+  console.warn(`[companion-audio] ${streamSessionId}: ${message}`);
+}
+
 /**
  * Find an existing audio-capable source file in the upload dir.
  */
@@ -146,7 +152,9 @@ function startCompanionAudioDownload(
             : ["--no-live-from-start"]
           : []),
         "-f",
-        `${preferredBestAudio()}/best`,
+        // Keep this audio-only. Falling back to bare `best` can download a
+        // second video-only DASH stream and leave transcription stuck forever.
+        `${preferredBestAudio("[ext=m4a]")}/${preferredBestAudio()}`,
         "--no-part",
         "-o",
         outputPath,
@@ -174,6 +182,13 @@ function startCompanionAudioDownload(
           activeCompanionAudio.delete(streamSessionId);
         }
         const detail = companionErrors.get(streamSessionId) ?? "";
+        if (code !== 0) {
+          console.warn(
+            `[companion-audio] ${streamSessionId}: yt-dlp exited with code ${code}${
+              detail.trim() ? `: ${detail.trim()}` : ""
+            }`
+          );
+        }
         if (
           code !== 0 &&
           options?.isLive &&
@@ -194,8 +209,9 @@ function startCompanionAudioDownload(
           });
         }
       });
-    } catch {
-      // next poll retries after COMPANION_RETRY_MS
+    } catch (error) {
+      rememberCompanionError(streamSessionId, error);
+      // The next poll retries after COMPANION_RETRY_MS.
     }
   })();
 }

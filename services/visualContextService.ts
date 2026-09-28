@@ -60,6 +60,18 @@ const evidenceRequestSchema = z.object({
   reason: z.string().min(2).max(300),
 });
 
+const importanceRegionSchema = z.object({
+  rect: z.object({
+    x: z.number().min(0).max(1),
+    y: z.number().min(0).max(1),
+    width: z.number().min(0.02).max(1),
+    height: z.number().min(0.02).max(1),
+  }),
+  category: z.enum(["action", "visual_focus", "hud", "outcome", "context"]),
+  strength: z.number().min(0).max(1),
+  label: z.string().max(100).optional(),
+});
+
 const modelVisualContextSchema = z.object({
   eventType: z.string().min(2).max(100),
   summary: z.string().min(3).max(600),
@@ -74,6 +86,7 @@ const modelVisualContextSchema = z.object({
         ),
         confidence: z.number().min(0).max(1),
         evidenceTimestampSeconds: z.number().optional(),
+        importanceRegions: z.array(importanceRegionSchema).max(4).optional(),
       })
     )
     .max(12),
@@ -292,11 +305,13 @@ ${JSON.stringify({
 })}
 
 Return JSON only with this shape:
-{"eventType":"specific_event_type","summary":"grounded concise account of what visibly happens","events":[{"timeSeconds":12.3,"type":"setup|action|outcome|reaction|context","description":"visible evidence only","confidence":0.8,"evidenceTimestampSeconds":12.3}],"confidence":0.8,"uncertainties":[],"sufficient":true,"requestedEvidence":null}
+{"eventType":"specific_event_type","summary":"grounded concise account of what visibly happens","events":[{"timeSeconds":12.3,"type":"setup|action|outcome|reaction|context","description":"visible evidence only","confidence":0.8,"evidenceTimestampSeconds":12.3,"importanceRegions":[{"rect":{"x":0.35,"y":0.2,"width":0.3,"height":0.4},"category":"action|visual_focus|hud|outcome|context","strength":0.9,"label":"visible target or HUD"}]}],"confidence":0.8,"uncertainties":[],"sufficient":true,"requestedEvidence":null}
 
 Rules:
 - Do not infer an outcome, object, person, score, or causal link that is not visible.
 - Separate setup, action, outcome, and reaction when they are actually supported.
+- For gaming, desktop, or educational evidence, add normalized source-frame importanceRegions only for visible regions that must stay on screen to understand that event. Include action, outcome, target, or relevant HUD; omit decorative or uncertain regions.
+- Coordinates use x/y/width/height from 0 to 1 relative to the full supplied frame. Never invent a region for an object that is not visible.
 - For screenshot analysis, anchor every claimed event to a supplied screenshot timestamp.
 - If motion or event order cannot be established from screenshots, set sufficient=false and request one narrow video interval.
 - Request earlier/later context or one high-resolution frame only when it can answer a specific uncertainty.

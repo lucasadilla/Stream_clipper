@@ -34,6 +34,60 @@ interface TimedTranscriptLine {
   text: string;
 }
 
+interface GameplayCriticContext {
+  summary: string;
+  importantOutputTimes: number[];
+}
+
+function gameplayCriticContext(
+  resultJson: unknown,
+  params: CriticRenderParams
+): GameplayCriticContext | null {
+  if (!resultJson || typeof resultJson !== "object") return null;
+  const raw = resultJson as Record<string, unknown>;
+  const plan =
+    raw.gameplayLayoutPlan && typeof raw.gameplayLayoutPlan === "object"
+      ? (raw.gameplayLayoutPlan as Record<string, unknown>)
+      : null;
+  const map =
+    raw.gameplayImportanceMap && typeof raw.gameplayImportanceMap === "object"
+      ? (raw.gameplayImportanceMap as Record<string, unknown>)
+      : null;
+  if (!plan && !map) return null;
+  const family = typeof plan?.selectedFamily === "string" ? plan.selectedFamily : "unknown";
+  const reason = typeof plan?.reason === "string" ? plan.reason : "No layout reason stored";
+  const confidence =
+    typeof plan?.confidence === "number" ? plan.confidence.toFixed(2) : "unknown";
+  const regions = Array.isArray(map?.regions) ? map.regions : [];
+  const importantOutputTimes = regions
+    .flatMap((value) => {
+      if (!value || typeof value !== "object") return [];
+      const region = value as Record<string, unknown>;
+      const start = Number(region.startTimeSeconds);
+      const end = Number(region.endTimeSeconds);
+      const strength = Number(region.strength);
+      const regionConfidence = Number(region.confidence);
+      if (
+        !Number.isFinite(start) ||
+        !Number.isFinite(end) ||
+        !Number.isFinite(strength) ||
+        !Number.isFinite(regionConfidence) ||
+        strength * regionConfidence < 0.28
+      ) {
+        return [];
+      }
+      return [
+        Math.max(0, (start + end) / 2 - params.startTimeSeconds),
+      ];
+    })
+    .filter((time) => time >= 0 && time <= expectedDuration(params))
+    .slice(0, 6);
+  return {
+    summary: `Selected gameplay layout: ${family} (confidence ${confidence}). ${reason}`,
+    importantOutputTimes,
+  };
+}
+
 function criticEnabled(): boolean {
   if (process.env.NODE_ENV === "test") return false;
   return !/^(0|false|off|no)$/i.test(
@@ -175,6 +229,7 @@ function criticPrompt(input: {
   cuts: number[];
   transcript: TimedTranscriptLine[];
   frames: Array<{ timeSeconds: number; dataUrl: string }>;
+  gameplayContext?: string;
 }): string {
   const frameGuide = input.frames
     .map(
@@ -190,6 +245,9 @@ function criticPrompt(input: {
 
 You can evaluate:
 - whether the important speaker/subject is framed cleanly and consistently
+- whether the gameplay action, target, outcome, and relevant HUD remain visible
+- whether the webcam blocks an enemy, crosshair, objective, notification, or other critical gameplay region
+- whether gameplay and webcam panels are sharp, geometrically correct, and intentionally balanced
 - black/blank/corrupt frames, awkward crops, cut-off faces, and excessive empty space
 - caption presence, legibility, safe-zone placement, clipping, obvious wrong words, or literal ellipses replacing speech
 - visible discontinuities around supplied edit boundaries
@@ -230,6 +288,7 @@ Return JSON only:
 EXPORT
 Clip title: ${input.title || "Untitled clip"}
 Selection reason: ${input.reason || "Not provided"}
+Gameplay layout evidence: ${input.gameplayContext || "No stored gameplay layout evidence was available."}
 Source stream: ${input.streamTitle || "Unknown"}
 Creator/channel: ${input.channelTitle || "Unknown"}
 Duration: ${input.durationSeconds.toFixed(2)}s
@@ -249,7 +308,7 @@ export async function reviewRenderedOutput(input: {
   params: CriticRenderParams;
   sourceDimensions?: { width: number; height: number };
 }): Promise<PostRenderQualityReview> {
-  const [probe, stat, context, transcript] = await Promise.all([
+  const [probe, stat, context, transcript, gameplayAnalysis] = await Promise.all([
     probeMedia(input.outputPath),
     fs.stat(input.outputPath),
     prisma.streamSession.findUnique({
@@ -267,7 +326,21 @@ export async function reviewRenderedOutput(input: {
       },
     }),
     buildTimedTranscript(input.params).catch(() => []),
+    input.params.clipSuggestionId
+      ? prisma.faceAnalysisJob.findFirst({
+          where: {
+            clipSuggestionId: input.params.clipSuggestionId,
+            status: "completed",
+          },
+          orderBy: { completedAt: "desc" },
+          select: { resultJson: true },
+        })
+      : Promise.resolve(null),
   ]);
+  const gameplayContext = gameplayCriticContext(
+    gameplayAnalysis?.resultJson,
+    input.params
+  );
   const duration = probe.durationSeconds || expectedDuration(input.params);
   const technical = buildTechnicalQualityReview({
     durationSeconds: probe.durationSeconds,
@@ -295,7 +368,11 @@ export async function reviewRenderedOutput(input: {
   }
 
   const boundaries = cutTimes(input.params);
-  const sampleTimes = buildCriticSampleTimes(duration, boundaries, 6);
+  const sampleTimes = buildCriticSampleTimes(
+    duration,
+    [...boundaries, ...(gameplayContext?.importantOutputTimes ?? [])],
+    8
+  );
   const frames = await extractReviewFrames(input.outputPath, sampleTimes);
   if (frames.length === 0) {
     return {
@@ -319,6 +396,7 @@ export async function reviewRenderedOutput(input: {
       cuts: boundaries,
       transcript,
       frames,
+      gameplayContext: gameplayContext?.summary,
     });
     const content: Array<
       | { type: "text"; text: string }

@@ -786,6 +786,99 @@ def _recover_missed_faces(detector, frame, faces, previous_faces):
     return recovered
 
 
+def _gameplay_importance_regions(previous_gray, current_gray):
+    """Return a few normalized regions that carry action or readable detail.
+
+    This deliberately stays model-free and inexpensive. It is evidence for the
+    TypeScript layout planner, not a claim that a generic detector understands
+    every game. Motion, local edge density, contrast, and a restrained center
+    prior are combined so animated borders do not automatically outrank a
+    mostly stationary target or HUD notification.
+    """
+    import cv2
+    import numpy as np
+
+    rows, columns = 3, 4
+    height, width = current_gray.shape[:2]
+    difference = (
+        cv2.absdiff(previous_gray, current_gray)
+        if previous_gray is not None and previous_gray.shape == current_gray.shape
+        else np.zeros_like(current_gray)
+    )
+    edges = cv2.Laplacian(current_gray, cv2.CV_32F)
+    candidates = []
+    for row in range(rows):
+        y0 = int(row * height / rows)
+        y1 = int((row + 1) * height / rows)
+        for column in range(columns):
+            x0 = int(column * width / columns)
+            x1 = int((column + 1) * width / columns)
+            cell = current_gray[y0:y1, x0:x1]
+            cell_diff = difference[y0:y1, x0:x1]
+            cell_edges = edges[y0:y1, x0:x1]
+            if cell.size == 0:
+                continue
+            motion = clamp01(float(cell_diff.mean()) / 42.0)
+            detail = clamp01(
+                float(np.abs(cell_edges).mean()) / 52.0
+                + float(cell.std()) / 180.0
+            )
+            center_x = (column + 0.5) / columns
+            center_y = (row + 0.5) / rows
+            center_distance = math.hypot(center_x - 0.5, center_y - 0.5) / 0.72
+            center_prior = clamp01(1.0 - center_distance)
+            edge_cell = row in (0, rows - 1) or column in (0, columns - 1)
+            hud_change = clamp01(motion * (1.15 if edge_cell else 0.65) + detail * 0.2)
+            strength = clamp01(
+                motion * 0.45
+                + detail * 0.30
+                + center_prior * 0.17
+                + hud_change * 0.08
+            )
+            category = (
+                "hud"
+                if edge_cell and hud_change >= 0.42 and motion < 0.72
+                else "action"
+                if motion >= 0.34
+                else "visual_focus"
+            )
+            candidates.append(
+                {
+                    "rect": {
+                        "x": round(column / columns, 5),
+                        "y": round(row / rows, 5),
+                        "width": round(1.0 / columns, 5),
+                        "height": round(1.0 / rows, 5),
+                    },
+                    "strength": round(strength, 5),
+                    "confidence": round(clamp01(0.35 + detail * 0.3 + motion * 0.35), 5),
+                    "motion": round(motion, 5),
+                    "detail": round(detail, 5),
+                    "category": category,
+                }
+            )
+
+    candidates.sort(key=lambda item: item["strength"], reverse=True)
+    selected = []
+    for candidate in candidates:
+        if candidate["strength"] < 0.16 and selected:
+            continue
+        rect = candidate["rect"]
+        center = (rect["x"] + rect["width"] * 0.5, rect["y"] + rect["height"] * 0.5)
+        if any(
+            math.hypot(
+                center[0] - (item["rect"]["x"] + item["rect"]["width"] * 0.5),
+                center[1] - (item["rect"]["y"] + item["rect"]["height"] * 0.5),
+            ) < 0.24
+            for item in selected
+        ):
+            continue
+        selected.append(candidate)
+        if len(selected) >= 3:
+            break
+    return selected
+
+
 def analyze(payload: dict[str, Any]) -> dict[str, Any]:
     import cv2
 
@@ -796,6 +889,7 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
     analysis_width = int(payload.get("analysisWidth", 960))
     min_confidence = float(payload.get("minConfidence", 0.55))
     max_frames = int(payload.get("maxFrames", 1200))
+    gameplay_sample_fps = float(payload.get("gameplaySampleFps", 2.0))
     ffmpeg_path = str(payload.get("ffmpegPath", "ffmpeg"))
 
     cap = cv2.VideoCapture(video_path)
@@ -813,6 +907,8 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
         end = start + 1
 
     sample_fps = max(0.25, min(12.0, sample_fps))
+    gameplay_sample_fps = max(0.5, min(4.0, gameplay_sample_fps))
+    gameplay_interval = 1.0 / gameplay_sample_fps
     interval = 1.0 / sample_fps
     # Cap total work for extremely long ranges by widening the interval.
     expected = (end - start) / interval
@@ -823,9 +919,12 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
     detector = create_detector(min_confidence)
     detections: list[dict[str, Any]] = []
     scene_changes: list[dict[str, float]] = []
+    gameplay_signals: list[dict[str, Any]] = []
     sampled_frames = 0
     previous_scene_gray = None
     previous_scene_hist = None
+    previous_gameplay_gray = None
+    last_gameplay_signal = start - 10.0
     previous_faces = []
     sample_times: list[float] = []
     last_scene_change = start - 10.0
@@ -875,6 +974,26 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
                     hard_scene_change = True
             previous_scene_gray = scene_gray
             previous_scene_hist = scene_hist
+
+            # Spatial gameplay evidence is sampled independently from face
+            # tracking. Build it from the analysis frame rather than upscaling
+            # the tiny scene-cut frame so small HUD and target detail survives.
+            if t - last_gameplay_signal >= gameplay_interval - 0.01 or hard_scene_change:
+                gameplay_gray = cv2.cvtColor(
+                    cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA),
+                    cv2.COLOR_BGR2GRAY,
+                )
+                gameplay_signals.append(
+                    {
+                        "timestampSeconds": round(t, 3),
+                        "sceneChange": hard_scene_change,
+                        "regions": _gameplay_importance_regions(
+                            previous_gameplay_gray, gameplay_gray
+                        ),
+                    }
+                )
+                last_gameplay_signal = t
+                previous_gameplay_gray = gameplay_gray
 
             if hard_scene_change:
                 previous_faces = []
@@ -955,6 +1074,7 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
         "sampledFrames": sampled_frames,
         "detections": detections,
         "sceneChanges": scene_changes,
+        "gameplaySignals": gameplay_signals,
         "audioActivityAvailable": audio_activity is not None,
         "modelName": detector.name,
         "modelVersion": detector.version,

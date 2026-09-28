@@ -12,6 +12,10 @@ import {
   type CropKeyframeReason,
   type VirtualCameraPlan,
 } from "@/lib/professionalReframe";
+import type {
+  GameplayImportanceMap,
+  GameplayLayoutPlan,
+} from "@/lib/gameplayLayout";
 
 export const VERTICAL_LAYOUTS = [
   "auto",
@@ -206,6 +210,10 @@ export type FacecamAnalysisResult = {
   modelVersion: string;
   /** Versioned, reproducible camera decisions shared by preview and render. */
   professionalPlan?: VirtualCameraPlan;
+  /** Time-aligned gameplay evidence reused by every platform render. */
+  gameplayImportanceMap?: GameplayImportanceMap;
+  /** Ranked, validated layout decision and gameplay camera trajectory. */
+  gameplayLayoutPlan?: GameplayLayoutPlan;
   createdAt?: string;
 };
 
@@ -288,6 +296,7 @@ export const verticalLayoutRequestSchema = z.object({
         .default("professional")
         .transform(() => "professional" as const),
       lockSubject: z.boolean().default(false),
+      reactionEmphasis: z.boolean().default(true),
       lockedTrackId: z.string().optional(),
       manualKeyframes: z
         .array(

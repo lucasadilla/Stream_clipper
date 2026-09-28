@@ -16,6 +16,7 @@ import { buildFaceTracks } from "@/lib/faceTracking";
 import { normalizeRect } from "@/lib/normalizedRect";
 import {
   FACE_ANALYSIS_CONFIG,
+  bestEmbeddedFacecamCandidate,
   candidateFromTrack,
   classifySourceFromTracks,
   computeTrackMetrics,
@@ -26,6 +27,12 @@ import {
   type FacecamAnalysisResult,
   type FacecamCandidate,
 } from "@/lib/verticalLayout";
+import {
+  buildGameplayImportanceMap,
+  planGameplayLayout,
+  verticalLayoutForGameplayFamily,
+  type GameplaySignal,
+} from "@/lib/gameplayLayout";
 import {
   generateProfessionalReframePlan,
   type SceneChange,
@@ -39,7 +46,7 @@ import { inferAudioVisualSpeakerMatches } from "@/lib/audioVisualSpeakerMatcher"
 import { hasPaidSessionAccess } from "@/services/sessionAccessService";
 
 const FACE_ANALYSIS_WORKER_ID = `face-worker-${process.pid}`;
-const FACE_ANALYSIS_VERSION = 8;
+const FACE_ANALYSIS_VERSION = 9;
 
 /** Result JSON stored on the job row (adds source info to the shared shape). */
 export interface StoredFaceAnalysisResult extends FacecamAnalysisResult {
@@ -50,6 +57,16 @@ export interface StoredFaceAnalysisResult extends FacecamAnalysisResult {
   frameStoragePath?: string;
   startSeconds: number;
   endSeconds: number;
+  gameplayMetrics?: {
+    totalAnalysisMs: number;
+    localCvMs: number;
+    layoutPlanningMs: number;
+    sampledFrames: number;
+    gameplaySignalCount: number;
+    importanceRegionCount: number;
+    candidateCount: number;
+    reusedForPlatformPlanning: boolean;
+  };
 }
 
 function analysisTimeoutMs(): number {
@@ -85,6 +102,7 @@ interface WorkerPayload {
   analysisWidth: number;
   minConfidence: number;
   maxFrames: number;
+  gameplaySampleFps: number;
   ffmpegPath: string;
 }
 
@@ -97,6 +115,7 @@ interface WorkerResult {
   sampledFrames: number;
   detections: FaceDetection[];
   sceneChanges?: SceneChange[];
+  gameplaySignals?: GameplaySignal[];
   audioActivityAvailable?: boolean;
   modelName: string;
   modelVersion: string;
@@ -342,6 +361,7 @@ export async function failFaceAnalysisJob(jobId: string, message: string) {
  * the structured result.
  */
 export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
+  const analysisStartedAt = Date.now();
   const job = await prisma.faceAnalysisJob.findUnique({ where: { id: jobId } });
   if (!job) throw new Error("Face analysis job not found");
 
@@ -372,6 +392,7 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
 
   await updateAnalysisProgress(jobId, "detecting_faces", 10);
 
+  const workerStartedAt = Date.now();
   const worker = await runFaceWorker(
     {
       videoPath: inputPath,
@@ -384,6 +405,13 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
       ) || 960,
       minConfidence: FACE_ANALYSIS_CONFIG.minConfidence,
       maxFrames: 1200,
+      gameplaySampleFps: Math.min(
+        4,
+        Math.max(
+          0.5,
+          Number.parseFloat(process.env.GAMEPLAY_ANALYSIS_FPS ?? "2") || 2
+        )
+      ),
       ffmpegPath: getFfmpegPath(),
     },
     (percent) => {
@@ -395,6 +423,7 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
       ).catch(() => {});
     }
   );
+  const localCvMs = Date.now() - workerStartedAt;
 
   if (worker.sampledFrames < 2) {
     throw new Error(
@@ -529,6 +558,7 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
 
   const primaryCandidate = candidates[0];
   const alternativeCandidates = candidates.slice(1);
+  const embeddedFacecam = bestEmbeddedFacecamCandidate(candidates);
 
   const warnings: string[] = [];
   if (classification === "no_face") {
@@ -562,15 +592,65 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
     );
   }
 
+  const visualEvents = await prisma.visualEvent.findMany({
+    where: {
+      streamSessionId: job.streamSessionId,
+      endTimeSeconds: { gte: job.startSeconds },
+      startTimeSeconds: { lte: job.endSeconds },
+    },
+    orderBy: { startTimeSeconds: "asc" },
+    select: {
+      startTimeSeconds: true,
+      endTimeSeconds: true,
+      type: true,
+      score: true,
+      rawData: true,
+    },
+    take: 120,
+  });
+  const gameplaySignals: GameplaySignal[] = (worker.gameplaySignals ?? []).map(
+    (signal) => ({
+      ...signal,
+      timestampSeconds: signal.timestampSeconds + timeOffset,
+    })
+  );
+  const layoutPlanningStartedAt = Date.now();
+  const gameplayImportanceMap = buildGameplayImportanceMap({
+    clipStartSeconds: job.startSeconds,
+    clipEndSeconds: job.endSeconds,
+    sourceWidth,
+    sourceHeight,
+    signals: gameplaySignals,
+    visualEvents,
+    facecamRect: embeddedFacecam?.rect,
+  });
+  const gameplayLayoutPlan = planGameplayLayout({
+    map: gameplayImportanceMap,
+    classification,
+    facecam: embeddedFacecam,
+    tracks,
+    primaryTrackId: embeddedFacecam?.trackId ?? primaryCandidate?.trackId,
+    sourceWidth,
+    sourceHeight,
+  });
+  const layoutPlanningMs = Date.now() - layoutPlanningStartedAt;
   const recommendation =
-    confidence < 0.45
+    gameplayLayoutPlan.confidence >= 0.36
       ? {
-          layout: "center_crop" as const,
-          reason:
-            "Tracking confidence is low, so a stable centered crop is safer than guessing.",
-          warnings: [...(primaryCandidate?.warnings ?? [])],
+          layout: verticalLayoutForGameplayFamily(
+            gameplayLayoutPlan.selectedFamily
+          ),
+          reason: gameplayLayoutPlan.reason,
+          warnings: gameplayLayoutPlan.warnings,
         }
-      : recommendVerticalLayout(classification, primaryCandidate);
+      : confidence < 0.45
+        ? {
+            layout: "center_crop" as const,
+            reason:
+              "Visual evidence was uncertain, so the full-context fallback is safer than guessing.",
+            warnings: [...(primaryCandidate?.warnings ?? [])],
+          }
+        : recommendVerticalLayout(classification, embeddedFacecam ?? primaryCandidate);
 
   // Representative frame at the range midpoint for the manual-adjust UI.
   let frameStoragePath: string | undefined;
@@ -653,12 +733,24 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
     modelName: worker.modelName,
     modelVersion: worker.modelVersion,
     professionalPlan,
+    gameplayImportanceMap,
+    gameplayLayoutPlan,
     createdAt: new Date().toISOString(),
     sourceWidth,
     sourceHeight,
     frameStoragePath,
     startSeconds: job.startSeconds,
     endSeconds: job.endSeconds,
+    gameplayMetrics: {
+      totalAnalysisMs: Date.now() - analysisStartedAt,
+      localCvMs,
+      layoutPlanningMs,
+      sampledFrames,
+      gameplaySignalCount: gameplaySignals.length,
+      importanceRegionCount: gameplayImportanceMap.regions.length,
+      candidateCount: gameplayLayoutPlan.candidates.length,
+      reusedForPlatformPlanning: true,
+    },
   };
 
   await prisma.faceAnalysisJob.update({

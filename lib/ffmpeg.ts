@@ -592,7 +592,7 @@ export async function extractAudioSegment(
   outputPath: string,
   startSeconds: number,
   durationSeconds: number,
-  options?: { accurateSeek?: boolean }
+  options?: { accurateSeek?: boolean; timeoutMs?: number }
 ): Promise<void> {
   const start = String(Math.max(0, startSeconds));
   const duration = String(Math.max(0.1, durationSeconds));
@@ -619,7 +619,10 @@ export async function extractAudioSegment(
     outputPath
   );
 
-  await runCommand(getFfmpegPath(), args);
+  const timeoutMs =
+    options?.timeoutMs ??
+    Math.max(45_000, Math.min(120_000, Math.ceil(durationSeconds * 500) + 30_000));
+  await runCommand(getFfmpegPath(), args, { timeoutMs });
 }
 
 /** Extract volume levels per second using FFmpeg astats/volumedetect approach */
@@ -942,6 +945,8 @@ export interface RenderShortOptions {
   verticalLayout?: ResolvedVerticalLayout;
   /** Faster encode preset for low-res preview renders. */
   previewQuality?: boolean;
+  /** Fit the entire source into the target canvas without smart crop or zoom. */
+  preserveFullFrame?: boolean;
   /** Actual encoded media progress, from zero to one. */
   onProgress?: (progress: number) => void;
 }
@@ -1223,6 +1228,7 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
     captionAppearance,
     verticalLayout,
     previewQuality,
+    preserveFullFrame,
     onProgress,
   } = options;
 
@@ -1311,7 +1317,9 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
     }
 
     let vf: string;
-    if (verticalLayout) {
+    if (preserveFullFrame) {
+      vf = `scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=${scaleFlags},pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=#050805,setsar=1`;
+    } else if (verticalLayout) {
       const encodeProbe = await probeMedia(encodeInput);
       vf = buildVerticalLayoutFilter(verticalLayout, {
         sourceWidth: encodeProbe.width,
@@ -1393,6 +1401,8 @@ export interface RenderSequenceOptions {
   normalizeAudio?: boolean;
   denoiseAudio?: boolean;
   verticalBackground?: "crop" | "blur";
+  /** Fit every source segment into the target canvas without cropping. */
+  preserveFullFrame?: boolean;
   mediaOverlays?: RenderSequenceMediaOverlay[];
   /** Actual encoded media progress, from zero to one. */
   onProgress?: (progress: number) => void;
@@ -1462,7 +1472,11 @@ export async function renderSequence(options: RenderSequenceOptions): Promise<vo
     const end = Math.max(start + 0.05, segment.endTimeSeconds);
     const duration = end - start;
     const source = `[0:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS`;
-    if (options.format === "vertical" && options.verticalBackground === "blur") {
+    if (options.preserveFullFrame) {
+      filters.push(
+        `${source},scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=${scaleFlags},pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=#050805,setsar=1,${fpsFilter},format=yuv420p[v${index}]`
+      );
+    } else if (options.format === "vertical" && options.verticalBackground === "blur") {
       filters.push(`${source},split=2[bg${index}][fg${index}]`);
       filters.push(
         `[bg${index}]scale=${width}:${height}:force_original_aspect_ratio=increase:flags=${scaleFlags},crop=${width}:${height},boxblur=20:2[blur${index}]`
