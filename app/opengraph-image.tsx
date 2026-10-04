@@ -1,4 +1,5 @@
 import { ImageResponse } from "next/og";
+import { getPublicSiteUrl } from "@/lib/publicOrigin";
 
 export const runtime = "edge";
 export const alt =
@@ -10,6 +11,10 @@ export const size = {
 export const contentType = "image/png";
 
 export default function OpenGraphImage() {
+  const markUrl = new URL(
+    "/brand/clipper-mark-ivory.png",
+    getPublicSiteUrl()
+  ).toString();
   return new ImageResponse(
     (
       <div
@@ -57,42 +62,15 @@ export default function OpenGraphImage() {
               color: "#F1EFE7",
             }}
           >
-            <svg
-              width="56"
-              height="44"
-              viewBox="0 0 72 56"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <circle
-                cx="13"
-                cy="13"
-                r="9"
-                stroke="currentColor"
-                strokeWidth="4"
-              />
-              <circle
-                cx="13"
-                cy="43"
-                r="9"
-                stroke="currentColor"
-                strokeWidth="4"
-              />
-              <path
-                d="M19.7 19.1 31 28M19.7 36.9 31 28"
-                stroke="currentColor"
-                strokeWidth="4"
-                strokeLinecap="round"
-              />
-              <path
-                d="M30 13.5 61 28 30 42.5V13.5Z"
-                stroke="currentColor"
-                strokeWidth="4"
-                strokeLinejoin="round"
-              />
-              <circle cx="30" cy="28" r="5.5" fill="#8FCB55" />
-              <circle cx="30" cy="28" r="2" fill="#0B0D0C" />
-            </svg>
+            {/* ImageResponse requires a plain image element for raster marks. */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={markUrl}
+              alt=""
+              width={56}
+              height={56}
+              style={{ objectFit: "contain" }}
+            />
           </div>
           <div
             style={{

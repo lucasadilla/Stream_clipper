@@ -30,13 +30,17 @@ import {
   toRelativeStoragePath,
 } from "@/lib/storage";
 import { toJsonValue } from "@/lib/utils";
-import { VisualAnalysisBudgetService } from "@/services/visualAnalysisBudgetService";
+import {
+  VisualAnalysisBudgetService,
+  visualAnalysisBudgetPolicyFromEnv,
+} from "@/services/visualAnalysisBudgetService";
 
 const LOCAL_EVENT_TYPES = [
   "scene_change",
   "high_motion",
   "interface_change",
 ];
+const VISUAL_EVIDENCE_POLICY_VERSION = "context-framing-samples-v3";
 
 const visualNarrativeRoleSchema = z.enum([
   "setup",
@@ -60,16 +64,47 @@ const evidenceRequestSchema = z.object({
   reason: z.string().min(2).max(300),
 });
 
-const importanceRegionSchema = z.object({
-  rect: z.object({
+const normalizedRectSchema = z.object({
+  x: z.number().min(0).max(1),
+  y: z.number().min(0).max(1),
+  width: z.number().min(0.02).max(1),
+  height: z.number().min(0.02).max(1),
+});
+
+const attentionSourceSchema = z.enum([
+  "subject",
+  "speaker",
+  "cursor_target",
+  "interface",
+  "object",
+  "text",
+  "result",
+]);
+
+const layoutHintSchema = z.enum([
+  "single_focus",
+  "speaker_focus",
+  "screen_focus",
+  "screen_with_speaker",
+  "wide_context",
+]);
+
+const cursorSchema = z.object({
+  point: z.object({
     x: z.number().min(0).max(1),
     y: z.number().min(0).max(1),
-    width: z.number().min(0.02).max(1),
-    height: z.number().min(0.02).max(1),
   }),
+  targetRect: normalizedRectSchema.optional(),
+  action: z.enum(["pointing", "clicking", "dragging", "moving", "idle"]),
+  confidence: z.number().min(0).max(1),
+});
+
+const importanceRegionSchema = z.object({
+  rect: normalizedRectSchema,
   category: z.enum(["action", "visual_focus", "hud", "outcome", "context"]),
   strength: z.number().min(0).max(1),
   label: z.string().max(100).optional(),
+  attentionSource: attentionSourceSchema.optional(),
 });
 
 const modelVisualContextSchema = z.object({
@@ -86,10 +121,12 @@ const modelVisualContextSchema = z.object({
         ),
         confidence: z.number().min(0).max(1),
         evidenceTimestampSeconds: z.number().optional(),
+        layoutHint: layoutHintSchema.optional(),
+        cursor: cursorSchema.optional(),
         importanceRegions: z.array(importanceRegionSchema).max(4).optional(),
       })
     )
-    .max(12),
+    .max(48),
   confidence: z.number().min(0).max(1),
   uncertainties: z.array(z.string().max(240)).max(8).default([]),
   sufficient: z.boolean(),
@@ -213,6 +250,7 @@ function packetCacheKey(packet: CandidatePacket, model: string): string {
     .update(
       JSON.stringify({
         version: VISUAL_ANALYSIS_VERSION,
+        evidencePolicy: VISUAL_EVIDENCE_POLICY_VERSION,
         sourceId: packet.sourceId,
         model,
         start: Math.round(packet.startTimeSeconds * 10) / 10,
@@ -305,14 +343,19 @@ ${JSON.stringify({
 })}
 
 Return JSON only with this shape:
-{"eventType":"specific_event_type","summary":"grounded concise account of what visibly happens","events":[{"timeSeconds":12.3,"type":"setup|action|outcome|reaction|context","description":"visible evidence only","confidence":0.8,"evidenceTimestampSeconds":12.3,"importanceRegions":[{"rect":{"x":0.35,"y":0.2,"width":0.3,"height":0.4},"category":"action|visual_focus|hud|outcome|context","strength":0.9,"label":"visible target or HUD"}]}],"confidence":0.8,"uncertainties":[],"sufficient":true,"requestedEvidence":null}
+{"eventType":"specific_event_type","summary":"grounded concise account of what visibly happens","events":[{"timeSeconds":12.3,"type":"setup|action|outcome|reaction|context","description":"visible evidence only","confidence":0.8,"evidenceTimestampSeconds":12.3,"layoutHint":"single_focus|speaker_focus|screen_focus|screen_with_speaker|wide_context","cursor":{"point":{"x":0.62,"y":0.41},"targetRect":{"x":0.5,"y":0.3,"width":0.25,"height":0.22},"action":"pointing|clicking|dragging|moving|idle","confidence":0.9},"importanceRegions":[{"rect":{"x":0.35,"y":0.2,"width":0.3,"height":0.4},"category":"action|visual_focus|hud|outcome|context","strength":0.9,"label":"visible target or HUD","attentionSource":"subject|speaker|cursor_target|interface|object|text|result"}]}],"confidence":0.8,"uncertainties":[],"sufficient":true,"requestedEvidence":null}
 
 Rules:
 - Do not infer an outcome, object, person, score, or causal link that is not visible.
 - Separate setup, action, outcome, and reaction when they are actually supported.
-- For gaming, desktop, or educational evidence, add normalized source-frame importanceRegions only for visible regions that must stay on screen to understand that event. Include action, outcome, target, or relevant HUD; omit decorative or uncertain regions.
+- Add normalized source-frame importanceRegions whenever a visible person, object, action, result, or on-screen area must stay in frame to understand the event. This is especially important for gaming, desktop, educational, demonstration, interview, and multi-person clips. Omit decorative or uncertain regions.
 - Coordinates use x/y/width/height from 0 to 1 relative to the full supplied frame. Never invent a region for an object that is not visible.
-- For screenshot analysis, anchor every claimed event to a supplied screenshot timestamp.
+- For screenshot analysis, inspect the whole ordered sequence. Anchor every claimed event to a supplied screenshot timestamp and return enough time-specific focus regions to cover meaningful changes across the clip.
+- When speech points to something visible (for example "look at this", a score, an object, another person, or an on-screen result), mark that subject as visual_focus or outcome at the matching timestamp.
+- For desktop, browser, editing, tutorial, presentation, and other screen recordings, locate the visible mouse cursor when confidence is high. Record its point, action, and the UI control or content region it is actually directing attention toward. Use attentionSource=cursor_target for that target. A cursor parked at an edge or moving without a meaningful target is idle and must not steer framing.
+- Treat the cursor as supporting evidence, not the subject. Prefer the complete button, panel, chart, code block, preview, or result around it over a tiny crop around the pointer itself.
+- Choose one restrained layoutHint per event. Use screen_focus for a single screen target, screen_with_speaker when a creator and screen both matter, speaker_focus for conversation, wide_context when separated regions must remain visible, and single_focus otherwise. Never ask for more than two simultaneous primary regions.
+- Keep consecutive focus decisions stable. Do not change the target for pointer jitter, animation, subtitles, decorative motion, or an unchanged UI. A new focus region should represent a meaningful change in what the viewer needs to understand.
 - If motion or event order cannot be established from screenshots, set sufficient=false and request one narrow video interval.
 - Request earlier/later context or one high-resolution frame only when it can answer a specific uncertainty.
 - Keep a requested interval inside the source window when possible, at most 60 seconds, and use 3-5 FPS only for genuinely fast action.`;
@@ -384,7 +427,7 @@ async function analyzeScreenshots(
       type: "image_url",
       image_url: {
         url: `data:image/jpeg;base64,${(await fs.readFile(frame.path)).toString("base64")}`,
-        detail: "low",
+        detail: "high",
       },
     });
   }
@@ -501,6 +544,13 @@ async function saveContext(input: {
 export async function buildCandidateVisualContexts(input: {
   streamSessionId: string;
   candidates: VisualContextCandidate[];
+  purpose?: "ranking" | "framing";
+  sourceOverride?: {
+    id: string;
+    filePath: string;
+    /** Absolute session time represented by media timestamp zero. */
+    timelineOffsetSeconds: number;
+  };
 }): Promise<{
   contexts: Map<string, StructuredVisualContext>;
   rankingContext: Map<string, string>;
@@ -517,11 +567,23 @@ export async function buildCandidateVisualContexts(input: {
     return { contexts, rankingContext, budget: emptyBudget.usage };
   }
 
-  const source = await prisma.sourceMedia.findFirst({
-    where: { streamSessionId: input.streamSessionId },
-    orderBy: { createdAt: "desc" },
-    select: { id: true, filePath: true },
-  });
+  const sourceCandidates = input.sourceOverride
+    ? []
+    : await prisma.sourceMedia.findMany({
+        where: { streamSessionId: input.streamSessionId },
+        orderBy: { createdAt: "desc" },
+        take: 16,
+        select: { id: true, filePath: true, originalFilename: true },
+      });
+  // Clip-range caches use a zero-based timeline. Visual context uses absolute
+  // session timestamps, so prefer the original source whenever it is present.
+  const source =
+    input.sourceOverride ??
+    sourceCandidates.find(
+      (candidate) =>
+        !/^(?:segment|render-source)-\d+-\d+/i.test(candidate.originalFilename)
+    ) ??
+    sourceCandidates[0];
   if (!source) {
     const emptyBudget = new VisualAnalysisBudgetService();
     return { contexts, rankingContext, budget: emptyBudget.usage };
@@ -612,6 +674,7 @@ export async function buildCandidateVisualContexts(input: {
   const cachedEvents = visual.filter((event) => event.type === "contextual_analysis");
   const localEvents = visual.filter((event) => LOCAL_EVENT_TYPES.includes(event.type));
   const fullPath = resolveStoragePath(source.filePath);
+  const sourceTimelineOffset = input.sourceOverride?.timelineOffsetSeconds ?? 0;
   const model = getVisualAnalysisModel();
   const priorUsage = priorPaidAnalyses.reduce(
     (usage, event) => {
@@ -630,15 +693,48 @@ export async function buildCandidateVisualContexts(input: {
     },
     { spentUsd: 0, analyzedCandidates: 0 }
   );
-  const budget = new VisualAnalysisBudgetService(undefined, priorUsage);
+  const basePolicy = visualAnalysisBudgetPolicyFromEnv();
+  const budget = new VisualAnalysisBudgetService(
+    input.purpose === "framing"
+      ? {
+          ...basePolicy,
+          // Reserve one bounded, clip-specific pass even if candidate ranking
+          // consumed the normal stream budget. This is the camera plan used by
+          // preview and export, so it should not inherit ranking omissions.
+          streamBudgetUsd: Math.max(
+            basePolicy.streamBudgetUsd,
+            priorUsage.spentUsd +
+              basePolicy.screenshotCandidateCostUsd +
+              basePolicy.videoEscalationCostUsd
+          ),
+          maximumCandidates: Math.max(
+            basePolicy.maximumCandidates,
+            priorUsage.analyzedCandidates + 1
+          ),
+          // A selected short deserves dense temporal coverage. This yields
+          // roughly one screenshot per second for ordinary clips and widens
+          // gradually for longer moments without decoding every frame.
+          screenshotCount: Math.max(basePolicy.screenshotCount, 40),
+          maximumScreenshotCount: Math.max(
+            basePolicy.maximumScreenshotCount,
+            48
+          ),
+        }
+      : basePolicy,
+    priorUsage
+  );
   const framesDir = path.join(getFramesDir(input.streamSessionId), "visual-context");
   await ensureDir(framesDir);
 
   for (const candidate of [...input.candidates].sort(
     (a, b) => b.signalScore - a.signalScore
   )) {
-    const contextStart = Math.max(0, candidate.startTimeSeconds - 8);
-    const contextEnd = candidate.endTimeSeconds + 10;
+    const contextStart = Math.max(
+      0,
+      candidate.startTimeSeconds - (input.purpose === "framing" ? 0 : 8)
+    );
+    const contextEnd =
+      candidate.endTimeSeconds + (input.purpose === "framing" ? 0 : 10);
     const packet: CandidatePacket = {
       sourceId: source.id,
       candidateId: candidate.id,
@@ -721,13 +817,40 @@ export async function buildCandidateVisualContexts(input: {
           maximumFrames: decision.maximumFrames,
         });
         const frames: Array<{ path: string; timestampSeconds: number }> = [];
-        for (const [index, timestampSeconds] of timestamps.entries()) {
-          const framePath = path.join(
-            framesDir,
-            `${cacheKey}-${String(index).padStart(2, "0")}.jpg`
+        // Four concurrent seeks keep the selected-clip pass quick without
+        // saturating the render worker or launching one process per CPU core.
+        for (let batchStart = 0; batchStart < timestamps.length; batchStart += 4) {
+          const batch = timestamps.slice(batchStart, batchStart + 4);
+          const extracted = await Promise.allSettled(
+            batch.map(async (timestampSeconds, batchIndex) => {
+              const index = batchStart + batchIndex;
+              const framePath = path.join(
+                framesDir,
+                `${cacheKey}-${String(index).padStart(2, "0")}.jpg`
+              );
+              await extractSoloTimelineFrame(
+                fullPath,
+                framePath,
+                Math.max(
+                  0,
+                  timestampSeconds -
+                    sourceTimelineOffset -
+                    (timestampSeconds >= contextEnd - 0.01 ? 0.08 : 0)
+                ),
+                1024,
+                3
+              );
+              return { path: framePath, timestampSeconds };
+            })
           );
-          await extractSoloTimelineFrame(fullPath, framePath, timestampSeconds, 768, 4);
-          frames.push({ path: framePath, timestampSeconds });
+          frames.push(
+            ...extracted.flatMap((result) =>
+              result.status === "fulfilled" ? [result.value] : []
+            )
+          );
+        }
+        if (frames.length < Math.min(3, timestamps.length)) {
+          throw new Error("Too few visual-analysis frames could be decoded");
         }
         const screenshotResult = await analyzeScreenshots(packet, frames);
         const requestedEvidence = normalizeEvidenceRequest(
@@ -787,8 +910,8 @@ export async function buildCandidateVisualContexts(input: {
             await extractVisualAnalysisVideo(
               fullPath,
               videoPath,
-              request.startTimeSeconds,
-              request.endTimeSeconds
+              Math.max(0, request.startTimeSeconds - sourceTimelineOffset),
+              Math.max(0.1, request.endTimeSeconds - sourceTimelineOffset)
             );
             const videoResult = await analyzeVideo(
               packet,

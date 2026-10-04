@@ -78,7 +78,10 @@ export async function transcribeAudioWithRouter(
 
   if (isWhisperAvailable()) {
     return transcribeWhisperAudio(audioPath, timeOffsetSeconds, {
-      prompt: context.prompt,
+      // Never feed titles, descriptions, or prior transcript into Whisper's
+      // timestamp pass. In quiet audio those hints can be emitted as speech and
+      // repeated across every chunk. Proper nouns still reach providers as
+      // bounded keyterms, which cannot become a verbatim timing prompt.
       language: context.language,
       keyterms: context.keyterms,
     });

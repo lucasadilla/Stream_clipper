@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   detectVisualChanges,
   parsePortableGraymap,
+  sanitizeStructuredVisualContext,
   selectVisualEvidenceTimestamps,
+  VISUAL_ANALYSIS_VERSION,
   type GrayFrame,
 } from "@/lib/visualAnalysis";
 import {
@@ -82,6 +84,95 @@ describe("local visual discovery", () => {
     expect(selected).toContain(112);
     expect(selected).toContain(122);
     expect(selected.length).toBeLessThanOrEqual(8);
+  });
+
+  it("covers a short clip at roughly one frame per second", () => {
+    const selected = selectVisualEvidenceTimestamps({
+      startTimeSeconds: 20,
+      endTimeSeconds: 30,
+      focusTimeSeconds: 25,
+      maximumFrames: 12,
+      events: [],
+    });
+    const gaps = selected
+      .slice(1)
+      .map((timestamp, index) => timestamp - selected[index]!);
+
+    expect(selected[0]).toBe(20);
+    expect(selected.at(-1)).toBe(30);
+    expect(Math.max(...gaps)).toBeLessThanOrEqual(1.05);
+  });
+
+  it("keeps dense time-aligned observations for framing", () => {
+    const context = sanitizeStructuredVisualContext({
+      version: VISUAL_ANALYSIS_VERSION,
+      sourceId: "source-1",
+      startTimeSeconds: 0,
+      endTimeSeconds: 24,
+      eventType: "demonstration",
+      summary: "The visible focus changes throughout the clip.",
+      events: Array.from({ length: 24 }, (_, index) => ({
+        timeSeconds: index,
+        type: "context" as const,
+        description: `Visible state ${index}`,
+        confidence: 0.8,
+      })),
+      confidence: 0.8,
+      uncertainties: [],
+      sufficient: true,
+      analysisLevel: "screenshots",
+      modelVersion: "test",
+      evidence: [],
+    });
+
+    expect(context.events).toHaveLength(24);
+  });
+
+  it("preserves bounded cursor targets and simple Shorts layout hints", () => {
+    const context = sanitizeStructuredVisualContext({
+      version: VISUAL_ANALYSIS_VERSION,
+      sourceId: "source-screen",
+      startTimeSeconds: 0,
+      endTimeSeconds: 5,
+      eventType: "screen_demo",
+      summary: "The cursor selects the export control.",
+      events: [
+        {
+          timeSeconds: 2,
+          type: "action",
+          description: "The pointer clicks the export control.",
+          confidence: 0.95,
+          layoutHint: "screen_focus",
+          cursor: {
+            point: { x: 1.2, y: -0.1 },
+            targetRect: { x: 0.7, y: 0.2, width: 0.24, height: 0.2 },
+            action: "clicking",
+            confidence: 1.4,
+          },
+          importanceRegions: [
+            {
+              rect: { x: 0.7, y: 0.2, width: 0.24, height: 0.2 },
+              category: "visual_focus",
+              strength: 0.95,
+              attentionSource: "cursor_target",
+            },
+          ],
+        },
+      ],
+      confidence: 0.9,
+      uncertainties: [],
+      sufficient: true,
+      analysisLevel: "screenshots",
+      modelVersion: "test",
+      evidence: [],
+    });
+
+    expect(context.events[0]?.layoutHint).toBe("screen_focus");
+    expect(context.events[0]?.cursor?.point).toEqual({ x: 1, y: 0 });
+    expect(context.events[0]?.cursor?.confidence).toBe(1);
+    expect(context.events[0]?.importanceRegions?.[0]?.attentionSource).toBe(
+      "cursor_target"
+    );
   });
 });
 

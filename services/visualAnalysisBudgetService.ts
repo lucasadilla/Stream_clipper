@@ -46,8 +46,8 @@ export const DEFAULT_VISUAL_ANALYSIS_BUDGET: VisualAnalysisBudgetPolicy = {
   videoEscalationCostUsd: 0.035,
   minimumCandidateScore: 32,
   strongCandidateScore: 68,
-  screenshotCount: 8,
-  maximumScreenshotCount: 12,
+  screenshotCount: 24,
+  maximumScreenshotCount: 36,
   maximumVideoSeconds: 60,
 };
 
@@ -190,7 +190,7 @@ export class VisualAnalysisBudgetService {
       level: temporal ? "screenshots_then_video" : "screenshots",
       maximumFrames: Math.min(
         this.policy.maximumScreenshotCount,
-        this.policy.screenshotCount + (strong ? 2 : 0)
+        this.policy.screenshotCount + (strong ? 8 : 0)
       ),
       maximumVideoSeconds: temporal ? this.policy.maximumVideoSeconds : 0,
       estimatedCostUsd: screenshotCost,

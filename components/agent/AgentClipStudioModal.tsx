@@ -2184,7 +2184,12 @@ export function AgentClipStudioModal({
             <header className="sticky top-0 z-20 flex shrink-0 items-center justify-between gap-4 border-b border-white/[0.08] bg-[#050705]/95 px-4 py-3 backdrop-blur-xl sm:px-5">
               <div className="flex min-w-0 items-center gap-3">
                 <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-[var(--color-accent)]/25 bg-[var(--color-accent)]/10">
-                  <Image src="/clipper-mark.svg" alt="" width={20} height={20} />
+                  <Image
+                    src="/brand/clipper-mark-ivory.png"
+                    alt=""
+                    width={20}
+                    height={20}
+                  />
                 </span>
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">

@@ -17,6 +17,7 @@ import {
 import {
   generateProfessionalReframePlan,
 } from "@/lib/professionalReframe";
+import { contextAwareCropKeyframesForRange } from "@/lib/contextAwareFraming";
 
 export const runtime = "nodejs";
 
@@ -117,23 +118,32 @@ export async function GET(
         })),
       style,
     });
-    const previewKeyframes = requestedPlan.cropKeyframes.length
-      ? requestedPlan.cropKeyframes
-      : result.classification === "multiple_faces" && usableTracks.length >= 2
-        ? buildActiveSpeakerCropPlan(
-            usableTracks,
-            result.startSeconds,
-            result.endSeconds,
-            cropWidthRatio
-          )
-        : primaryTrack
-          ? buildSubjectCropPlan(
-              primaryTrack.points,
-              result.startSeconds,
-              result.endSeconds,
+    const contextualPreviewKeyframes = lockSubject
+      ? []
+      : contextAwareCropKeyframesForRange({
+          plan: result.contextAwareFraming,
+          startTimeSeconds: clipStartSeconds,
+          endTimeSeconds: clipEndSeconds,
+        });
+    const previewKeyframes = contextualPreviewKeyframes.length
+      ? contextualPreviewKeyframes
+      : requestedPlan.cropKeyframes.length
+        ? requestedPlan.cropKeyframes
+        : result.classification === "multiple_faces" && usableTracks.length >= 2
+          ? buildActiveSpeakerCropPlan(
+              usableTracks,
+              clipStartSeconds,
+              clipEndSeconds,
               cropWidthRatio
             )
-          : [];
+          : primaryTrack
+            ? buildSubjectCropPlan(
+                primaryTrack.points,
+                clipStartSeconds,
+                clipEndSeconds,
+                cropWidthRatio
+              )
+            : [];
 
     return jsonResponse({
       job: {
@@ -172,6 +182,23 @@ export async function GET(
         gameplayImportanceMap: result.gameplayImportanceMap ?? null,
         gameplayLayoutPlan: result.gameplayLayoutPlan ?? null,
         gameplayMetrics: result.gameplayMetrics ?? null,
+        contextAwareFraming: result.contextAwareFraming
+          ? {
+              version: result.contextAwareFraming.version,
+              mode: result.contextAwareFraming.mode,
+              confidence: result.contextAwareFraming.confidence,
+              compositionTemplate:
+                result.contextAwareFraming.compositionTemplate,
+              maxPrimaryRegions:
+                result.contextAwareFraming.maxPrimaryRegions,
+              visualTargetCount:
+                result.contextAwareFraming.visualTargets.length,
+              visualModelSampleCount:
+                result.contextAwareFraming.sampledFrameTimestamps.length,
+              sampleCadenceSeconds:
+                result.contextAwareFraming.sampleCadenceSeconds,
+            }
+          : null,
         frameUrl: result.frameStoragePath
           ? `/api/storage/${result.frameStoragePath.replace(/\\/g, "/")}?inline=1`
           : null,

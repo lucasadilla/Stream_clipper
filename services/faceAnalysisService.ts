@@ -29,6 +29,7 @@ import {
 } from "@/lib/verticalLayout";
 import {
   buildGameplayImportanceMap,
+  hasScreenInteractionEvidence,
   planGameplayLayout,
   verticalLayoutForGameplayFamily,
   type GameplaySignal,
@@ -44,13 +45,21 @@ import {
 import { buildAudioVisualActiveSpeakerTimeline } from "@/lib/activeSpeaker";
 import { inferAudioVisualSpeakerMatches } from "@/lib/audioVisualSpeakerMatcher";
 import { hasPaidSessionAccess } from "@/services/sessionAccessService";
+import { buildContextAwareFramingPlan } from "@/lib/contextAwareFraming";
+import {
+  contentTypeFromVisualClassification,
+  type ClipContentType,
+} from "@/lib/clipContentProfile";
+import { buildCandidateVisualContexts } from "@/services/visualContextService";
 
 const FACE_ANALYSIS_WORKER_ID = `face-worker-${process.pid}`;
-const FACE_ANALYSIS_VERSION = 9;
+const FACE_ANALYSIS_VERSION = 11;
 
 /** Result JSON stored on the job row (adds source info to the shared shape). */
 export interface StoredFaceAnalysisResult extends FacecamAnalysisResult {
   analysisVersion?: number;
+  /** Prevent semantic regions in interviews/talking heads from selecting a gameplay layout. */
+  gameplayLayoutEligible?: boolean;
   sourceWidth: number;
   sourceHeight: number;
   /** Representative frame for UI overlays (relative storage path). */
@@ -64,9 +73,36 @@ export interface StoredFaceAnalysisResult extends FacecamAnalysisResult {
     sampledFrames: number;
     gameplaySignalCount: number;
     importanceRegionCount: number;
+    semanticTargetCount: number;
+    visualModelSampleCount: number;
     candidateCount: number;
     reusedForPlatformPlanning: boolean;
   };
+}
+
+function visualModelFrameTimestamps(
+  events: Array<{ rawData: unknown }>
+): number[] {
+  const timestamps: number[] = [];
+  for (const event of events) {
+    if (!event.rawData || typeof event.rawData !== "object") continue;
+    const raw = event.rawData as Record<string, unknown>;
+    const context =
+      raw.context && typeof raw.context === "object"
+        ? (raw.context as Record<string, unknown>)
+        : null;
+    for (const evidence of Array.isArray(context?.evidence)
+      ? context.evidence
+      : []) {
+      if (!evidence || typeof evidence !== "object") continue;
+      const item = evidence as Record<string, unknown>;
+      if (item.kind !== "frame") continue;
+      const timestamp = Number(item.timestampSeconds);
+      if (Number.isFinite(timestamp)) timestamps.push(timestamp);
+    }
+  }
+  return [...new Set(timestamps.map((value) => Math.round(value * 1000) / 1000))]
+    .sort((left, right) => left - right);
 }
 
 function analysisTimeoutMs(): number {
@@ -362,7 +398,14 @@ export async function failFaceAnalysisJob(jobId: string, message: string) {
  */
 export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
   const analysisStartedAt = Date.now();
-  const job = await prisma.faceAnalysisJob.findUnique({ where: { id: jobId } });
+  const job = await prisma.faceAnalysisJob.findUnique({
+    where: { id: jobId },
+    include: {
+      clipSuggestion: {
+        select: { rawAiJson: true, title: true, reason: true },
+      },
+    },
+  });
   if (!job) throw new Error("Face analysis job not found");
 
   await updateAnalysisProgress(jobId, "extracting_frames", 5);
@@ -384,6 +427,57 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
   });
   if (!sourceMedia) throw new Error("Source media not found for analysis");
   const inputPath = resolveStoragePath(sourceMedia.filePath);
+  const rawClipMetadata =
+    job.clipSuggestion?.rawAiJson &&
+    typeof job.clipSuggestion.rawAiJson === "object" &&
+    !Array.isArray(job.clipSuggestion.rawAiJson)
+      ? (job.clipSuggestion.rawAiJson as Record<string, unknown>)
+      : null;
+  const declaredContentType = rawClipMetadata?.contentType;
+  const declaredClipContentType: ClipContentType | undefined =
+    declaredContentType === "gaming" ||
+    declaredContentType === "gameplay_only" ||
+    declaredContentType === "podcast" ||
+    declaredContentType === "talking" ||
+    declaredContentType === "general"
+      ? declaredContentType
+      : undefined;
+
+  const prepareFramingContext = () =>
+    job.clipSuggestionId && job.clipSuggestion
+      ? buildCandidateVisualContexts({
+          streamSessionId: job.streamSessionId,
+          purpose: "framing",
+          sourceOverride: {
+            id: sourceMedia.id,
+            filePath: sourceMedia.filePath,
+            timelineOffsetSeconds: job.startSeconds - clipSource.renderStart,
+          },
+          candidates: [
+            {
+              id: `framing:${job.clipSuggestionId}`,
+              startTimeSeconds: job.startSeconds,
+              endTimeSeconds: job.endSeconds,
+              focusTimeSeconds:
+                typeof rawClipMetadata?.focusTimeSeconds === "number" &&
+                Number.isFinite(rawClipMetadata.focusTimeSeconds)
+                  ? rawClipMetadata.focusTimeSeconds
+                  : (job.startSeconds + job.endSeconds) / 2,
+              signalScore: 100,
+              context: [job.clipSuggestion.title, job.clipSuggestion.reason]
+                .filter(Boolean)
+                .join(" | "),
+              contentType: declaredClipContentType ?? "general",
+            },
+          ],
+        }).catch((error) => {
+          console.warn(
+            "[face-analysis] clip visual framing unavailable; using local evidence:",
+            error instanceof Error ? error.message : error
+          );
+          return null;
+        })
+      : Promise.resolve(null);
 
   await prisma.faceAnalysisJob.update({
     where: { id: jobId },
@@ -430,6 +524,9 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
       "The source video did not produce decodable frames for face tracking. Re-prepare the source or upload a playable MP4."
     );
   }
+  // Avoid competing with local CV for decoder/CPU capacity. Once detection is
+  // done, the model request can overlap the lightweight tracking calculations.
+  const framingContextPromise = prepareFramingContext();
 
   await updateAnalysisProgress(jobId, "tracking_faces", 72);
 
@@ -592,22 +689,48 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
     );
   }
 
-  const visualEvents = await prisma.visualEvent.findMany({
-    where: {
-      streamSessionId: job.streamSessionId,
-      endTimeSeconds: { gte: job.startSeconds },
-      startTimeSeconds: { lte: job.endSeconds },
-    },
-    orderBy: { startTimeSeconds: "asc" },
-    select: {
-      startTimeSeconds: true,
-      endTimeSeconds: true,
-      type: true,
-      score: true,
-      rawData: true,
-    },
-    take: 120,
-  });
+  const clipContentType: ClipContentType =
+    declaredClipContentType ??
+    contentTypeFromVisualClassification(classification);
+
+  // Candidate discovery already performs this pass for new clips. Awaiting the
+  // cache-backed final-boundary pass here also upgrades edited or older clips.
+  await updateAnalysisProgress(jobId, "classifying_layout", 88);
+  await framingContextPromise;
+  await updateAnalysisProgress(jobId, "classifying_layout", 92);
+
+  const [visualEvents, transcriptChunks] = await Promise.all([
+    prisma.visualEvent.findMany({
+      where: {
+        streamSessionId: job.streamSessionId,
+        endTimeSeconds: { gte: job.startSeconds },
+        startTimeSeconds: { lte: job.endSeconds },
+      },
+      orderBy: { startTimeSeconds: "asc" },
+      select: {
+        startTimeSeconds: true,
+        endTimeSeconds: true,
+        type: true,
+        score: true,
+        rawData: true,
+      },
+      take: 120,
+    }),
+    prisma.transcriptChunk.findMany({
+      where: {
+        streamSessionId: job.streamSessionId,
+        endTimeSeconds: { gte: job.startSeconds - 1.5 },
+        startTimeSeconds: { lte: job.endSeconds + 1.5 },
+      },
+      orderBy: { startTimeSeconds: "asc" },
+      select: {
+        startTimeSeconds: true,
+        endTimeSeconds: true,
+        text: true,
+      },
+      take: 160,
+    }),
+  ]);
   const gameplaySignals: GameplaySignal[] = (worker.gameplaySignals ?? []).map(
     (signal) => ({
       ...signal,
@@ -624,7 +747,7 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
     visualEvents,
     facecamRect: embeddedFacecam?.rect,
   });
-  const gameplayLayoutPlan = planGameplayLayout({
+  const proposedGameplayLayoutPlan = planGameplayLayout({
     map: gameplayImportanceMap,
     classification,
     facecam: embeddedFacecam,
@@ -633,9 +756,20 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
     sourceWidth,
     sourceHeight,
   });
+  const screenInteractionLayoutEligible =
+    hasScreenInteractionEvidence(gameplayImportanceMap);
+  const gameplayLayoutEligible =
+    clipContentType === "gaming" ||
+    clipContentType === "gameplay_only" ||
+    classification === "embedded_facecam" ||
+    classification === "gameplay_only" ||
+    screenInteractionLayoutEligible;
+  const gameplayLayoutPlan = gameplayLayoutEligible
+    ? proposedGameplayLayoutPlan
+    : undefined;
   const layoutPlanningMs = Date.now() - layoutPlanningStartedAt;
   const recommendation =
-    gameplayLayoutPlan.confidence >= 0.36
+    gameplayLayoutPlan && gameplayLayoutPlan.confidence >= 0.36
       ? {
           layout: verticalLayoutForGameplayFamily(
             gameplayLayoutPlan.selectedFamily
@@ -716,9 +850,22 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
     sceneChanges,
     speakerContext: speakerContext ?? undefined,
   });
+  const contextualFrameTimestamps = visualModelFrameTimestamps(visualEvents);
+  const contextAwareFraming = buildContextAwareFramingPlan({
+    clipStartSeconds: job.startSeconds,
+    clipEndSeconds: job.endSeconds,
+    baseKeyframes: professionalPlan.cropKeyframes,
+    importanceMap: gameplayImportanceMap,
+    transcript: transcriptChunks,
+    sampledFrameTimestamps: contextualFrameTimestamps,
+    sceneChanges: sceneChanges.map((scene) => scene.timestampSeconds),
+    activeSpeakerDecisionCount:
+      professionalPlan.activeSpeaker?.decisions.length ?? 0,
+  });
 
   const result: StoredFaceAnalysisResult = {
     analysisVersion: FACE_ANALYSIS_VERSION,
+    gameplayLayoutEligible,
     id: jobId,
     sourceMediaId: sourceMedia.id,
     clipId: job.clipSuggestionId ?? undefined,
@@ -733,6 +880,7 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
     modelName: worker.modelName,
     modelVersion: worker.modelVersion,
     professionalPlan,
+    contextAwareFraming,
     gameplayImportanceMap,
     gameplayLayoutPlan,
     createdAt: new Date().toISOString(),
@@ -748,7 +896,9 @@ export async function executeFaceAnalysisJob(jobId: string): Promise<void> {
       sampledFrames,
       gameplaySignalCount: gameplaySignals.length,
       importanceRegionCount: gameplayImportanceMap.regions.length,
-      candidateCount: gameplayLayoutPlan.candidates.length,
+      semanticTargetCount: contextAwareFraming.visualTargets.length,
+      visualModelSampleCount: contextualFrameTimestamps.length,
+      candidateCount: proposedGameplayLayoutPlan.candidates.length,
       reusedForPlatformPlanning: true,
     },
   };

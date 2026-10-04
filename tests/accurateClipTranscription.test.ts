@@ -30,4 +30,38 @@ describe("short-window caption verification", () => {
       await fs.rmdir(tempDir);
     }
   });
+
+  it("collapses the same phrase hallucinated in every clip window", async () => {
+    vi.clearAllMocks();
+    extract.mockResolvedValue(undefined);
+    const phrase = ["Bro", "why", "are", "you", "saying", "LOL?"];
+    transcribe.mockImplementation(async (_file: string, offset: number) => {
+      const words = phrase.map((word, index) => ({
+        word,
+        start: offset + 2 + index * 0.2,
+        end: offset + 2 + index * 0.2 + 0.18,
+      }));
+      return [{
+        startTimeSeconds: words[0]!.start,
+        endTimeSeconds: words.at(-1)!.end,
+        text: phrase.join(" "),
+        words,
+      }];
+    });
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "caption-loop-"));
+    try {
+      const result = await transcribeClipAccurately({
+        sourcePath: "source.mp4",
+        sourceStart: 3,
+        timelineStart: 100,
+        duration: 55,
+        tempDir,
+        options: { language: "en" },
+      });
+      expect(result.flatMap((segment) => segment.words ?? []).map((word) => word.word))
+        .toEqual(phrase);
+    } finally {
+      await fs.rmdir(tempDir);
+    }
+  });
 });

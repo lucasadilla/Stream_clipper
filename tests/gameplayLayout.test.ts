@@ -3,6 +3,7 @@ import {
   buildGameplayCropKeyframes,
   buildGameplayImportanceMap,
   generateGameplayLayoutCandidates,
+  hasScreenInteractionEvidence,
   planGameplayLayout,
   verticalLayoutForAutomaticPlan,
   type GameplaySignal,
@@ -124,6 +125,111 @@ describe("gameplay importance and layout planning", () => {
     expect(outcome?.startTimeSeconds).toBeCloseTo(11.25);
     expect(outcome?.rect.x).toBeCloseTo(0.7);
     expect(outcome?.evidence).toContain("multimodal_context:outcome");
+  });
+
+  it("turns a meaningful cursor action into stable screen-aware framing", () => {
+    const map = buildGameplayImportanceMap({
+      clipStartSeconds: 0,
+      clipEndSeconds: 5,
+      ...source,
+      visualEvents: [
+        {
+          startTimeSeconds: 0,
+          endTimeSeconds: 5,
+          type: "contextual_analysis",
+          score: 9,
+          rawData: {
+            context: {
+              events: [
+                {
+                  timeSeconds: 1,
+                  type: "action",
+                  confidence: 0.92,
+                  layoutHint: "screen_focus",
+                  cursor: {
+                    point: { x: 0.79, y: 0.36 },
+                    targetRect: {
+                      x: 0.68,
+                      y: 0.24,
+                      width: 0.24,
+                      height: 0.28,
+                    },
+                    action: "clicking",
+                    confidence: 0.94,
+                  },
+                },
+                {
+                  timeSeconds: 1.7,
+                  type: "action",
+                  confidence: 0.88,
+                  layoutHint: "screen_focus",
+                  cursor: {
+                    point: { x: 0.81, y: 0.37 },
+                    targetRect: {
+                      x: 0.7,
+                      y: 0.25,
+                      width: 0.24,
+                      height: 0.28,
+                    },
+                    action: "moving",
+                    confidence: 0.82,
+                  },
+                },
+              ],
+            },
+          },
+        },
+      ],
+    });
+
+    expect(hasScreenInteractionEvidence(map)).toBe(true);
+    const cursorRegions = map.regions.filter(
+      (region) => region.attentionSource === "cursor_target"
+    );
+    expect(cursorRegions).toHaveLength(1);
+    expect(cursorRegions[0]?.rect.width).toBeGreaterThan(0.2);
+
+    const plan = planGameplayLayout({
+      map,
+      ...source,
+      classification: "no_face",
+      tracks: [],
+    });
+    expect(plan.selectedFamily).toBe("gameplay_only");
+    expect(plan.gameplayCropKeyframes.at(-1)?.centerX).toBeGreaterThan(0.65);
+  });
+
+  it("does not use an idle cursor as screen-interaction evidence", () => {
+    const map = buildGameplayImportanceMap({
+      clipStartSeconds: 0,
+      clipEndSeconds: 4,
+      ...source,
+      visualEvents: [
+        {
+          startTimeSeconds: 0,
+          endTimeSeconds: 4,
+          type: "contextual_analysis",
+          score: 8,
+          rawData: {
+            context: {
+              events: [
+                {
+                  timeSeconds: 2,
+                  type: "context",
+                  confidence: 0.9,
+                  cursor: {
+                    point: { x: 0.95, y: 0.95 },
+                    action: "idle",
+                    confidence: 0.98,
+                  },
+                },
+              ],
+            },
+          },
+        },
+      ],
+    });
+    expect(hasScreenInteractionEvidence(map)).toBe(false);
   });
 
   it("moves toward action and cuts at real scene changes", () => {

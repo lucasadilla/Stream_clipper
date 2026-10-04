@@ -16,6 +16,7 @@ import type {
   GameplayImportanceMap,
   GameplayLayoutPlan,
 } from "@/lib/gameplayLayout";
+import type { ContextAwareFramingPlan } from "@/lib/contextAwareFraming";
 
 export const VERTICAL_LAYOUTS = [
   "auto",
@@ -214,6 +215,8 @@ export type FacecamAnalysisResult = {
   gameplayImportanceMap?: GameplayImportanceMap;
   /** Ranked, validated layout decision and gameplay camera trajectory. */
   gameplayLayoutPlan?: GameplayLayoutPlan;
+  /** Shared semantic + active-speaker camera plan used by preview and render. */
+  contextAwareFraming?: ContextAwareFramingPlan;
   createdAt?: string;
 };
 

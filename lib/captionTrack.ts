@@ -7,6 +7,10 @@ import {
 } from "@/lib/captionStyles";
 import { distributeTextAcrossSpan, repairCollapsedWordTimings } from "@/lib/transcriptTiming";
 import {
+  collapseRepeatedTranscriptText,
+  collapseRepeatedTranscriptWords,
+} from "@/lib/transcriptRepetition";
+import {
   directCaptionTrack,
   type CaptionCueDirection,
 } from "@/lib/captionDirector";
@@ -422,6 +426,69 @@ function mergeOrphanCaptionCues(
   return cues;
 }
 
+function normalizedCueText(cue: CaptionCue): string {
+  return cue.text
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}']+/gu, " ")
+    .trim();
+}
+
+/** Remove exact multi-cue loops left in already-persisted transcript chunks. */
+export function collapseRepeatedCaptionCueBlocks(
+  source: CaptionCue[]
+): CaptionCue[] {
+  if (source.length < 3) return source;
+  const output: CaptionCue[] = [];
+
+  for (let index = 0; index < source.length;) {
+    let best:
+      | { blockLength: number; repeatCount: number; removedCues: number }
+      | null = null;
+    const maxBlockLength = Math.min(6, Math.floor((source.length - index) / 3));
+
+    for (let blockLength = 1; blockLength <= maxBlockLength; blockLength += 1) {
+      const block = source.slice(index, index + blockLength);
+      const phrase = block.map(normalizedCueText).join(" ").trim();
+      const phraseTokenCount = phrase.split(/\s+/).length;
+      if (phrase.length < 10 || phraseTokenCount < 2) continue;
+
+      let repeatCount = 1;
+      while (index + (repeatCount + 1) * blockLength <= source.length) {
+        const nextStart = index + repeatCount * blockLength;
+        const previousEnd = source[nextStart - 1]!.endTimeSeconds;
+        const nextCueStart = source[nextStart]!.startTimeSeconds;
+        if (nextCueStart - previousEnd > 30) break;
+
+        const matches = block.every(
+          (cue, offset) =>
+            normalizedCueText(cue) ===
+            normalizedCueText(source[nextStart + offset]!)
+        );
+        if (!matches) break;
+        repeatCount += 1;
+      }
+
+      const requiredRepeats = phraseTokenCount === 2 ? 4 : 3;
+      if (repeatCount < requiredRepeats) continue;
+      const removedCues = blockLength * (repeatCount - 1);
+      if (!best || removedCues > best.removedCues) {
+        best = { blockLength, repeatCount, removedCues };
+      }
+    }
+
+    if (!best) {
+      output.push(source[index]!);
+      index += 1;
+      continue;
+    }
+
+    output.push(...source.slice(index, index + best.blockLength));
+    index += best.blockLength * best.repeatCount;
+  }
+
+  return output.length === source.length ? source : output;
+}
+
 function wordsWithinChunk(
   words: WhisperWord[],
   chunkStart: number,
@@ -506,7 +573,7 @@ export function buildCaptionTrack(
 
   for (const chunk of chunks) {
     if (!isValidCaptionText(chunk.text)) continue;
-    const cleanText = sanitizeCaptionText(chunk.text);
+    const cleanText = collapseRepeatedTranscriptText(chunk.text);
 
     const meta = chunkMeta(chunk.rawJson);
     if (meta?.words && meta.words.length > 0) {
@@ -514,7 +581,9 @@ export function buildCaptionTrack(
         ? alignWordsToSpeakerContext(meta.words, options.speakerContext)
         : meta.words;
       const words = wordsWithinChunk(
-        repairCollapsedWordTimings(attributedWords),
+        collapseRepeatedTranscriptWords(
+          repairCollapsedWordTimings(attributedWords)
+        ),
         chunk.startTimeSeconds,
         chunk.endTimeSeconds
       );
@@ -592,9 +661,11 @@ export function buildCaptionTrack(
 
   return directCaptionTrack(
     holdCaptionsForReading(resolveCaptionOverlaps(
-      mergeOrphanCaptionCues(cues, maxChars)
-        .filter((c) => c.text.trim().length > 0)
-        .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds)
+      collapseRepeatedCaptionCueBlocks(
+        mergeOrphanCaptionCues(cues, maxChars)
+          .filter((c) => c.text.trim().length > 0)
+          .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds)
+      )
     ))
   );
 }

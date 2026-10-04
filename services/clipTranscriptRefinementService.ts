@@ -16,7 +16,7 @@ import { transcribeClipAccurately } from "@/services/accurateClipTranscriptionSe
 import { resolveSourceForTranscription } from "@/services/transcriptionSyncService";
 import { ensureSpeakerContext } from "@/services/speakerContextService";
 
-const REFINEMENT_VERSION = "candidate-transcript-v2";
+const REFINEMENT_VERSION = "candidate-transcript-v3";
 const inFlight = new Map<string, Promise<ClipTranscriptRefinementResult>>();
 
 interface RefinementSource {

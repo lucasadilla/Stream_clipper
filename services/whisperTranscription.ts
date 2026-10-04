@@ -10,8 +10,13 @@ import { TRANSCRIPT_MERGE_MAX_SECONDS } from "@/lib/aiCostConstants";
 import { distributeTextAcrossSpan, repairCollapsedWordTimings } from "@/lib/transcriptTiming";
 import {
   isValidCaptionText,
-  sanitizeCaptionText,
 } from "@/lib/captionStyles";
+import {
+  collapseRepeatedTranscriptBlocks,
+  collapseRepeatedTranscriptText,
+  collapseRepeatedTranscriptWords,
+  transcriptLoopRatio,
+} from "@/lib/transcriptRepetition";
 import {
   getOpenAiDirectClient,
   getOpenAiTranscriptionQualityModel,
@@ -443,6 +448,16 @@ export function reconcileAccurateTextWithTimings(
   const originalWords = repairCollapsedWordTimings(timing.words ?? []);
   if (!text || originalWords.length === 0) return timing;
 
+  const timingText = joinWordTokens(originalWords.map((word) => word.word));
+  const accurateLoopRatio = transcriptLoopRatio(text);
+  const timingLoopRatio = transcriptLoopRatio(timingText);
+  if (
+    accurateLoopRatio >= 0.45 &&
+    accurateLoopRatio >= timingLoopRatio + 0.2
+  ) {
+    return timing;
+  }
+
   const correctedTokens = text.split(/\s+/).filter(Boolean);
   const countRatio = correctedTokens.length / originalWords.length;
   if (countRatio < 0.65 || countRatio > 1.5) return timing;
@@ -544,28 +559,41 @@ export async function transcribeWhisperAudio(
   }
 
   const rawSegments = response.segments ?? [];
-  const rawWords = repairCollapsedWordTimings(response.words ?? []);
+  const repairedRawWords = repairCollapsedWordTimings(response.words ?? []);
+  const rawWords = collapseRepeatedTranscriptWords(repairedRawWords);
+  const removedWordLoop = rawWords.length < repairedRawWords.length;
 
   if (rawSegments.length > 0) {
     const segments = mergeAdjacentSegments(
-      rawSegments
+      collapseRepeatedTranscriptBlocks(
+        rawSegments
         .map((s) => ({
           startTimeSeconds: timeOffsetSeconds + s.start,
           endTimeSeconds: timeOffsetSeconds + s.end,
-          text: sanitizeCaptionText(s.text),
+          text: collapseRepeatedTranscriptText(s.text),
         }))
-        .filter((s) => isValidCaptionText(s.text))
+        .filter((s) => isValidCaptionText(s.text)),
+        (segment) => segment.text
+      )
     );
 
-    return attachWordsToSegments(
+    const attached = attachWordsToSegments(
       segments,
       rawWords.filter((word) => isValidCaptionText(word.word)),
       timeOffsetSeconds,
       response
     );
+    return removedWordLoop
+      ? attached.flatMap((segment) => {
+          const words = segment.words ?? [];
+          return words.length > 0
+            ? [{ ...segment, text: joinWordTokens(words.map((word) => word.word)) }]
+            : [];
+        })
+      : attached;
   }
 
-  const text = sanitizeCaptionText(response.text ?? "");
+  const text = collapseRepeatedTranscriptText(response.text ?? "");
   if (!isValidCaptionText(text)) return [];
 
   const { probeMedia } = await import("@/lib/ffmpeg");

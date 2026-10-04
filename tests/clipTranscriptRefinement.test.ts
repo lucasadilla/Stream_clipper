@@ -57,6 +57,6 @@ describe("selected clip transcript updates", () => {
       startTimeSeconds: { lt: 24 }, endTimeSeconds: { gt: 8 },
     });
     expect(db.clipSuggestion.update.mock.calls[0][0].data.rawAiJson.transcriptRefinement)
-      .toMatchObject({ start: 8, end: 24, sourceKey: "master.mp4", version: "candidate-transcript-v2" });
+      .toMatchObject({ start: 8, end: 24, sourceKey: "master.mp4", version: "candidate-transcript-v3" });
   });
 });

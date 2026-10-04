@@ -272,6 +272,24 @@ describe("subject-aware crop", () => {
     expect(filter).toContain("crop=1080:1920");
     expect(filter).not.toContain("if(lt(t");
   });
+
+  it("keeps a matching 16:9 export at the full source width", () => {
+    const widescreenCtx: FilterBuildContext = {
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      outputWidth: 1920,
+      outputHeight: 1080,
+    };
+    const filter = buildSubjectAwareCropFilter(widescreenCtx, {
+      keyframes: [
+        { timestampSeconds: 0, centerX: 0.2, cropWidth: 1 },
+        { timestampSeconds: 2, centerX: 0.8, cropWidth: 1 },
+      ],
+    });
+    expect(filter).toContain("scale=1920:1080");
+    expect(filter).toContain("crop=1920:1080");
+    expect(filter).not.toContain("if(lt(t");
+  });
 });
 
 describe("buildVerticalLayoutFilter", () => {

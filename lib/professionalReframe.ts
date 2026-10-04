@@ -64,6 +64,7 @@ export type CropKeyframeReason =
   | "subject_motion"
   | "speaker_change"
   | "reaction"
+  | "visual_focus"
   | "scene_change"
   | "manual_override"
   | "fallback";

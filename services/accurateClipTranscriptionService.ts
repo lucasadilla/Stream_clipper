@@ -4,6 +4,10 @@ import { randomUUID } from "crypto";
 import { extractAudioSegment } from "@/lib/ffmpeg";
 import { transcribeWhisperAudio, type WhisperTranscriptionOptions } from "@/services/whisperTranscription";
 import type { TranscriptSegmentWithMeta } from "@/lib/transcriptionTypes";
+import {
+  collapseRepeatedTranscriptBlocks,
+  collapseRepeatedTranscriptWords,
+} from "@/lib/transcriptRepetition";
 
 /** Short overlapping windows keep fast speech and corrections near real anchors. */
 export async function transcribeClipAccurately(input: {
@@ -50,5 +54,48 @@ export async function transcribeClipAccurately(input: {
     }
     offset = coreEnd;
   }
-  return result.sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
+  const sorted = collapseRepeatedTranscriptBlocks(
+    result.sort((a, b) => a.startTimeSeconds - b.startTimeSeconds),
+    (segment) => segment.text
+  );
+  const allWords = sorted.flatMap((segment) => segment.words ?? []);
+  const words = collapseRepeatedTranscriptWords(allWords);
+  if (words.length === allWords.length) {
+    return sorted;
+  }
+
+  // A repeated phrase can be produced once per overlapping window. Rebuild
+  // segments after de-looping so downstream persistence cannot reintroduce it.
+  const repaired: TranscriptSegmentWithMeta[] = [];
+  const sourceByWord = new Map(
+    sorted.flatMap((segment) =>
+      (segment.words ?? []).map((word) => [word, segment] as const)
+    )
+  );
+  for (const word of words) {
+    const current = repaired.at(-1);
+    if (
+      !current ||
+      word.start - current.endTimeSeconds > 0.8 ||
+      word.end - current.startTimeSeconds > 8
+    ) {
+      const source = sourceByWord.get(word);
+      repaired.push({
+        ...source,
+        startTimeSeconds: word.start,
+        endTimeSeconds: word.end,
+        text: word.word.trim(),
+        words: [word],
+        estimatedTiming: false,
+      });
+    } else {
+      current.endTimeSeconds = word.end;
+      current.text = `${current.text} ${word.word.trim()}`.trim();
+      current.words!.push(word);
+    }
+  }
+  return [
+    ...repaired,
+    ...sorted.filter((segment) => !segment.words?.length),
+  ].sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
 }

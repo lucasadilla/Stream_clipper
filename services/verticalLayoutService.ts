@@ -26,6 +26,7 @@ import {
   verticalLayoutForAutomaticPlan,
 } from "@/lib/gameplayLayout";
 import type { CaptionSafeZone } from "@/lib/verticalLayout";
+import { contextAwareCropKeyframesForRange } from "@/lib/contextAwareFraming";
 
 function mergeManualCropKeyframes(
   automatic: NonNullable<ResolvedVerticalLayout["gameplayCrop"]>["keyframes"],
@@ -131,7 +132,8 @@ export async function resolveVerticalLayout(
         ...analysis.alternativeCandidates,
       ])
     : undefined;
-  let gameplayPlan = analysis?.gameplayImportanceMap
+  let gameplayPlan =
+    analysis?.gameplayLayoutEligible !== false && analysis?.gameplayImportanceMap
     ? planGameplayLayout({
         map: analysis.gameplayImportanceMap,
         classification: analysis.classification,
@@ -456,33 +458,76 @@ export async function resolveVerticalLayout(
                 score: scene.confidence,
               })),
             style: request.reframe?.style ?? "professional",
-            manualKeyframes: request.reframe?.manualKeyframes,
           })
         : null;
+      const contextAwareKeyframes =
+        analysis &&
+        request.faceSelection.mode === "auto" &&
+        !request.faceSelection.trackId &&
+        !request.reframe?.lockSubject
+          ? contextAwareCropKeyframesForRange({
+              plan: analysis.contextAwareFraming,
+              startTimeSeconds: options.clipStartSeconds,
+              endTimeSeconds: options.clipEndSeconds,
+            })
+          : [];
+      const professionalWidths = (professionalPlan?.cropKeyframes ?? [])
+        .map((frame) => frame.cropWidth)
+        .filter((value) => Number.isFinite(value))
+        .sort((left, right) => left - right);
+      const professionalHeights = (professionalPlan?.cropKeyframes ?? [])
+        .map((frame) => frame.cropHeight)
+        .filter((value) => Number.isFinite(value))
+        .sort((left, right) => left - right);
+      const contextCropWidth =
+        professionalWidths[Math.floor(professionalWidths.length / 2)] ??
+        normalizedCropWidth;
+      const contextCropHeight =
+        professionalHeights[Math.floor(professionalHeights.length / 2)] ?? 1;
+      const automaticKeyframes = contextAwareKeyframes.length
+        ? contextAwareKeyframes.map((frame) => ({
+            ...frame,
+            cropWidth: contextCropWidth,
+            cropHeight: contextCropHeight,
+            centerX: Math.min(
+              1 - contextCropWidth / 2,
+              Math.max(contextCropWidth / 2, frame.centerX)
+            ),
+            centerY: Math.min(
+              1 - contextCropHeight / 2,
+              Math.max(contextCropHeight / 2, frame.centerY ?? 0.5)
+            ),
+          }))
+        : professionalPlan?.cropKeyframes.length
+          ? professionalPlan.cropKeyframes
+          : followActiveSpeaker
+            ? buildActiveSpeakerCropPlan(
+                analysis!.tracks,
+                options.clipStartSeconds,
+                options.clipEndSeconds,
+                normalizedCropWidth
+              )
+            : buildSubjectCropPlan(
+                track.points,
+                options.clipStartSeconds,
+                options.clipEndSeconds,
+                normalizedCropWidth,
+                {
+                  smoothing: request.subjectCrop?.smoothing,
+                  deadZoneRatio: request.subjectCrop?.deadZoneRatio,
+                  maxPanSpeed: request.subjectCrop?.maxPanSpeed,
+                  fallback: request.subjectCrop?.fallback,
+                }
+              );
       resolved.subjectCrop = {
-        keyframes:
-          professionalPlan?.cropKeyframes.length
-            ? professionalPlan.cropKeyframes
-            : followActiveSpeaker
-              ? buildActiveSpeakerCropPlan(
-                  analysis!.tracks,
-                  options.clipStartSeconds,
-                  options.clipEndSeconds,
-                  normalizedCropWidth
-                )
-              : buildSubjectCropPlan(
-                  track.points,
-                  options.clipStartSeconds,
-                  options.clipEndSeconds,
-                  normalizedCropWidth,
-                  {
-                    smoothing: request.subjectCrop?.smoothing,
-                    deadZoneRatio: request.subjectCrop?.deadZoneRatio,
-                    maxPanSpeed: request.subjectCrop?.maxPanSpeed,
-                    fallback: request.subjectCrop?.fallback,
-                  }
-                ),
-        planVersion: professionalPlan?.version,
+        keyframes: mergeManualCropKeyframes(
+          automaticKeyframes,
+          request.reframe?.manualKeyframes
+        ),
+        planVersion:
+          contextAwareKeyframes.length && analysis?.contextAwareFraming
+            ? analysis.contextAwareFraming.version
+            : professionalPlan?.version,
         style: professionalPlan?.style,
       };
       if (professionalPlan) warnings.push(...professionalPlan.warnings);

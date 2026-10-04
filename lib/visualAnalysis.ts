@@ -12,6 +12,29 @@ export type VisualNarrativeRole =
   | "reaction"
   | "context";
 
+export type VisualAttentionSource =
+  | "subject"
+  | "speaker"
+  | "cursor_target"
+  | "interface"
+  | "object"
+  | "text"
+  | "result";
+
+export type VisualLayoutHint =
+  | "single_focus"
+  | "speaker_focus"
+  | "screen_focus"
+  | "screen_with_speaker"
+  | "wide_context";
+
+export type CursorAction =
+  | "pointing"
+  | "clicking"
+  | "dragging"
+  | "moving"
+  | "idle";
+
 export interface GrayFrame {
   timestampSeconds: number;
   width: number;
@@ -61,11 +84,19 @@ export interface StructuredVisualEvent {
   description: string;
   confidence: number;
   evidenceTimestampSeconds?: number;
+  layoutHint?: VisualLayoutHint;
+  cursor?: {
+    point: { x: number; y: number };
+    targetRect?: { x: number; y: number; width: number; height: number };
+    action: CursorAction;
+    confidence: number;
+  };
   importanceRegions?: Array<{
     rect: { x: number; y: number; width: number; height: number };
     category: "action" | "visual_focus" | "hud" | "outcome" | "context";
     strength: number;
     label?: string;
+    attentionSource?: VisualAttentionSource;
   }>;
 }
 
@@ -400,29 +431,51 @@ export function selectVisualEvidenceTimestamps(input: {
 }): number[] {
   const start = Math.max(0, input.startTimeSeconds);
   const end = Math.max(start, input.endTimeSeconds);
+  const maximumFrames = Math.max(1, Math.floor(input.maximumFrames));
   const clamp = (value: number) => Math.max(start, Math.min(end, value));
-  const anchors = [
-    start,
-    clamp(start + Math.min(3, (end - start) * 0.12)),
-    clamp(input.focusTimeSeconds),
-    clamp(end - Math.min(2, (end - start) * 0.1)),
-    end,
-    ...[...input.events]
-      .sort((a, b) => b.score - a.score)
-      .flatMap((event) => [
-        clamp(event.startTimeSeconds),
-        clamp((event.startTimeSeconds + event.endTimeSeconds) / 2),
-        clamp(event.endTimeSeconds),
-      ]),
-  ];
   const minimumGap = Math.max(0.35, (end - start) / 40);
   const selected: number[] = [];
-  for (const value of anchors) {
-    if (selected.some((existing) => Math.abs(existing - value) < minimumGap)) {
-      continue;
+  const add = (value: number) => {
+    const bounded = clamp(value);
+    if (selected.some((existing) => Math.abs(existing - bounded) < minimumGap)) {
+      return;
     }
-    selected.push(value);
-    if (selected.length >= Math.max(1, input.maximumFrames)) break;
+    if (selected.length < maximumFrames) selected.push(bounded);
+  };
+
+  // Always establish the beginning, payoff neighborhood, and ending. Event
+  // midpoints then reserve part of the budget for salient moments.
+  add(start);
+  if (maximumFrames > 1) add(end);
+  if (maximumFrames > 2) add(input.focusTimeSeconds);
+  const eventBudget = Math.max(0, Math.floor(maximumFrames * 0.42));
+  let eventFrames = 0;
+  for (const event of [...input.events].sort((a, b) => b.score - a.score)) {
+    const before = selected.length;
+    add((event.startTimeSeconds + event.endTimeSeconds) / 2);
+    if (selected.length > before) eventFrames += 1;
+    if (eventFrames >= eventBudget || selected.length >= maximumFrames) break;
+  }
+
+  // Fill the remaining budget across the full clip. For a short clip this is
+  // approximately one frame per second; longer clips widen the cadence rather
+  // than silently ignoring the back half of the moment.
+  const duration = end - start;
+  const cadence = Math.max(1, duration / Math.max(1, maximumFrames - 1));
+  for (
+    let timestamp = start + cadence;
+    timestamp < end - minimumGap && selected.length < maximumFrames;
+    timestamp += cadence
+  ) {
+    add(timestamp);
+  }
+
+  // Use spare slots for event boundaries, which helps distinguish setup from
+  // action without decoding every video frame.
+  for (const event of [...input.events].sort((a, b) => b.score - a.score)) {
+    add(event.startTimeSeconds);
+    add(event.endTimeSeconds);
+    if (selected.length >= maximumFrames) break;
   }
   return selected.sort((a, b) => a - b);
 }
@@ -469,6 +522,26 @@ export function sanitizeStructuredVisualContext(
         timeSeconds: Math.max(start - 15, Math.min(end + 15, event.timeSeconds)),
         confidence: clamp01(event.confidence),
         description: event.description.trim().slice(0, 320),
+        cursor: event.cursor
+          ? {
+              point: {
+                x: clamp01(event.cursor.point.x),
+                y: clamp01(event.cursor.point.y),
+              },
+              ...(event.cursor.targetRect
+                ? {
+                    targetRect: {
+                      x: clamp01(event.cursor.targetRect.x),
+                      y: clamp01(event.cursor.targetRect.y),
+                      width: clamp01(event.cursor.targetRect.width),
+                      height: clamp01(event.cursor.targetRect.height),
+                    },
+                  }
+                : {}),
+              action: event.cursor.action,
+              confidence: clamp01(event.cursor.confidence),
+            }
+          : undefined,
         importanceRegions: event.importanceRegions
           ?.map((region) => ({
             ...region,
@@ -490,6 +563,6 @@ export function sanitizeStructuredVisualContext(
           )
           .slice(0, 4),
       }))
-      .slice(0, 12),
+      .slice(0, 48),
   };
 }

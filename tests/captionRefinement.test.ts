@@ -4,8 +4,71 @@ import { buildCaptionTrack, holdCaptionsForReading } from "@/lib/captionTrack";
 import { generateAss } from "@/lib/captionAss";
 import { DEFAULT_CAPTION_APPEARANCE } from "@/lib/captionAppearance";
 import { repairCollapsedWordTimings } from "@/lib/transcriptTiming";
+import {
+  collapseRepeatedTranscriptBlocks,
+  collapseRepeatedTranscriptText,
+  collapseRepeatedTranscriptWords,
+} from "@/lib/transcriptRepetition";
 
 describe("accurate caption coverage", () => {
+  it("collapses a title-like phrase loop while preserving one spoken copy", () => {
+    const phrase = ["Bro", "why", "are", "you", "saying", "LOL?"];
+    const loopedWords = Array.from({ length: 4 }, (_, repeat) =>
+      phrase.map((word, index) => ({
+        word,
+        start: repeat * 2 + index * 0.2,
+        end: repeat * 2 + index * 0.2 + 0.18,
+      }))
+    ).flat();
+
+    expect(collapseRepeatedTranscriptWords(loopedWords).map((word) => word.word))
+      .toEqual(phrase);
+    expect(collapseRepeatedTranscriptText(
+      "Bro why are you saying LOL? Bro why are you saying LOL? Bro why are you saying LOL?"
+    )).toBe("Bro why are you saying LOL?");
+    expect(collapseRepeatedTranscriptBlocks(
+      [0, 8, 16].map((start) => ({ start, text: phrase.join(" ") })),
+      (segment) => segment.text
+    )).toEqual([{ start: 0, text: phrase.join(" ") }]);
+  });
+
+  it("does not collapse ordinary repeated emphasis", () => {
+    expect(collapseRepeatedTranscriptText("no no no, this is actually happening"))
+      .toBe("no no no, this is actually happening");
+    expect(collapseRepeatedTranscriptText("happy birthday happy birthday happy birthday"))
+      .toBe("happy birthday happy birthday happy birthday");
+  });
+
+  it("removes a persisted title loop from the rendered caption track", () => {
+    const title = "Bro why are you saying LOL?";
+    const cues = buildCaptionTrack([
+      { id: "a", startTimeSeconds: 0, endTimeSeconds: 1.5, text: title },
+      { id: "b", startTimeSeconds: 8, endTimeSeconds: 9.5, text: title },
+      { id: "c", startTimeSeconds: 16, endTimeSeconds: 17.5, text: title },
+      { id: "d", startTimeSeconds: 24, endTimeSeconds: 25.5, text: title },
+    ], "vertical");
+
+    expect(cues).toHaveLength(1);
+    expect(cues[0]!.text.replace(/\n/g, " ")).toBe(title);
+  });
+
+  it("rejects a quality pass that replaces speech with a repeated phrase", () => {
+    const original = "we finally found the hidden room behind the waterfall";
+    const words = original.split(" ").map((word, index) => ({
+      word,
+      start: index * 0.25,
+      end: index * 0.25 + 0.2,
+    }));
+    const loop = "hidden room behind the waterfall ".repeat(3).trim();
+    const corrected = reconcileAccurateTextWithTimings(
+      { text: original, words },
+      loop,
+      "quality-model"
+    );
+    expect(corrected.text).toBe(original);
+    expect(corrected.model).toBeUndefined();
+  });
+
   it("keeps zero-duration words audible providers otherwise cause to disappear", () => {
     const words = [{ word: "Bro", start: 0, end: 0 },
       { word: "why", start: 0, end: 0.4 }, { word: "laugh", start: 0.4, end: 0.8 },

@@ -7,6 +7,11 @@ import {
 } from "@/lib/normalizedRect";
 import type { CropInterpolation } from "@/lib/professionalReframe";
 import type {
+  CursorAction,
+  VisualAttentionSource,
+  VisualLayoutHint,
+} from "@/lib/visualAnalysis";
+import type {
   FaceSourceClassification,
   FaceTrack,
   FacecamCandidate,
@@ -14,7 +19,7 @@ import type {
   VerticalLayout,
 } from "@/lib/verticalLayout";
 
-export const GAMEPLAY_LAYOUT_VERSION = "gameplay-layout-v1";
+export const GAMEPLAY_LAYOUT_VERSION = "gameplay-layout-v2";
 
 export type GameplayImportanceCategory =
   | "action"
@@ -46,6 +51,10 @@ export interface GameplayImportanceRegion {
   category: GameplayImportanceCategory;
   strength: number;
   confidence: number;
+  label?: string;
+  attentionSource?: VisualAttentionSource;
+  cursorAction?: CursorAction;
+  layoutHint?: VisualLayoutHint;
   evidence: string[];
 }
 
@@ -163,6 +172,9 @@ function mergeImportanceRegions(
       .find(
         (candidate) =>
           candidate.category === region.category &&
+          (!candidate.attentionSource ||
+            !region.attentionSource ||
+            candidate.attentionSource === region.attentionSource) &&
           region.startTimeSeconds - candidate.endTimeSeconds <= maximumGapSeconds &&
           rectIoU(candidate.rect, region.rect) >= 0.35
       );
@@ -189,6 +201,11 @@ function mergeImportanceRegions(
       (previous.confidence * previousWeight + region.confidence * regionWeight) /
         totalWeight
     );
+    previous.label = previous.label ?? region.label;
+    previous.attentionSource =
+      previous.attentionSource ?? region.attentionSource;
+    previous.cursorAction = previous.cursorAction ?? region.cursorAction;
+    previous.layoutHint = previous.layoutHint ?? region.layoutHint;
     previous.evidence = [...new Set([...previous.evidence, ...region.evidence])].slice(0, 4);
   }
   return merged.map((region, index) => ({ ...region, id: `importance-${index + 1}` }));
@@ -204,6 +221,10 @@ function regionsFromVisualEvent(event: GameplayVisualEvent): GameplayImportanceR
     startTimeSeconds: number;
     endTimeSeconds: number;
     evidence: string;
+    confidence?: number;
+    attentionSource?: VisualAttentionSource;
+    cursorAction?: CursorAction;
+    layoutHint?: VisualLayoutHint;
   }> = (Array.isArray(raw?.importanceRegions) ? raw.importanceRegions : []).map(
     (value) => ({
       value,
@@ -227,12 +248,101 @@ function regionsFromVisualEvent(event: GameplayVisualEvent): GameplayImportanceR
       ? item.importanceRegions
       : [];
     for (const value of regions) {
+      const region =
+        value && typeof value === "object"
+          ? (value as Record<string, unknown>)
+          : null;
+      const attentionSource =
+        region?.attentionSource === "subject" ||
+        region?.attentionSource === "speaker" ||
+        region?.attentionSource === "cursor_target" ||
+        region?.attentionSource === "interface" ||
+        region?.attentionSource === "object" ||
+        region?.attentionSource === "text" ||
+        region?.attentionSource === "result"
+          ? region.attentionSource
+          : undefined;
+      const layoutHint =
+        item.layoutHint === "single_focus" ||
+        item.layoutHint === "speaker_focus" ||
+        item.layoutHint === "screen_focus" ||
+        item.layoutHint === "screen_with_speaker" ||
+        item.layoutHint === "wide_context"
+          ? item.layoutHint
+          : undefined;
       regionEntries.push({
         value,
         startTimeSeconds: Math.max(event.startTimeSeconds, time - 0.75),
         endTimeSeconds: Math.min(event.endTimeSeconds, time + 0.75),
         evidence: `multimodal_context:${String(item.type ?? "context")}`,
+        confidence: Number.isFinite(Number(item.confidence))
+          ? Number(item.confidence)
+          : undefined,
+        attentionSource,
+        layoutHint,
       });
+    }
+
+    const cursor =
+      item.cursor && typeof item.cursor === "object"
+        ? (item.cursor as Record<string, unknown>)
+        : null;
+    const cursorPoint =
+      cursor?.point && typeof cursor.point === "object"
+        ? (cursor.point as Record<string, unknown>)
+        : null;
+    const cursorAction =
+      cursor?.action === "pointing" ||
+      cursor?.action === "clicking" ||
+      cursor?.action === "dragging" ||
+      cursor?.action === "moving" ||
+      cursor?.action === "idle"
+        ? cursor.action
+        : undefined;
+    const cursorConfidence = Number(cursor?.confidence);
+    if (
+      cursorAction &&
+      cursorAction !== "idle" &&
+      Number.isFinite(cursorConfidence) &&
+      cursorConfidence >= 0.62 &&
+      Number.isFinite(Number(cursorPoint?.x)) &&
+      Number.isFinite(Number(cursorPoint?.y))
+    ) {
+      const suppliedTarget =
+        cursor?.targetRect && typeof cursor.targetRect === "object"
+          ? normalizeRect(cursor.targetRect as NormalizedRect)
+          : null;
+      const pointX = clamp(Number(cursorPoint?.x));
+      const pointY = clamp(Number(cursorPoint?.y));
+      const targetRect =
+        suppliedTarget ??
+        normalizeRect({
+          x: pointX - 0.12,
+          y: pointY - 0.1,
+          width: 0.24,
+          height: 0.2,
+        });
+      if (targetRect) {
+        regionEntries.push({
+          value: {
+            rect: targetRect,
+            category: "visual_focus",
+            strength: Math.max(0.68, cursorConfidence * 0.92),
+            label: "Cursor target",
+            attentionSource: "cursor_target",
+          },
+          startTimeSeconds: Math.max(event.startTimeSeconds, time - 0.75),
+          endTimeSeconds: Math.min(event.endTimeSeconds, time + 0.75),
+          evidence: `multimodal_context:${String(item.type ?? "context")}`,
+          confidence: Math.min(cursorConfidence, Number(item.confidence ?? 1)),
+          attentionSource: "cursor_target",
+          cursorAction,
+          layoutHint:
+            item.layoutHint === "screen_with_speaker"
+              ? "screen_with_speaker"
+              : "screen_focus",
+        });
+      }
     }
   }
   const parsed = regionEntries.flatMap((entry, index) => {
@@ -249,6 +359,17 @@ function regionsFromVisualEvent(event: GameplayVisualEvent): GameplayImportanceR
       item.category === "visual_focus"
         ? item.category
         : "context";
+    const attentionSource =
+      entry.attentionSource ??
+      (item.attentionSource === "subject" ||
+      item.attentionSource === "speaker" ||
+      item.attentionSource === "cursor_target" ||
+      item.attentionSource === "interface" ||
+      item.attentionSource === "object" ||
+      item.attentionSource === "text" ||
+      item.attentionSource === "result"
+        ? item.attentionSource
+        : undefined);
     return [
       {
         id: `visual-${event.startTimeSeconds}-${index}`,
@@ -257,8 +378,25 @@ function regionsFromVisualEvent(event: GameplayVisualEvent): GameplayImportanceR
         rect,
         category,
         strength: clamp(Number(item.strength ?? event.score / 10)),
-        confidence: clamp(Number(item.confidence ?? 0.55)),
-        evidence: [entry.evidence],
+        confidence: clamp(
+          Number(item.confidence ?? entry.confidence ?? 0.55)
+        ),
+        ...(typeof item.label === "string" && item.label.trim()
+          ? { label: item.label.trim().slice(0, 100) }
+          : {}),
+        ...(attentionSource ? { attentionSource } : {}),
+        ...(entry.cursorAction ? { cursorAction: entry.cursorAction } : {}),
+        ...(entry.layoutHint ? { layoutHint: entry.layoutHint } : {}),
+        evidence: [
+          entry.evidence,
+          ...(attentionSource
+            ? [`multimodal_attention:${attentionSource}`]
+            : []),
+          ...(entry.cursorAction
+            ? [`cursor_action:${entry.cursorAction}`]
+            : []),
+          ...(entry.layoutHint ? [`layout_hint:${entry.layoutHint}`] : []),
+        ],
       },
     ];
   });
@@ -386,6 +524,22 @@ export function buildGameplayImportanceMap(input: {
     temporalCoverage,
     conservativeFallback,
   };
+}
+
+/** Semantic screen interaction is strong enough to use the Shorts layout planner. */
+export function hasScreenInteractionEvidence(
+  map: GameplayImportanceMap
+): boolean {
+  return map.regions.some(
+    (region) =>
+      region.confidence >= 0.52 &&
+      region.strength >= 0.48 &&
+      (region.attentionSource === "cursor_target" ||
+        region.attentionSource === "interface" ||
+        region.attentionSource === "text" ||
+        region.layoutHint === "screen_focus" ||
+        region.layoutHint === "screen_with_speaker")
+  );
 }
 
 function viewportAt(centerX: number, cropWidth: number): NormalizedRect {
@@ -682,7 +836,7 @@ export function generateGameplayLayoutCandidates(input: {
     add({
       id: `stacked-${Math.round(splitRatio * 100)}`,
       family: "stacked",
-      reason: "Keeps the creator visible while giving gameplay a wider, tracked panel.",
+      reason: "Uses a familiar Shorts stack: the creator stays visible while the primary screen content gets a wider tracked panel.",
       splitRatio,
       gameplayCropWidth: cropWidthForTarget(
         input.sourceWidth,
@@ -710,7 +864,7 @@ export function generateGameplayLayoutCandidates(input: {
     add({
       id: `pip-${pipPosition}`,
       family: "pip",
-      reason: "Keeps gameplay dominant and places the webcam away from important action.",
+      reason: "Keeps the main content dominant and places the creator away from the important on-screen region.",
       pipPosition,
       pipWidthRatio,
       gameplayCropWidth: cropWidthForTarget(
@@ -726,7 +880,7 @@ export function generateGameplayLayoutCandidates(input: {
   add({
     id: "dynamic-reaction",
     family: "dynamic_reaction",
-    reason: "Preserves gameplay during action and increases creator emphasis for sustained reactions.",
+    reason: "Preserves the main screen during action and increases creator emphasis only for a sustained reaction.",
     splitRatio: 0.34,
     pipPosition: "top_right",
     pipWidthRatio,
@@ -743,7 +897,7 @@ export function generateGameplayLayoutCandidates(input: {
   add({
     id: "gameplay-only",
     family: "gameplay_only",
-    reason: "Tracks the important gameplay region without reserving space for an unreliable webcam.",
+    reason: "Uses a clean full-height Shorts crop that follows the most important on-screen region.",
     gameplayCropWidth: cropWidthForTarget(
       input.sourceWidth,
       input.sourceHeight,
@@ -831,17 +985,46 @@ export function buildGameplayCropKeyframes(
   const points = [...grouped.values()]
     .sort((a, b) => a.start - b.start)
     .map((group) => {
-      const weightedCenters = group.regions.map((region) => ({
+      // A Shorts frame should communicate one clear subject. Keep one primary
+      // region plus at most one supporting region, instead of averaging every
+      // HUD element and decorative motion into a vague center point.
+      const composedRegions = [...group.regions]
+        .sort((left, right) => {
+          const weight = (region: GameplayImportanceRegion) =>
+            region.strength *
+            region.confidence *
+            (region.attentionSource === "cursor_target"
+              ? region.cursorAction === "clicking" ||
+                region.cursorAction === "dragging"
+                ? 1.22
+                : 1.12
+              : region.category === "outcome" ||
+                  region.attentionSource === "result"
+                ? 1.16
+                : region.attentionSource === "speaker"
+                  ? 1.08
+                  : region.category === "context"
+                    ? 0.72
+                    : 1);
+          return weight(right) - weight(left);
+        })
+        .slice(0, 2);
+      const weightedCenters = composedRegions.map((region) => ({
         center: rectCenter(region.rect),
-        weight: Math.max(0.02, region.strength * region.confidence),
+        weight: Math.max(
+          0.02,
+          region.strength *
+            region.confidence *
+            (region.attentionSource === "cursor_target" ? 1.16 : 1)
+        ),
       }));
       const totalWeight = weightedCenters.reduce(
         (sum, item) => sum + item.weight,
         0
       );
-      const left = Math.min(...group.regions.map((region) => region.rect.x));
+      const left = Math.min(...composedRegions.map((region) => region.rect.x));
       const right = Math.max(
-        ...group.regions.map((region) => region.rect.x + region.rect.width)
+        ...composedRegions.map((region) => region.rect.x + region.rect.width)
       );
       const weightedX =
         weightedCenters.reduce(
@@ -861,12 +1044,15 @@ export function buildGameplayCropKeyframes(
         },
         confidence: clamp(
           weightedMean(
-            group.regions.map((region) => ({
+            composedRegions.map((region) => ({
               value: region.confidence,
               weight: Math.max(0.02, region.strength),
             }))
           )
         ),
+        cursorDriven:
+          composedRegions[0]?.attentionSource === "cursor_target" &&
+          composedRegions[0]?.cursorAction !== "idle",
         cut: map.sceneChanges.some(
           (scene) => scene >= group.start - 0.1 && scene <= group.end + 0.1
         ),
@@ -891,14 +1077,27 @@ export function buildGameplayCropKeyframes(
   const keyframes: SubjectCropKeyframe[] = [];
   let previousCenter = points[0]!.center.x;
   let previousTime = points[0]!.time;
+  let previousConfidence = points[0]!.confidence;
   for (const point of points) {
     const elapsed = Math.max(0.1, point.time - previousTime);
-    const maxMove = point.cut ? 1 : Math.max(0.045, elapsed * 0.16);
+    const maxMove = point.cut ? 1 : Math.max(0.04, elapsed * 0.14);
     let centerX = point.center.x;
-    if (!point.cut && Math.abs(centerX - previousCenter) < 0.055) {
+    const deadZone = point.cursorDriven ? 0.075 : 0.055;
+    if (!point.cut && Math.abs(centerX - previousCenter) < deadZone) {
       centerX = previousCenter;
     } else if (!point.cut) {
       centerX = clamp(centerX, previousCenter - maxMove, previousCenter + maxMove);
+    }
+    // Do not chase a cursor between samples. A fast switch is allowed only
+    // when the new visual evidence is materially stronger.
+    if (
+      !point.cut &&
+      keyframes.length > 0 &&
+      point.time - previousTime < 0.9 &&
+      Math.abs(centerX - previousCenter) >= deadZone &&
+      point.confidence < previousConfidence + 0.16
+    ) {
+      continue;
     }
     const interpolation: CropInterpolation = point.cut
       ? "cut"
@@ -926,6 +1125,7 @@ export function buildGameplayCropKeyframes(
     });
     previousCenter = centerX;
     previousTime = point.time;
+    previousConfidence = point.confidence;
     if (keyframes.length >= 40) break;
   }
   if (keyframes[0] && keyframes[0].timestampSeconds > 0) {
