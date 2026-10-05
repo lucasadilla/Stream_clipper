@@ -67,6 +67,7 @@ import { getCachedCaptionDirectionForClip } from "@/services/captionDirectorServ
 import { assertDeliverableVideo } from "@/services/deliverableVideoService";
 import { renderSpecHash, storedRenderSpecHash } from "@/lib/renderSpec";
 import { ensureSpeakerContext } from "@/services/speakerContextService";
+import { planAutomaticFramingRepair } from "@/lib/renderQualityRepair";
 
 const PREVIEW_MAX_SECONDS = 5;
 const PREVIEW_HEIGHT = 640;
@@ -128,6 +129,8 @@ export interface RenderShortParams {
   verticalLayout?: VerticalLayoutRequest;
   /** Render a short low-resolution preview instead of the final export. */
   preview?: boolean;
+  /** One bounded retry applied after the rendered-frame critic finds a correctable crop. */
+  qualityRepairPass?: number;
 }
 
 export function parseRenderJobParams(value: unknown): RenderShortParams | null {
@@ -166,6 +169,11 @@ export function parseRenderJobParams(value: unknown): RenderShortParams | null {
     editorState: normalizeEditorState(raw.editorState),
     verticalLayout: parseVerticalLayoutRequest(raw.verticalLayout) ?? undefined,
     preview: raw.preview === true,
+    qualityRepairPass:
+      typeof raw.qualityRepairPass === "number" &&
+      Number.isFinite(raw.qualityRepairPass)
+        ? Math.max(0, Math.trunc(raw.qualityRepairPass))
+        : 0,
   };
 }
 
@@ -372,7 +380,10 @@ async function completeRenderJob(input: {
   }
 
   let qualityReview: PostRenderQualityReview | null = null;
-  if (!input.params.preview) {
+  const previewReviewEnabled = !/^(0|false|off|no)$/i.test(
+    process.env.POST_RENDER_CRITIC_PREVIEWS_ENABLED?.trim() ?? "true"
+  );
+  if (!input.params.preview || previewReviewEnabled) {
     await updateJobProgress(input.jobId, 94, "quality_check");
     try {
       qualityReview = await reviewRenderedOutput({
@@ -393,6 +404,42 @@ async function completeRenderJob(input: {
         `Quality review skipped: ${error instanceof Error ? error.message : String(error)}`,
         "warn"
       );
+    }
+  }
+
+  if (qualityReview) {
+    const repair = planAutomaticFramingRepair(input.params, qualityReview);
+    if (repair) {
+      await appendRenderJobLog(
+        input.jobId,
+        "framing_repair",
+        repair.reason,
+        "warn"
+      );
+      const nextParams: RenderShortParams = {
+        ...input.params,
+        qualityRepairPass: repair.qualityRepairPass,
+        verticalLayout: repair.verticalLayout,
+      };
+      const nextStoredParams = {
+        ...nextParams,
+        renderSpecHash: renderSpecHash(nextParams),
+      };
+      await prisma.renderJob.update({
+        where: { id: input.jobId },
+        data: {
+          status: "queued",
+          progress: 5,
+          params: nextStoredParams as unknown as Prisma.InputJsonValue,
+          qualityReview: qualityReview as unknown as Prisma.InputJsonValue,
+          outputPath: null,
+          lockedAt: null,
+          lockedBy: null,
+          errorMessage: null,
+        },
+      });
+      await fs.unlink(input.outputPath).catch(() => {});
+      return;
     }
   }
 

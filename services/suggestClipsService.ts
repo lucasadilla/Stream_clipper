@@ -40,6 +40,7 @@ import {
   type ClipPackage,
 } from "@/lib/hookIntelligence";
 import { buildHookPackages } from "@/services/hookEngineService";
+import { parseSpeakerContext } from "@/lib/speakerContext";
 
 export const CLIP_SUGGESTION_VERSION = 8;
 
@@ -858,6 +859,28 @@ export async function autoSuggestClips(
   const aiCandidatesById = new Map(
     aiCandidateEntries.map((entry) => [entry.id, entry.candidate])
   );
+  const speakerContext = parseSpeakerContext(session?.metadataJson);
+  const verifiedPeopleForRange = (start: number, end: number): string[] => {
+    const namedSpeakers = speakerContext
+      ? speakerContext.speakers
+          .filter(
+            (speaker) =>
+              Boolean(speaker.displayName?.trim()) &&
+              speaker.confidence >= 0.7 &&
+              speakerContext.intervals.some(
+                (interval) =>
+                  interval.speakerIds.includes(speaker.id) &&
+                  interval.endTimeSeconds >= start &&
+                  interval.startTimeSeconds <= end
+              )
+          )
+          .map((speaker) => speaker.displayName!.trim())
+      : [];
+    return [...new Set([
+      ...(session?.channelTitle?.trim() ? [session.channelTitle.trim()] : []),
+      ...namedSpeakers,
+    ])];
+  };
   const aiRanking = await rankClipCandidatesWithAI({
     streamTitle: session?.title,
     streamDescription: session?.description,
@@ -883,6 +906,7 @@ export async function autoSuggestClips(
       maximumDurationSeconds: narrativeMaximumSeconds,
       transcriptChunks: candidate.narrativePlan?.contextChunks,
       visualContext: candidate.visualContext,
+      knownPeople: verifiedPeopleForRange(candidate.start, candidate.end),
     })),
   });
   if (aiRanking?.length) {

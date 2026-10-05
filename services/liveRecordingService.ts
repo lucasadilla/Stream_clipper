@@ -18,6 +18,7 @@ import {
   baseYtDlpArgs,
   acquireYtDlpDeploymentLease,
   getYoutubeCaptureStrategies,
+  orderYoutubeCaptureStrategies,
   preferredBestAudio,
   resolveYtDlpInvocation,
   formatYtDlpUserError,
@@ -602,7 +603,10 @@ export async function startLiveRecording(streamSessionId: string) {
 
     if (!isYouTubeAccessBlock(initialError)) throw initialError;
 
-    const strategies = getYoutubeCaptureStrategies().slice(1);
+    const strategies = orderYoutubeCaptureStrategies(
+      getYoutubeCaptureStrategies(),
+      true
+    ).filter((strategy) => strategy.id !== "configured");
     let lastError = initialError;
 
     for (const strategy of strategies) {

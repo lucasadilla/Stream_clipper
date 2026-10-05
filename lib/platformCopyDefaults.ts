@@ -8,7 +8,11 @@ export interface PlatformCopyContext {
   clipReason: string;
   transcriptText: string;
   streamTitle?: string | null;
+  streamDescription?: string | null;
   streamerName?: string | null;
+  visualContext?: string | null;
+  /** Names supplied by creator metadata or explicit speaker labels. */
+  people?: string[];
   durationSeconds: number;
 }
 
@@ -74,11 +78,46 @@ function uniqueByLowercase(values: string[]): string[] {
   });
 }
 
+const DANGLING_ENDING = new Set([
+  "a", "an", "and", "as", "at", "because", "but", "by", "for", "from",
+  "if", "in", "into", "of", "on", "or", "so", "than", "that", "the",
+  "then", "to", "when", "while", "with", "without",
+]);
+
+/** Keep platform copy inside a hard limit without publishing half a word or clause. */
+export function truncatePlatformText(value: string, limit: number): string {
+  const clean = value.replace(/\s+/g, " ").trim();
+  if (clean.length <= limit) return clean;
+  if (limit <= 1) return clean.slice(0, Math.max(0, limit));
+
+  const candidate = clean.slice(0, limit + 1);
+  const sentenceEnds = [...candidate.matchAll(/[.!?](?=\s|$)/g)]
+    .map((match) => match.index ?? -1)
+    .filter((index) => index >= Math.floor(limit * 0.58) && index < limit);
+  const sentenceEnd = sentenceEnds.at(-1);
+  let truncated = sentenceEnd != null
+    ? candidate.slice(0, sentenceEnd + 1)
+    : candidate.slice(0, limit).replace(/\s+\S*$/, "");
+  truncated = truncated.replace(/[\s,;:|/\-–—]+$/g, "").trim();
+
+  const words = truncated.split(/\s+/);
+  while (
+    words.length > 3 &&
+    DANGLING_ENDING.has(words.at(-1)!.toLocaleLowerCase().replace(/[^a-z]/g, ""))
+  ) {
+    words.pop();
+  }
+  return words.join(" ").replace(/[\s,;:|/\-–—]+$/g, "").trim();
+}
+
 /** Extract grounded names and searchable topics from source metadata/transcript. */
 export function extractPublishingKeywords(input: Omit<PlatformCopyContext, "platform" | "durationSeconds">): string[] {
   const sources = [
+    ...(input.people ?? []).map((person) => ({ text: person, weight: 7 })),
     { text: input.clipTitle, weight: 5 },
     { text: input.streamTitle ?? "", weight: 4 },
+    { text: input.streamDescription ?? "", weight: 2 },
+    { text: input.visualContext ?? "", weight: 3 },
     { text: input.transcriptText, weight: 2 },
     { text: input.clipReason, weight: 1 },
     { text: input.streamerName ?? "", weight: 4 },
@@ -163,9 +202,7 @@ function publishableTitle(input: PlatformCopyContext): string {
   const generic = /^(?:stream moment|stream highlight|highlight|moment|untitled)$/i;
   const transcriptHook = extractClipHook(cleanSourceText(input.transcriptText));
   const candidate = raw && !generic.test(raw) ? raw : transcriptHook ?? "Worth Hearing Twice";
-  return candidate.slice(0, 100).replace(/\s+\S*$/, (tail) =>
-    candidate.length > 100 ? "" : tail
-  ).trim();
+  return truncatePlatformText(candidate, 100);
 }
 
 function transcriptSummary(input: PlatformCopyContext, keywords: string[]): string {
@@ -206,34 +243,31 @@ function platformHashtags(
     return [];
   }
   const preset = PLATFORM_PRESETS[platform];
-  const platformTags =
-    platform === "instagram_reels" || platform === "facebook_reels"
-      ? ["#Reels"]
-      : [];
   const topical = [...keywords, streamerName ?? ""]
     .map(keywordToHashtag)
     .filter(Boolean);
-  const usefulFallbacks = ["#LiveStream", "#Highlights"];
-  const max = preset.hashtagRange?.max ?? (platform === "x" ? 2 : 5);
-  const min = preset.hashtagRange?.min ?? 0;
-  const result = uniqueByLowercase([...platformTags, ...topical]).slice(0, max);
-  for (const fallback of usefulFallbacks) {
-    if (result.length >= min || result.length >= max) break;
-    if (!result.some((tag) => tag.toLocaleLowerCase() === fallback.toLocaleLowerCase())) {
-      result.push(fallback);
-    }
-  }
+  const max = preset.hashtagRange?.max ?? 5;
+  // Fewer grounded tags beat padding the post with generic #Reels/#Highlights.
+  const result = uniqueByLowercase(topical).slice(0, max);
   return result.slice(0, max);
 }
 
 function mergeCaptionWithHashtags(caption: string, hashtags: string[], limit: number): string {
   const tags = hashtags.join(" ").trim();
-  if (!tags) return caption.slice(0, limit).trim();
+  if (!tags) return truncatePlatformText(caption, limit);
   if (caption.toLocaleLowerCase().includes(tags.toLocaleLowerCase())) {
-    return caption.slice(0, limit).trim();
+    return truncatePlatformText(caption, limit);
   }
-  const joined = `${caption} ${tags}`.replace(/\s+/g, " ").trim();
-  return joined.slice(0, limit).trim();
+  const fittingTags: string[] = [];
+  for (const tag of hashtags) {
+    const next = [...fittingTags, tag].join(" ");
+    if (next.length >= limit) break;
+    fittingTags.push(tag);
+  }
+  const suffix = fittingTags.join(" ");
+  const captionLimit = Math.max(0, limit - (suffix ? suffix.length + 1 : 0));
+  const body = truncatePlatformText(caption, captionLimit);
+  return [body, suffix].filter(Boolean).join(" ").trim();
 }
 
 /** Strong deterministic copy used immediately and whenever AI is unavailable. */
@@ -241,7 +275,7 @@ export function buildFallbackPlatformCopy(input: PlatformCopyContext): PlatformC
   const preset = PLATFORM_PRESETS[input.platform];
   const keywords = extractPublishingKeywords(input);
   const fullTitle = publishableTitle(input);
-  const title = fullTitle.slice(0, preset.titleLimit ?? 100).trim();
+  const title = truncatePlatformText(fullTitle, preset.titleLimit ?? 100);
   const summary = transcriptSummary(input, keywords);
   const hashtags = platformHashtags(input.platform, keywords, input.streamerName);
   const creatorContext = input.streamerName?.trim()

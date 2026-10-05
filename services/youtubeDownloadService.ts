@@ -206,14 +206,16 @@ export interface YoutubeCaptureStrategy {
     | "live-hls"
     | "tv"
     | "public-default"
-    | "public-no-cookie";
+    | "public-hls"
+    | "public-tv"
+    | "public-vr";
   extractorArgs: string | null;
   includeCookies: boolean;
 }
 
 /**
- * Ordered YouTube clients. Prefer cookie-backed clients first; fall back to
- * public android/tv clients that often work when cookies are rotated/invalid.
+ * Ordered YouTube clients. Callers can reorder these to try independent
+ * public routes before authenticated capture.
  */
 export function getYoutubeCaptureStrategies(): YoutubeCaptureStrategy[] {
   const configuredClient = process.env.YT_DLP_YOUTUBE_CLIENT?.trim();
@@ -249,17 +251,28 @@ export function getYoutubeCaptureStrategies(): YoutubeCaptureStrategy[] {
       includeCookies: true,
     },
     // Cookie-backed clients can hide HD formats on otherwise public videos.
-    // Retry the normal client set without cookies before the Android fallback.
+    // Retry the normal client set without cookies.
     {
       id: "public-default",
       extractorArgs: null,
       includeCookies: false,
     },
-    // Invalid/rotated cookies commonly poison web clients with CDN 403s.
-    // Plain android (no cookies) works; android_vr alone often 403s without a PO token.
+    // Public clients that currently avoid a GVS PO-token requirement. Keep
+    // these separate so a challenged Railway IP or stale account cookie can
+    // be escaped without making an authenticated request.
     {
-      id: "public-no-cookie",
-      extractorArgs: "player_client=android",
+      id: "public-hls",
+      extractorArgs: "player_client=web_safari",
+      includeCookies: false,
+    },
+    {
+      id: "public-tv",
+      extractorArgs: "player_client=tv_simply",
+      includeCookies: false,
+    },
+    {
+      id: "public-vr",
+      extractorArgs: "player_client=android_vr",
       includeCookies: false,
     },
   ];
@@ -271,6 +284,65 @@ export function getYoutubeCaptureStrategies(): YoutubeCaptureStrategy[] {
     seen.add(key);
     return true;
   });
+}
+
+/**
+ * Put the independent public routes first for time-bounded clip downloads.
+ * Callers that do not opt in keep the configured authenticated route first.
+ */
+export function orderYoutubeCaptureStrategies(
+  strategies: YoutubeCaptureStrategy[],
+  preferPublicClients = false
+): YoutubeCaptureStrategy[] {
+  if (!preferPublicClients) return [...strategies];
+
+  const priority: YoutubeCaptureStrategy["id"][] = [
+    "public-default",
+    "public-hls",
+    "public-tv",
+    "public-vr",
+    "configured",
+    "default",
+    "provider",
+    "live-hls",
+    "tv",
+  ];
+  const rank = new Map(priority.map((id, index) => [id, index]));
+  return [...strategies].sort(
+    (left, right) =>
+      (rank.get(left.id) ?? priority.length) -
+      (rank.get(right.id) ?? priority.length)
+  );
+}
+
+export interface YoutubeCaptureAttempt {
+  strategy: YoutubeCaptureStrategy;
+  format: string;
+}
+
+/**
+ * Rotate across clients before trying the next format. A CDN 403 can make a
+ * single format/client pair spend its entire retry window; round-robin keeps
+ * that pair from preventing the remaining independent routes from running.
+ */
+export function buildYoutubeCaptureAttemptPlan(
+  strategies: YoutubeCaptureStrategy[],
+  formats: string[],
+  maxAttemptsPerStrategy?: number
+): YoutubeCaptureAttempt[] {
+  const formatLimit = Math.min(
+    formats.length,
+    maxAttemptsPerStrategy == null
+      ? formats.length
+      : Math.max(0, maxAttemptsPerStrategy)
+  );
+  const attempts: YoutubeCaptureAttempt[] = [];
+  for (let formatIndex = 0; formatIndex < formatLimit; formatIndex += 1) {
+    for (const strategy of strategies) {
+      attempts.push({ strategy, format: formats[formatIndex]! });
+    }
+  }
+  return attempts;
 }
 
 export function isYoutubePoTokenError(error: unknown): boolean {
@@ -705,7 +777,7 @@ export function formatYtDlpUserError(error: unknown): string {
     case "po_token_unavailable":
       return "YouTube did not return a playable format to this server. Clipper tried its token provider and fallback clients; retry shortly or upload the authorized VOD.";
     case "bot_verification":
-      return "YouTube blocked direct capture from this server. Refresh the Railway YouTube cookies or upload the VOD instead.";
+      return "YouTube challenged this server's network after Clipper tried authenticated, cookieless, HLS, TV, and token-backed capture routes. Retry shortly; if it continues, use a clean Railway egress proxy or upload the authorized VOD.";
     case "private_video":
       return "This video is private. Use cookies from an account authorized to view it, or upload the VOD.";
     case "members_only":
@@ -869,7 +941,7 @@ async function runYtDlpWithFormatFallback(
     attemptTimeoutMs?: number;
     maxAttempts?: number;
     retriesPerFormat?: number;
-    preferDefaultClient?: boolean;
+    preferPublicClients?: boolean;
     minVideoHeight?: number;
     onProgress?: (progress: number) => void;
     onAttempt?: (attempt: number) => void;
@@ -885,112 +957,104 @@ async function runYtDlpWithFormatFallback(
       ? getYoutubeCaptureStrategies()
       : [{ id: "configured", extractorArgs: null, includeCookies: true } as const];
   const strategies =
-    platform === "youtube" && options?.preferDefaultClient
-      ? [
-          ...availableStrategies.filter((strategy) => strategy.id === "public-default"),
-          ...availableStrategies.filter(
-            (strategy) => strategy.extractorArgs === null && strategy.id !== "public-default"
-          ),
-          ...availableStrategies.filter(
-            (strategy) => strategy.extractorArgs !== null
-          ),
-        ]
+    platform === "youtube"
+      ? orderYoutubeCaptureStrategies(
+          availableStrategies,
+          options?.preferPublicClients
+        )
       : availableStrategies;
+  const attemptPlan = buildYoutubeCaptureAttemptPlan(
+    strategies,
+    formats,
+    options?.maxAttempts
+  );
+  const exhaustedStrategies = new Set<YoutubeCaptureStrategy["id"]>();
   let totalAttempts = 0;
 
-  for (const strategy of strategies) {
-    let strategyAttempts = 0;
-    for (const format of formats) {
-      if (
-        options?.maxAttempts &&
-        strategyAttempts >= options.maxAttempts
-      ) {
-        break;
-      }
-      const remainingMs = deadline ? deadline - Date.now() : undefined;
-      if (remainingMs !== undefined && remainingMs <= 0) {
-        throw new Error("yt-dlp source download timed out");
-      }
-      strategyAttempts += 1;
-      totalAttempts += 1;
-      options?.onAttempt?.(totalAttempts);
-      const args = withYoutubeExtractorArgs(
-        baseArgs,
-        platform === "youtube" ? strategy.extractorArgs : undefined
-      );
-      const formatIdx = args.indexOf("-f");
-      if (formatIdx >= 0) {
-        args[formatIdx + 1] = format;
+  for (const { strategy, format } of attemptPlan) {
+    if (exhaustedStrategies.has(strategy.id)) continue;
+    const remainingMs = deadline ? deadline - Date.now() : undefined;
+    if (remainingMs !== undefined && remainingMs <= 0) {
+      throw new Error("yt-dlp source download timed out");
+    }
+    totalAttempts += 1;
+    options?.onAttempt?.(totalAttempts);
+    const args = withYoutubeExtractorArgs(
+      baseArgs,
+      platform === "youtube" ? strategy.extractorArgs : undefined
+    );
+    const formatIdx = args.indexOf("-f");
+    if (formatIdx >= 0) {
+      args[formatIdx + 1] = format;
+    } else {
+      args.unshift("-f", format);
+    }
+
+    if (format.includes("+") && !args.includes("--merge-output-format")) {
+      const oIdx = args.indexOf("-o");
+      if (oIdx >= 0) {
+        args.splice(oIdx, 0, "--merge-output-format", "mp4");
       } else {
-        args.unshift("-f", format);
+        args.push("--merge-output-format", "mp4");
       }
+    }
 
-      if (format.includes("+") && !args.includes("--merge-output-format")) {
-        const oIdx = args.indexOf("-o");
-        if (oIdx >= 0) {
-          args.splice(oIdx, 0, "--merge-output-format", "mp4");
-        } else {
-          args.push("--merge-output-format", "mp4");
-        }
+    const outputIndex = args.indexOf("-o");
+    const outputPath = outputIndex >= 0 ? args[outputIndex + 1] : undefined;
+    if (outputPath) await fs.unlink(outputPath).catch(() => {});
+
+    const attemptTimeoutMs = options?.attemptTimeoutMs
+      ? Math.min(
+          options.attemptTimeoutMs,
+          remainingMs ?? options.attemptTimeoutMs
+        )
+      : remainingMs;
+
+    try {
+      await runYtDlp(args, url, {
+        platform,
+        includeCookies: strategy.includeCookies,
+        retries: options?.retriesPerFormat,
+        timeoutMs: attemptTimeoutMs,
+        onOutputLine: (line) => {
+          const progress = parseYtDlpProgress(line);
+          if (progress != null) options?.onProgress?.(progress);
+        },
+      });
+      if (outputPath && !(await canDecodeVideoFrame(outputPath))) {
+        await fs.unlink(outputPath).catch(() => {});
+        throw new Error(
+          `yt-dlp produced video that FFmpeg could not decode for format ${format}`
+        );
       }
-
-      const outputIndex = args.indexOf("-o");
-      const outputPath = outputIndex >= 0 ? args[outputIndex + 1] : undefined;
-      if (outputPath) await fs.unlink(outputPath).catch(() => {});
-
-      const attemptTimeoutMs = options?.attemptTimeoutMs
-        ? Math.min(
-            options.attemptTimeoutMs,
-            remainingMs ?? options.attemptTimeoutMs
-          )
-        : remainingMs;
-
-      try {
-        await runYtDlp(args, url, {
-          platform,
-          includeCookies: strategy.includeCookies,
-          retries: options?.retriesPerFormat,
-          timeoutMs: attemptTimeoutMs,
-          onOutputLine: (line) => {
-            const progress = parseYtDlpProgress(line);
-            if (progress != null) options?.onProgress?.(progress);
-          },
-        });
-        if (outputPath && !(await canDecodeVideoFrame(outputPath))) {
+      if (outputPath && options?.minVideoHeight) {
+        const probe = await probeMedia(outputPath);
+        if ((probe.height ?? 0) < options.minVideoHeight) {
           await fs.unlink(outputPath).catch(() => {});
           throw new Error(
-            `yt-dlp produced video that FFmpeg could not decode for format ${format}`
+            `yt-dlp returned ${probe.width}x${probe.height} for format ${format}; need at least ${options.minVideoHeight}p`
           );
         }
-        if (outputPath && options?.minVideoHeight) {
-          const probe = await probeMedia(outputPath);
-          if ((probe.height ?? 0) < options.minVideoHeight) {
-            await fs.unlink(outputPath).catch(() => {});
-            throw new Error(
-              `yt-dlp returned ${probe.width}x${probe.height} for format ${format}; need at least ${options.minVideoHeight}p`
-            );
-          }
-        }
-        return;
-      } catch (err) {
-        lastError = err instanceof Error ? err : new Error(String(err));
-        // Format swaps cannot repair extractor/auth failures. Move to the next
-        // player client immediately so stale cookies do not consume the whole
-        // source-preparation deadline before public fallbacks are attempted.
-        // CDN 403s are often format-specific (e.g. progressive "best"), so keep
-        // trying other formats before moving to the next player client.
-        const errorKind = classifyYtDlpError(lastError);
-        if (
-          platform === "youtube" &&
-          (errorKind === "po_token_unavailable" ||
-            errorKind === "bot_verification" ||
-            errorKind === "private_video" ||
-            errorKind === "members_only" ||
-            errorKind === "age_restricted" ||
-            errorKind === "unavailable")
-        ) {
-          break;
-        }
+      }
+      return;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      // Format swaps cannot repair extractor/auth failures. Move to the next
+      // player client immediately so stale cookies do not consume the whole
+      // source-preparation deadline before public fallbacks are attempted.
+      // CDN 403s can be format-specific, so keep this strategy eligible for
+      // later format rounds after the other clients receive their first try.
+      const errorKind = classifyYtDlpError(lastError);
+      if (
+        platform === "youtube" &&
+        (errorKind === "po_token_unavailable" ||
+          errorKind === "bot_verification" ||
+          errorKind === "private_video" ||
+          errorKind === "members_only" ||
+          errorKind === "age_restricted" ||
+          errorKind === "unavailable")
+      ) {
+        exhaustedStrategies.add(strategy.id);
       }
     }
   }
@@ -1176,7 +1240,7 @@ export async function downloadSourceFromYouTube(streamSessionId: string) {
       attemptTimeoutMs: Math.min(3 * 60_000, timeoutMs),
       maxAttempts: 6,
       retriesPerFormat: 1,
-      preferDefaultClient: agentPrep,
+      preferPublicClients: platform === "youtube",
     }
   );
 
@@ -1298,7 +1362,7 @@ export async function downloadClipSegmentFromStream(
         // Allow enough format×client attempts to escape a 360p-only client.
         maxAttempts: options?.timeoutMs ? 8 : undefined,
         retriesPerFormat: options?.timeoutMs ? 1 : undefined,
-        preferDefaultClient: true,
+        preferPublicClients: true,
         minVideoHeight,
         onProgress: options?.onProgress,
         onAttempt: options?.onAttempt,

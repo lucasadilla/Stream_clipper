@@ -82,6 +82,7 @@ export interface RankedPlatformPackage {
 
 const GENERIC = /\b(?:insane|crazy|epic|unbelievable|must watch|you won'?t believe|viral|stream clip|gaming moment|check out this clip)\b/i;
 const FILLER_DESCRIPTION = /\b(?:don'?t forget to (?:like|follow|subscribe)|smash the|check out this crazy)\b/i;
+const INCOMPLETE_ENDING = /\b(?:a|an|and|as|at|because|but|by|for|from|if|in|into|of|on|or|so|than|that|the|then|to|when|while|with|without)[.!?]?$/i;
 
 function normalize(value: string): string {
   return value
@@ -120,7 +121,8 @@ export function evidenceIsGrounded(
 export function packagingWarnings(
   candidate: PlatformPackagingCandidate,
   copy: PlatformCopy,
-  sourceContext: string
+  sourceContext: string,
+  options: { importantEntities?: string[] } = {}
 ): string[] {
   const primary = copy.title ?? copy.caption ?? copy.postText ?? "";
   const sourceWords = new Set(meaningfulWords(sourceContext));
@@ -143,19 +145,38 @@ export function packagingWarnings(
   if (/^[A-Z\d\W]+$/.test(primary) && /[A-Z]/.test(primary)) {
     warnings.push("Primary copy uses excessive capitalization.");
   }
+  if (INCOMPLETE_ENDING.test(primary.trim()) || /(?:^|\s)\p{L}$/u.test(primary.trim())) {
+    warnings.push("Primary copy appears cut off or grammatically incomplete.");
+  }
+  const important = (options.importantEntities ?? []).slice(0, 3)
+    .map((entity) => normalize(entity))
+    .filter((entity) => entity.length >= 3);
+  if (
+    important.length > 0 &&
+    !important.some((entity) => normalize(primary).includes(entity))
+  ) {
+    warnings.push("Primary copy omits the strongest verified person or topic.");
+  }
   return warnings;
 }
 
 export function rankPlatformPackagingCandidate(
   candidate: PlatformPackagingCandidate,
   copy: PlatformCopy,
-  sourceContext: string
+  sourceContext: string,
+  options: { importantEntities?: string[] } = {}
 ): { rankScore: number; warnings: string[] } {
-  const warnings = packagingWarnings(candidate, copy, sourceContext);
+  const warnings = packagingWarnings(candidate, copy, sourceContext, options);
   const groundingPenalty = warnings.some((warning) => warning.startsWith("No exact"))
     ? 45
     : 0;
-  const spamPenalty = warnings.length * 5;
+  const incompletePenalty = warnings.some((warning) => warning.includes("cut off"))
+    ? 30
+    : 0;
+  const entityPenalty = warnings.some((warning) => warning.includes("verified person"))
+    ? 10
+    : 0;
+  const spamPenalty = warnings.length * 4;
   const rankScore = clampScore(
     candidate.specificity * 0.2 +
       candidate.curiosity * 0.12 +
@@ -167,6 +188,8 @@ export function rankPlatformPackagingCandidate(
       candidate.spoilerRisk * 0.05 -
       candidate.clickbaitRisk * 0.14 -
       groundingPenalty -
+      incompletePenalty -
+      entityPenalty -
       spamPenalty +
       12
   );

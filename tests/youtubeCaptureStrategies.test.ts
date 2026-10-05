@@ -2,10 +2,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import fs from "fs/promises";
 import {
   acquireYtDlpDeploymentLease,
+  buildYoutubeCaptureAttemptPlan,
   classifyYtDlpError,
+  formatYtDlpUserError,
   getYoutubeCaptureStrategies,
   getYoutubeCookieStatus,
   isYoutubePoTokenError,
+  orderYoutubeCaptureStrategies,
   preferredBestAudio,
   renderSourceFormatChains,
   renderSourceFormatSort,
@@ -40,7 +43,7 @@ afterEach(() => {
 });
 
 describe("YouTube capture strategies", () => {
-  it("falls back from mweb token capture to live and no-cookie clients", () => {
+  it("falls back from mweb token capture to current cookieless clients", () => {
     process.env.YT_DLP_YOUTUBE_CLIENT = "mweb";
 
     const strategies = getYoutubeCaptureStrategies();
@@ -54,12 +57,47 @@ describe("YouTube capture strategies", () => {
         expect.objectContaining({ id: "default", extractorArgs: null }),
         expect.objectContaining({ id: "public-default", extractorArgs: null, includeCookies: false }),
         expect.objectContaining({ extractorArgs: "player_client=web_safari" }),
-        expect.objectContaining({
-          extractorArgs: "player_client=android",
-          includeCookies: false,
-        }),
+        expect.objectContaining({ id: "public-hls", extractorArgs: "player_client=web_safari", includeCookies: false }),
+        expect.objectContaining({ id: "public-tv", extractorArgs: "player_client=tv_simply", includeCookies: false }),
+        expect.objectContaining({ id: "public-vr", extractorArgs: "player_client=android_vr", includeCookies: false }),
       ])
     );
+  });
+
+  it("tries every independent client before spending time on a second format", () => {
+    process.env.YT_DLP_YOUTUBE_CLIENT = "mweb";
+    const strategies = orderYoutubeCaptureStrategies(
+      getYoutubeCaptureStrategies(),
+      true
+    );
+    const plan = buildYoutubeCaptureAttemptPlan(
+      strategies,
+      ["primary", "fallback"],
+      2
+    );
+
+    expect(strategies.slice(0, 4).map((strategy) => strategy.id)).toEqual([
+      "public-default",
+      "public-hls",
+      "public-tv",
+      "public-vr",
+    ]);
+    expect(plan.slice(0, strategies.length).map((attempt) => attempt.format)).toEqual(
+      Array(strategies.length).fill("primary")
+    );
+    expect(
+      plan.slice(0, strategies.length).map((attempt) => attempt.strategy.id)
+    ).toEqual(strategies.map((strategy) => strategy.id));
+  });
+
+  it("does not incorrectly tell users that cookies are the only bot-block fix", () => {
+    const message = formatYtDlpUserError(
+      new Error("ERROR: Sign in to confirm you're not a bot")
+    );
+
+    expect(message).toContain("cookieless");
+    expect(message).toContain("egress proxy");
+    expect(message).not.toContain("Refresh the Railway YouTube cookies");
   });
 
   it("deduplicates the configured provider strategy", () => {

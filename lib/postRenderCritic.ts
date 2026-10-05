@@ -16,6 +16,9 @@ export const renderQualityIssueSchema = z.object({
   title: z.string().trim().min(1).max(100),
   evidence: z.string().trim().min(1).max(320),
   recommendation: z.string().trim().min(1).max(320),
+  repairAction: z
+    .enum(["center_subject", "follow_speaker", "widen_context", "none"])
+    .optional(),
 });
 
 export const renderQualityScoresSchema = z.object({
@@ -101,11 +104,13 @@ export function buildCriticSampleTimes(
   if (durationSeconds < 0.5) return [Math.max(0, durationSeconds / 2)];
 
   const edge = Math.min(0.35, durationSeconds * 0.08);
+  const interiorSlots = Math.max(1, maxSamples - 2);
   const baseline = [
     edge,
-    durationSeconds * 0.2,
-    durationSeconds * 0.5,
-    durationSeconds * 0.8,
+    ...Array.from(
+      { length: interiorSlots },
+      (_, index) => (durationSeconds * (index + 1)) / (interiorSlots + 1)
+    ),
     durationSeconds - edge,
   ];
   const cutFrames = cutTimes.flatMap((time) => [time - 0.08, time + 0.08]);

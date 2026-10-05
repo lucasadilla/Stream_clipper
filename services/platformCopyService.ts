@@ -4,7 +4,9 @@ import { getHookEnginePolicy } from "@/lib/aiModelPolicy";
 import { prisma } from "@/lib/db";
 import {
   buildFallbackPlatformCopy,
+  extractPublishingKeywords,
   stripInternalClipCopy,
+  truncatePlatformText,
 } from "@/lib/platformCopyDefaults";
 import { PLATFORM_PRESETS } from "@/lib/platforms/presets";
 import type { PlatformCopy, PlatformKey } from "@/lib/platforms/types";
@@ -16,9 +18,10 @@ import {
   type RankedPlatformPackage,
 } from "@/lib/packagingIntelligence";
 import { getTranscriptChunksForRange } from "@/services/transcriptService";
+import { readSpeakerContext } from "@/services/speakerContextService";
 
 const platformPackagingResponseSchema = z.object({
-  candidates: z.array(platformPackagingCandidateSchema).min(3).max(20),
+  candidates: z.array(platformPackagingCandidateSchema).min(8).max(20),
 });
 
 export interface GeneratePlatformCopyInput {
@@ -28,7 +31,11 @@ export interface GeneratePlatformCopyInput {
   transcriptText: string;
   chatSignals?: string;
   streamTitle?: string | null;
+  streamDescription?: string | null;
   streamerName?: string | null;
+  visualContext?: string | null;
+  /** Verified from creator metadata or an explicitly named speaker identity. */
+  people?: string[];
   durationSeconds: number;
 }
 
@@ -59,11 +66,72 @@ function parseJson(content: string): unknown {
   return JSON.parse(cleaned);
 }
 
+function normalizedWords(value: string): string[] {
+  return value
+    .toLocaleLowerCase()
+    .replace(/^#+/, "")
+    .replace(/([a-z\d])([A-Z])/g, "$1 $2")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .split(/\s+/)
+    .filter((word) => word.length >= 2);
+}
+
+function groundedHashtags(
+  values: string[],
+  input: GeneratePlatformCopyInput,
+  maximum: number
+): string[] {
+  const source = [
+    input.clipTitle,
+    input.clipReason,
+    input.transcriptText,
+    input.streamTitle,
+    input.streamDescription,
+    input.streamerName,
+    input.visualContext,
+    ...(input.people ?? []),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLocaleLowerCase();
+  const compactSource = source.replace(/[^\p{L}\p{N}]+/gu, "");
+  const accepted: string[] = [];
+
+  for (const value of values) {
+    const tag = cleanHashtag(value);
+    if (!tag) continue;
+    const compact = tag.slice(1).toLocaleLowerCase();
+    const words = normalizedWords(tag);
+    const supported =
+      compact.length >= 3 &&
+      (compactSource.includes(compact) ||
+        (words.length > 0 && words.every((word) => source.includes(word))));
+    if (!supported) continue;
+    const nearDuplicate = accepted.some((existing) => {
+      const left = existing.slice(1).toLocaleLowerCase();
+      return left === compact || left.includes(compact) || compact.includes(left);
+    });
+    if (!nearDuplicate) accepted.push(tag);
+    if (accepted.length >= maximum) break;
+  }
+  return accepted;
+}
+
+function verifiedEntities(input: GeneratePlatformCopyInput): string[] {
+  return [...new Set([
+    ...(input.people ?? []),
+    ...(input.streamerName?.trim() ? [input.streamerName.trim()] : []),
+    ...extractPublishingKeywords(input).slice(0, 8),
+  ].map((value) => value.trim()).filter((value) => value.length >= 2))];
+}
+
 function normalizeCopy(
   raw: PlatformPackagingCandidate,
   fallback: PlatformCopy,
-  platform: PlatformKey
+  input: GeneratePlatformCopyInput
 ): PlatformCopy {
+  const platform = input.platform;
   const preset = PLATFORM_PRESETS[platform];
   const cleanText = (value: string | null | undefined, fallbackValue: string | null) => {
     const cleaned = value ? stripInternalClipCopy(value) : "";
@@ -76,10 +144,14 @@ function normalizeCopy(
     platform.startsWith("instagram") ||
     platform.startsWith("facebook");
 
-  const rawHashtags = [...new Set([...(raw.hashtags ?? []), ...fallback.hashtags]
-    .map(cleanHashtag)
-    .filter(Boolean))]
-    .slice(0, preset.hashtagRange?.hardMax ?? preset.hashtagRange?.max ?? 8);
+  const hashtagMaximum = preset.hashtagRange?.max ?? 5;
+  const rawHashtags = groundedHashtags(
+    // Canonical entities come first so a vague or compound AI tag cannot
+    // crowd out the verified person/game/topic tags.
+    [...fallback.hashtags, ...(raw.hashtags ?? [])],
+    input,
+    hashtagMaximum
+  );
   const rawTags = [...new Set([...(raw.tags ?? []), ...fallback.tags]
     .map(cleanKeyword)
     .filter(Boolean))]
@@ -88,39 +160,59 @@ function normalizeCopy(
   let caption =
     isX || isYouTube
       ? null
-      : cleanText(raw.caption, fallback.caption)?.slice(0, preset.captionLimit ?? 2200) ?? null;
+      : truncatePlatformText(
+          cleanText(raw.caption, fallback.caption) ?? "",
+          preset.captionLimit ?? 2200
+        ) || null;
   if (isMergedCaption && caption) {
     const tags = rawHashtags.join(" ").trim();
     if (tags && !caption.toLocaleLowerCase().includes(tags.toLocaleLowerCase())) {
-      caption = `${caption} ${tags}`.replace(/\s+/g, " ").trim().slice(0, preset.captionLimit ?? 2200);
+      const limit = preset.captionLimit ?? 2200;
+      caption = `${truncatePlatformText(caption, Math.max(1, limit - tags.length - 1))} ${tags}`.trim();
     }
   }
 
   let postText = isX
-    ? cleanText(raw.postText, fallback.postText)?.slice(0, preset.postTextLimit ?? 280) ?? null
+    ? truncatePlatformText(
+        cleanText(raw.postText, fallback.postText) ?? "",
+        preset.postTextLimit ?? 280
+      ) || null
     : null;
   if (isX && postText) {
     const tags = rawHashtags.join(" ").trim();
     if (tags && !postText.toLocaleLowerCase().includes(tags.toLocaleLowerCase())) {
-      postText = `${postText} ${tags}`.replace(/\s+/g, " ").trim().slice(0, preset.postTextLimit ?? 280);
+      const limit = preset.postTextLimit ?? 280;
+      postText = `${truncatePlatformText(postText, Math.max(1, limit - tags.length - 1))} ${tags}`.trim();
     }
   }
 
   return {
     title: isYouTube
-      ? cleanText(raw.title, fallback.title)?.slice(0, preset.titleLimit ?? 100) ?? null
+      ? truncatePlatformText(
+          cleanText(raw.title, fallback.title) ?? "",
+          preset.titleLimit ?? 100
+        ) || null
       : null,
     caption,
     postText,
     description: isYouTube
-      ? cleanText(raw.description, fallback.description)?.slice(0, 5000) ?? null
+      ? truncatePlatformText(
+          cleanText(raw.description, fallback.description) ?? "",
+          5000
+        ) || null
       : null,
     hashtags: rawHashtags,
     tags: isYouTube ? rawTags : [],
-    quoteText: cleanText(raw.quoteText, fallback.quoteText)?.slice(0, 180) ?? null,
+    quoteText: truncatePlatformText(
+      cleanText(raw.quoteText, fallback.quoteText) ?? "",
+      180
+    ) || null,
     thumbnailText: null,
     pinnedComment: isYouTube
-      ? cleanText(raw.pinnedComment, fallback.pinnedComment)?.slice(0, 500) ?? null
+      ? truncatePlatformText(
+          cleanText(raw.pinnedComment, fallback.pinnedComment) ?? "",
+          500
+        ) || null
       : null,
   };
 }
@@ -132,7 +224,10 @@ function sourceContext(input: GeneratePlatformCopyInput): string {
     input.transcriptText,
     input.chatSignals,
     input.streamTitle,
+    input.streamDescription,
     input.streamerName,
+    input.visualContext,
+    ...(input.people ?? []),
   ]
     .filter(Boolean)
     .join(" ");
@@ -171,7 +266,8 @@ export async function generatePlatformCopyPackage(
   const localRank = rankPlatformPackagingCandidate(
     localCandidate,
     fallback,
-    context
+    context,
+    { importantEntities: verifiedEntities(input) }
   );
   const localPackage = (): RankedPlatformPackage => ({
     copy: fallback,
@@ -195,7 +291,8 @@ export async function generatePlatformCopyPackage(
   if (!hasAnyAiKey()) return localPackage();
 
   const preset = PLATFORM_PRESETS[input.platform];
-  const prompt = `Generate 8-12 distinct, ready-to-publish packages for ${preset.name}, then let application code rank them. Each option must sound native to the platform, specific to this exact clip, and human.
+  const entities = verifiedEntities(input);
+  const prompt = `Generate 12-16 distinct, ready-to-publish packages for ${preset.name}, then let application code rank them. Each option must sound native to the platform, specific to this exact clip, and human.
 
 Limits:
 - title: ${preset.titleLimit ?? 100} characters maximum when used
@@ -206,6 +303,8 @@ Limits:
 Editorial requirements:
 - Lead with the strongest truthful hook or payoff; never expose producer notes, timestamps, scoring, or phrases such as "Short candidate".
 - Use searchable proper names, people, games, shows, products, teams, events, or pop-culture topics when they are supported by the transcript or source metadata.
+- The verified people/entities below are identity evidence from creator metadata, explicit speaker labels, titles, or transcript text. Use the central name early when it makes the clip clearer or more searchable. Never identify a person from appearance.
+- Every title and first caption line must be a complete thought. Never end on an article, conjunction, preposition, or visibly cut-off word.
 - Never invent a name, keyword, quote, outcome, or controversy.
 - Make the title/caption worth clicking without vague clickbait.
 - Vary strategies across specific_fact, curiosity, result, conflict, quote, unexpected_outcome, challenge, explanation, and reaction.
@@ -220,7 +319,10 @@ Editorial requirements:
 Grounded working title: ${fallback.title}
 Why it matters: ${stripInternalClipCopy(input.clipReason) || fallback.description || fallback.caption || "Use the transcript context"}
 Stream: ${input.streamTitle ?? "Unknown"}
+Stream context: ${(input.streamDescription ?? "Unknown").slice(0, 1000)}
 Creator: ${input.streamerName ?? "Unknown"}
+Verified people/entities: ${entities.length ? entities.join(" | ") : "None"}
+Verified visual context: ${(input.visualContext ?? "Unavailable").slice(0, 2200)}
 Duration: ${Math.round(input.durationSeconds)} seconds
 Transcript: ${input.transcriptText.slice(0, 7000) || "Unavailable"}
 Chat signals: ${(input.chatSignals ?? "Unavailable").slice(0, 1200)}
@@ -253,11 +355,12 @@ Use null when a field is irrelevant.`;
     const parsed = platformPackagingResponseSchema.parse(parseJson(content));
     const ranked = [
       ...parsed.candidates.map((candidate) => {
-        const copy = normalizeCopy(candidate, fallback, input.platform);
+        const copy = normalizeCopy(candidate, fallback, input);
         const quality = rankPlatformPackagingCandidate(
           candidate,
           copy,
-          context
+          context,
+          { importantEntities: entities }
         );
         return { candidate, copy, ...quality };
       }),
@@ -314,13 +417,13 @@ export async function generatePlatformCopiesForClip(
     where: { id: clipSuggestionId },
     include: {
       streamSession: {
-        select: { title: true, channelTitle: true },
+        select: { title: true, description: true, channelTitle: true },
       },
     },
   });
   if (!clip) throw new Error("Clip not found");
 
-  const [transcriptChunks, chatWindows] = await Promise.all([
+  const [transcriptChunks, chatWindows, speakerContext] = await Promise.all([
     getTranscriptChunksForRange(
       clip.streamSessionId,
       clip.startTimeSeconds,
@@ -337,6 +440,7 @@ export async function generatePlatformCopiesForClip(
       take: 5,
       select: { summary: true },
     }),
+    readSpeakerContext(clip.streamSessionId).catch(() => null),
   ]);
   const transcriptText = transcriptChunks
     .filter((chunk) => !/^\[(silence|processing error)\]$/i.test(chunk.text.trim()))
@@ -350,7 +454,31 @@ export async function generatePlatformCopiesForClip(
     transcriptText,
     chatSignals: chatWindows.map((item) => item.summary).filter(Boolean).join(" | "),
     streamTitle: clip.streamSession.title,
+    streamDescription: clip.streamSession.description,
     streamerName: clip.streamSession.channelTitle,
+    visualContext:
+      clip.rawAiJson && typeof clip.rawAiJson === "object"
+        ? JSON.stringify(
+            (clip.rawAiJson as Record<string, unknown>).visualContext ??
+              (clip.rawAiJson as Record<string, unknown>).hookDNA ??
+              ""
+          ).slice(0, 2400)
+        : null,
+    people: speakerContext
+      ? speakerContext.speakers
+          .filter(
+            (speaker) =>
+              Boolean(speaker.displayName?.trim()) &&
+              speaker.confidence >= 0.7 &&
+              speakerContext.intervals.some(
+                (interval) =>
+                  interval.speakerIds.includes(speaker.id) &&
+                  interval.endTimeSeconds >= clip.startTimeSeconds &&
+                  interval.startTimeSeconds <= clip.endTimeSeconds
+              )
+          )
+          .map((speaker) => speaker.displayName!.trim())
+      : [],
     durationSeconds: clip.endTimeSeconds - clip.startTimeSeconds,
   };
   const uniquePlatforms = [...new Set(platforms)];

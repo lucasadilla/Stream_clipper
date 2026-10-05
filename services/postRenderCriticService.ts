@@ -24,6 +24,7 @@ interface CriticRenderParams {
   format?: "vertical" | "native";
   includeCaptions?: boolean;
   editorState?: unknown;
+  preview?: boolean;
 }
 
 interface TimedTranscriptLine {
@@ -198,7 +199,7 @@ async function extractReviewFrames(
     for (let index = 0; index < sampleTimes.length; index += 1) {
       const output = path.join(tempDir, `sample-${String(index).padStart(2, "0")}.jpg`);
       try {
-        await extractSoloTimelineFrame(outputPath, output, sampleTimes[index]!, 420, 6);
+        await extractSoloTimelineFrame(outputPath, output, sampleTimes[index]!, 720, 3);
         const bytes = await fs.readFile(output);
         frames.push({
           timeSeconds: sampleTimes[index]!,
@@ -262,6 +263,7 @@ Important limits:
 - A cut issue may use an exact supplied cut time or the beginning/end of the transcript.
 - Use "critical" only when the export is clearly unsafe to publish. Use "warning" for polish improvements.
 - Issue category must be exactly one of: framing, captions, cuts, clarity, platform, audio.
+- For a framing issue, choose one conservative repairAction. center_subject is for an off-center or cut-off person, follow_speaker is for the wrong visible speaker, widen_context is for missing screen/gameplay/object context, and none is for issues that cannot be repaired safely.
 - Do not report an audio issue from still frames. Audio presence is checked separately.
 
 Return JSON only:
@@ -280,7 +282,8 @@ Return JSON only:
     "timestampSeconds": 1.25,
     "title": "short issue title",
     "evidence": "what is visibly or textually wrong",
-    "recommendation": "specific edit to make"
+    "recommendation": "specific edit to make",
+    "repairAction": "center_subject"
   }],
   "strengths": ["specific thing that worked"]
 }
@@ -352,7 +355,11 @@ export async function reviewRenderedOutput(input: {
     audioCodec: probe.audioCodec,
     fileSizeBytes: stat.size,
     format: input.params.format ?? "vertical",
-    expectedDimensions: input.params.platformTarget ? platformRenderDimensions(input.params.platformTarget) : undefined,
+    expectedDimensions: input.params.preview
+      ? { width: probe.width, height: probe.height }
+      : input.params.platformTarget
+        ? platformRenderDimensions(input.params.platformTarget)
+        : undefined,
     expectsAudio: expectsAudio(input.params),
     expectsCaptions: input.params.includeCaptions !== false,
     sourceDimensions: input.sourceDimensions,
@@ -371,7 +378,7 @@ export async function reviewRenderedOutput(input: {
   const sampleTimes = buildCriticSampleTimes(
     duration,
     [...boundaries, ...(gameplayContext?.importantOutputTimes ?? [])],
-    8
+    Math.min(12, Math.max(6, Math.ceil(duration) + 2))
   );
   const frames = await extractReviewFrames(input.outputPath, sampleTimes);
   if (frames.length === 0) {
@@ -400,12 +407,12 @@ export async function reviewRenderedOutput(input: {
     });
     const content: Array<
       | { type: "text"; text: string }
-      | { type: "image_url"; image_url: { url: string; detail: "low" } }
+      | { type: "image_url"; image_url: { url: string; detail: "high" } }
     > = [{ type: "text", text: prompt }];
     for (const frame of frames) {
       content.push({
         type: "image_url",
-        image_url: { url: frame.dataUrl, detail: "low" },
+        image_url: { url: frame.dataUrl, detail: "high" },
       });
     }
 

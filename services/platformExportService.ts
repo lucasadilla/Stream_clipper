@@ -31,6 +31,7 @@ import { getTranscriptChunksForRange } from "@/services/transcriptService";
 import { getLatestCompletedFinalRenderJob } from "@/services/renderSelectionService";
 import { parseRenderJobParams } from "@/services/renderService";
 import { assertDeliverableVideo } from "@/services/deliverableVideoService";
+import { readSpeakerContext } from "@/services/speakerContextService";
 
 const PLATFORM_WORKER_ID = `platform-${process.pid}-${randomUUID().slice(0, 8)}`;
 const STALE_EXPORT_MS = 15 * 60 * 1000;
@@ -115,14 +116,14 @@ async function buildCopyContext(platformExportId: string) {
     include: {
       clipSuggestion: true,
       streamSession: {
-        select: { title: true, channelTitle: true },
+        select: { title: true, description: true, channelTitle: true },
       },
     },
   });
   if (!platformExport) throw new Error("Platform export not found");
 
   const clip = platformExport.clipSuggestion;
-  const [transcriptChunks, chatWindows] = await Promise.all([
+  const [transcriptChunks, chatWindows, speakerContext] = await Promise.all([
     getTranscriptChunksForRange(
       platformExport.streamSessionId,
       clip.startTimeSeconds,
@@ -139,6 +140,7 @@ async function buildCopyContext(platformExportId: string) {
       take: 5,
       select: { summary: true },
     }),
+    readSpeakerContext(platformExport.streamSessionId).catch(() => null),
   ]);
 
   const transcriptText = transcriptChunks
@@ -157,7 +159,31 @@ async function buildCopyContext(platformExportId: string) {
       transcriptText,
       chatSignals: chatWindows.map((item) => item.summary).filter(Boolean).join(" | "),
       streamTitle: platformExport.streamSession.title,
+      streamDescription: platformExport.streamSession.description,
       streamerName: platformExport.streamSession.channelTitle,
+      visualContext:
+        clip.rawAiJson && typeof clip.rawAiJson === "object"
+          ? JSON.stringify(
+              (clip.rawAiJson as Record<string, unknown>).visualContext ??
+                (clip.rawAiJson as Record<string, unknown>).hookDNA ??
+                ""
+            ).slice(0, 2400)
+          : null,
+      people: speakerContext
+        ? speakerContext.speakers
+            .filter(
+              (speaker) =>
+                Boolean(speaker.displayName?.trim()) &&
+                speaker.confidence >= 0.7 &&
+                speakerContext.intervals.some(
+                  (interval) =>
+                    interval.speakerIds.includes(speaker.id) &&
+                    interval.endTimeSeconds >= clip.startTimeSeconds &&
+                    interval.startTimeSeconds <= clip.endTimeSeconds
+                )
+            )
+            .map((speaker) => speaker.displayName!.trim())
+        : [],
       durationSeconds: clip.endTimeSeconds - clip.startTimeSeconds,
     },
     transcriptChunks,

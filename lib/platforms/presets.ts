@@ -16,6 +16,7 @@ export const PLATFORM_PRESETS: Record<PlatformKey, PlatformPreset> = {
     recommendedDuration: { min: 15, max: 60 },
     hardDuration: { max: 180 },
     titleLimit: 100,
+    hashtagRange: { min: 0, max: 3 },
   },
   youtube_landscape: {
     key: "youtube_landscape",
@@ -23,6 +24,7 @@ export const PLATFORM_PRESETS: Record<PlatformKey, PlatformPreset> = {
     description: "Full-width YouTube highlight with SEO title, description, and tags.",
     outputs: [{ id: "landscape", label: "16:9", width: 1920, height: 1080, aspectRatio: "16:9" }],
     titleLimit: 100,
+    hashtagRange: { min: 0, max: 3 },
   },
   tiktok: {
     key: "tiktok",
@@ -32,7 +34,7 @@ export const PLATFORM_PRESETS: Record<PlatformKey, PlatformPreset> = {
     recommendedDuration: { min: 15, max: 45 },
     hardDuration: { min: 3, max: 600 },
     captionLimit: 2200,
-    hashtagRange: { min: 3, max: 8 },
+    hashtagRange: { min: 3, max: 6 },
   },
   instagram_reels: {
     key: "instagram_reels",
@@ -60,6 +62,7 @@ export const PLATFORM_PRESETS: Record<PlatformKey, PlatformPreset> = {
     description: "Vertical Reel with a broad-audience hook and clean caption.",
     outputs: [{ id: "vertical", label: "9:16", width: 1080, height: 1920, aspectRatio: "9:16" }],
     recommendedDuration: { min: 15, max: 90 },
+    hashtagRange: { min: 0, max: 5 },
   },
   facebook_feed: {
     key: "facebook_feed",
@@ -71,6 +74,7 @@ export const PLATFORM_PRESETS: Record<PlatformKey, PlatformPreset> = {
       { id: "square", label: "1:1", width: 1080, height: 1080, aspectRatio: "1:1" },
     ],
     maxFileSizeBytes: 4 * 1024 * MB,
+    hashtagRange: { min: 0, max: 5 },
   },
   x: {
     key: "x",

@@ -4,6 +4,7 @@ import {
   buildFallbackPlatformCopy,
   extractPublishingKeywords,
   stripInternalClipCopy,
+  truncatePlatformText,
 } from "@/lib/platformCopyDefaults";
 
 const context = {
@@ -62,6 +63,24 @@ describe("platform-ready fallback copy", () => {
     expect(keywords[0]).toBe("Taylor Swift");
     expect(keywords).not.toContain("Short");
     expect(stripInternalClipCopy(context.clipReason)).not.toMatch(/candidate|24:37/i);
+  });
+
+  it("never cuts a platform title in the middle of a word or dangling clause", () => {
+    const shortened = truncatePlatformText(
+      "Taylor Swift explains the surprise song choice and the reason for the",
+      58
+    );
+    expect(shortened.length).toBeLessThanOrEqual(58);
+    expect(shortened).not.toMatch(/\b(?:and|for|the)$/i);
+    expect(shortened).not.toMatch(/\s\S$/);
+  });
+
+  it("uses grounded entity hashtags instead of generic format tags", () => {
+    const copy = buildFallbackPlatformCopy({ platform: "tiktok", ...context });
+    expect(copy.hashtags).toContain("#TaylorSwift");
+    expect(copy.hashtags).not.toEqual(
+      expect.arrayContaining(["#Reels", "#Highlights", "#LiveStream"])
+    );
   });
 });
 

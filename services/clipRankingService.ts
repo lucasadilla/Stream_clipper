@@ -28,6 +28,8 @@ export type RankingCandidate = {
   maximumDurationSeconds?: number;
   transcriptChunks?: NarrativeTranscriptChunk[];
   visualContext?: StructuredVisualContext;
+  /** Identity evidence from channel metadata or an explicitly named speaker. */
+  knownPeople?: string[];
 };
 
 export type RankedCandidate = {
@@ -170,6 +172,11 @@ function meaningfulWords(value: string): string[] {
   return normalizeGroundingText(value)
     .split(" ")
     .filter((word) => word.length >= 3 && !TITLE_STOP_WORDS.has(word));
+}
+
+function titleGroundingContext(candidate: RankingCandidate): string {
+  const names = (candidate.knownPeople ?? []).filter(Boolean).join(" ");
+  return [candidate.context, names].filter(Boolean).join(" ");
 }
 
 /** Keep the title and exact evidence about the same moment, not merely nearby. */
@@ -434,7 +441,7 @@ Candidates:
 ${ranked
   .map((item) => {
     const candidate = candidatesById.get(item.id);
-    return `[${item.id}]\nPROPOSED TITLE: ${item.title}\nPROPOSED EVIDENCE: ${item.evidence}\nCANDIDATE CONTEXT: ${(candidate?.context ?? "").slice(0, 1800)}`;
+    return `[${item.id}]\nPROPOSED TITLE: ${item.title}\nPROPOSED EVIDENCE: ${item.evidence}\nVERIFIED PEOPLE: ${(candidate?.knownPeople ?? []).join(" | ") || "None"}\nCANDIDATE CONTEXT: ${(candidate?.context ?? "").slice(0, 1800)}`;
   })
   .join("\n\n")}`;
 
@@ -477,7 +484,11 @@ ${ranked
       const title = sanitizeRankedClipTitle(review.title);
       if (
         !isSpecificClickableTitle(title) ||
-        !isRankedTitleGrounded(title, review.evidence, candidate.context)
+        !isRankedTitleGrounded(
+          title,
+          review.evidence,
+          titleGroundingContext(candidate)
+        )
       ) {
         return [];
       }
@@ -540,7 +551,10 @@ Rules:
   unsupported candidate to match it.
 - Use stream metadata only to understand the content type and proper names.
 - Base every title's event, quote, result and central claim on that candidate's
-  own transcript, chat or event text. Never title a candidate from metadata.
+  own transcript, chat or event text. Verified creator/speaker names may come
+  from the supplied identity evidence, but metadata alone cannot create a claim.
+- When a verified person, game, event, or hot topic is central, generate a
+  natural strategy that names it early instead of using a vague pronoun.
 - Select START_CHUNK_ID and END_CHUNK_ID as the tightest complete story. The
   chosen range must include FOCUS_CHUNK_ID and the original signal focus.
 - Start on a line that makes sense without prior stream context. Include an
@@ -599,7 +613,7 @@ ${candidates
       const visual = candidate.visualContext
         ? `\nSTRUCTURED VISUAL EVIDENCE: ${JSON.stringify(candidate.visualContext).slice(0, 1800)}`
         : "";
-      return `[${candidate.id}] proposed=${Math.round(candidate.startTimeSeconds)}-${Math.round(candidate.endTimeSeconds)}s | focus=${(candidate.focusTimeSeconds ?? (candidate.startTimeSeconds + candidate.endTimeSeconds) / 2).toFixed(2)}s | source=${candidate.source} | signal=${candidate.signalScore.toFixed(1)} | current=${candidate.currentTitle}\nSUPPORTING CONTEXT: ${candidate.context.slice(0, 1400)}${visual}\nTRANSCRIPT CHUNKS:\n${transcript || "NONE - visual/audio signal only"}`;
+      return `[${candidate.id}] proposed=${Math.round(candidate.startTimeSeconds)}-${Math.round(candidate.endTimeSeconds)}s | focus=${(candidate.focusTimeSeconds ?? (candidate.startTimeSeconds + candidate.endTimeSeconds) / 2).toFixed(2)}s | source=${candidate.source} | signal=${candidate.signalScore.toFixed(1)} | current=${candidate.currentTitle}\nVERIFIED PEOPLE: ${(candidate.knownPeople ?? []).join(" | ") || "None"}\nSUPPORTING CONTEXT: ${candidate.context.slice(0, 1400)}${visual}\nTRANSCRIPT CHUNKS:\n${transcript || "NONE - visual/audio signal only"}`;
     }
   )
   .join("\n\n")}`;
@@ -638,7 +652,13 @@ ${candidates
       }
       const title = sanitizeRankedClipTitle(clip.title);
       if (!isSpecificClickableTitle(title)) return [];
-      if (!isRankedTitleGrounded(title, clip.evidence, narrative.context)) {
+      if (
+        !isRankedTitleGrounded(
+          title,
+          clip.evidence,
+          [narrative.context, ...(candidate.knownPeople ?? [])].join(" ")
+        )
+      ) {
         return [];
       }
       seen.add(clip.id);

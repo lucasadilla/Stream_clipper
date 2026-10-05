@@ -102,7 +102,9 @@ export async function POST(
       streamSessionId: sessionId,
       layout: body.verticalLayout.layout,
       includeCaptions: body.includeCaptions ?? false,
-      maxAttempts: 1,
+      // One extra attempt is reserved for the bounded rendered-frame framing
+      // repair when the critic confirms an off-center subject or missing context.
+      maxAttempts: 2,
       renderParams: {
         streamSessionId: sessionId,
         startTimeSeconds: body.startSeconds,
