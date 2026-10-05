@@ -16,7 +16,7 @@ import {
 import { syncPreviewMp4 } from "@/services/previewVideoService";
 import {
   baseYtDlpArgs,
-  getYtDlpDeploymentArgs,
+  acquireYtDlpDeploymentLease,
   getYoutubeCaptureStrategies,
   preferredBestAudio,
   resolveYtDlpInvocation,
@@ -59,7 +59,6 @@ const MIN_RECORDED_SECONDS = 3;
 /** Growing live captures below this size are likely still starting up. */
 const MIN_FILE_BYTES_FOR_ESTIMATE = 500_000;
 const RECORDING_STARTUP_TIMEOUT_MS = 60_000;
-const RECORDING_STARTUP_CHECK_MS = 8_000;
 
 function estimateDurationFromFileSize(sizeBytes: number): number {
   // Conservative ~80 KB/s so we over-estimate duration on growing captures
@@ -295,12 +294,13 @@ async function startLiveRecordingAttempt(
   const captureUrl =
     options?.captureUrlOverride?.trim() || resolveStreamCaptureUrl(session);
   const platform = detectDownloadPlatform(captureUrl);
+  const deploymentLease = await acquireYtDlpDeploymentLease(platform, {
+    includeCookies: options?.includeYoutubeCookies,
+  });
 
   const args = [
     ...invocation.prefixArgs,
-    ...(await getYtDlpDeploymentArgs(platform, {
-      includeCookies: options?.includeYoutubeCookies,
-    })),
+    ...deploymentLease.args,
     ...(youtubeExtractorArgs === undefined
       ? baseYtDlpArgs({ platform, url: captureUrl })
       : baseYtDlpArgs({ platform, url: captureUrl, youtubeExtractorArgs })),
@@ -315,11 +315,20 @@ async function startLiveRecordingAttempt(
     captureUrl,
   ];
 
-  const proc = spawn(invocation.command, args, {
-    detached: true,
-    stdio: ["ignore", "ignore", "pipe"],
-    shell: false,
-    windowsHide: true,
+  let proc: ChildProcess;
+  try {
+    proc = spawn(invocation.command, args, {
+      detached: true,
+      stdio: ["ignore", "ignore", "pipe"],
+      shell: false,
+      windowsHide: true,
+    });
+  } catch (error) {
+    await deploymentLease.release();
+    throw error;
+  }
+  proc.once("close", () => {
+    void deploymentLease.release();
   });
   activeRecordingErrors.delete(streamSessionId);
   proc.stderr?.setEncoding("utf8");

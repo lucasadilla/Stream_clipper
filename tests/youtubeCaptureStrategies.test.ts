@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
+import fs from "fs/promises";
 import {
+  acquireYtDlpDeploymentLease,
   classifyYtDlpError,
   getYoutubeCaptureStrategies,
+  getYoutubeCookieStatus,
   isYoutubePoTokenError,
   preferredBestAudio,
   renderSourceFormatChains,
@@ -10,6 +13,8 @@ import {
 
 const originalClient = process.env.YT_DLP_YOUTUBE_CLIENT;
 const originalAudioLang = process.env.PREFERRED_AUDIO_LANGUAGE;
+const originalCookiesBase64 = process.env.YT_DLP_COOKIES_B64;
+const originalCookiesPath = process.env.YT_DLP_COOKIES_PATH;
 
 afterEach(() => {
   if (originalClient === undefined) {
@@ -21,6 +26,16 @@ afterEach(() => {
     delete process.env.PREFERRED_AUDIO_LANGUAGE;
   } else {
     process.env.PREFERRED_AUDIO_LANGUAGE = originalAudioLang;
+  }
+  if (originalCookiesBase64 === undefined) {
+    delete process.env.YT_DLP_COOKIES_B64;
+  } else {
+    process.env.YT_DLP_COOKIES_B64 = originalCookiesBase64;
+  }
+  if (originalCookiesPath === undefined) {
+    delete process.env.YT_DLP_COOKIES_PATH;
+  } else {
+    process.env.YT_DLP_COOKIES_PATH = originalCookiesPath;
   }
 });
 
@@ -95,5 +110,49 @@ describe("YouTube capture strategies", () => {
 
     process.env.PREFERRED_AUDIO_LANGUAGE = "en";
     expect(preferredBestAudio()).toContain("language^=en");
+  });
+
+  it("gives each capture an isolated cookie file and removes it afterward", async () => {
+    delete process.env.YT_DLP_COOKIES_PATH;
+    process.env.YT_DLP_COOKIES_B64 = Buffer.from(
+      [
+        "# Netscape HTTP Cookie File",
+        "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSID\ttest-session",
+        "",
+      ].join("\n")
+    ).toString("base64");
+
+    const first = await acquireYtDlpDeploymentLease("youtube");
+    const second = await acquireYtDlpDeploymentLease("youtube");
+    expect(first.cookiePath).toBeTruthy();
+    expect(second.cookiePath).toBeTruthy();
+    expect(first.cookiePath).not.toBe(second.cookiePath);
+    expect(first.args).toEqual(
+      expect.arrayContaining(["--cookies", first.cookiePath])
+    );
+    expect(await fs.readFile(first.cookiePath!, "utf8")).toContain(
+      "test-session"
+    );
+
+    await first.release();
+    await second.release();
+    await expect(fs.access(first.cookiePath!)).rejects.toThrow();
+    await expect(fs.access(second.cookiePath!)).rejects.toThrow();
+  });
+
+  it("reports an expired Railway cookie secret before capture starts", async () => {
+    delete process.env.YT_DLP_COOKIES_PATH;
+    process.env.YT_DLP_COOKIES_B64 = Buffer.from(
+      [
+        "# Netscape HTTP Cookie File",
+        ".youtube.com\tTRUE\t/\tTRUE\t1\tSID\texpired-session",
+        "",
+      ].join("\n")
+    ).toString("base64");
+
+    const status = await getYoutubeCookieStatus();
+    expect(status.configured).toBe(true);
+    expect(status.valid).toBe(false);
+    expect(status.error).toMatch(/expired/i);
   });
 });

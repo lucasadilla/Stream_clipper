@@ -9,7 +9,7 @@ import {
 } from "@/lib/storage";
 import {
   baseYtDlpArgs,
-  getYtDlpDeploymentArgs,
+  acquireYtDlpDeploymentLease,
   preferredBestAudio,
   resolveYtDlpInvocation,
   detectDownloadPlatform,
@@ -134,11 +134,12 @@ function startCompanionAudioDownload(
     try {
       const platform = detectDownloadPlatform(youtubeUrl);
       const liveFromStart = options?.liveFromStart ?? Boolean(options?.isLive);
+      const deploymentLease = await acquireYtDlpDeploymentLease(platform, {
+        includeCookies: options?.includeYoutubeCookies,
+      });
       const args = [
         ...invocation.prefixArgs,
-        ...(await getYtDlpDeploymentArgs(platform, {
-          includeCookies: options?.includeYoutubeCookies,
-        })),
+        ...deploymentLease.args,
         ...(options && "youtubeExtractorArgs" in options
           ? baseYtDlpArgs({
               platform,
@@ -160,11 +161,20 @@ function startCompanionAudioDownload(
         outputPath,
         youtubeUrl,
       ];
-      const proc = spawn(invocation.command, args, {
-        detached: true,
-        stdio: ["ignore", "ignore", "pipe"],
-        shell: false,
-        windowsHide: true,
+      let proc: ChildProcess;
+      try {
+        proc = spawn(invocation.command, args, {
+          detached: true,
+          stdio: ["ignore", "ignore", "pipe"],
+          shell: false,
+          windowsHide: true,
+        });
+      } catch (error) {
+        await deploymentLease.release();
+        throw error;
+      }
+      proc.once("close", () => {
+        void deploymentLease.release();
       });
       companionErrors.delete(streamSessionId);
       proc.stderr?.setEncoding("utf8");

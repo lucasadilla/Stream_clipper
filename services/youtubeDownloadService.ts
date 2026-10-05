@@ -1,5 +1,7 @@
 import { existsSync } from "fs";
 import path from "path";
+import os from "os";
+import { randomUUID } from "crypto";
 import fs from "fs/promises";
 import { prisma } from "@/lib/db";
 import {
@@ -28,8 +30,6 @@ export { getYtDlpPath } from "@/lib/ytDlp";
 
 let resolvedYtDlpInvocation: YtDlpInvocation | null = null;
 let lastYtDlpProbeError: string | null = null;
-let generatedCookiesPath: string | null = null;
-let generatedTwitchCookiesPath: string | null = null;
 let automaticImpersonationPromise: Promise<boolean> | null = null;
 let warnedInvalidYoutubeCookies = false;
 let warnedInvalidTwitchCookies = false;
@@ -358,11 +358,61 @@ function validateNetscapeCookies(
   );
   const hasCookieRow = lines.some((line) => {
     const trimmed = line.trim();
-    return Boolean(trimmed && !trimmed.startsWith("#") && line.split("\t").length >= 7);
+    const httpOnlyRow = /^#HttpOnly_/i.test(trimmed);
+    return Boolean(
+      trimmed &&
+        (!trimmed.startsWith("#") || httpOnlyRow) &&
+        line.split("\t").length >= 7
+    );
   });
   if (!hasNetscapeHeader || !hasCookieRow) {
     throw new Error(
       `${label} must use Netscape cookies.txt format with at least one cookie.`
+    );
+  }
+}
+
+function validateYoutubeAuthenticationCookies(contents: Buffer): void {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const authCookieNames = new Set([
+    "SID",
+    "HSID",
+    "SSID",
+    "APISID",
+    "SAPISID",
+    "LOGIN_INFO",
+    "__Secure-1PSID",
+    "__Secure-3PSID",
+  ]);
+  const authRows = contents
+    .toString("utf8")
+    .split(/\r?\n/)
+    .flatMap((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return [];
+      const cookieLine = /^#HttpOnly_/i.test(trimmed)
+        ? line.replace(/^\s*#HttpOnly_/i, "")
+        : line;
+      if (cookieLine.trim().startsWith("#")) return [];
+      const columns = cookieLine.split("\t");
+      if (columns.length < 7 || !authCookieNames.has(columns[5] ?? "")) {
+        return [];
+      }
+      const expiresAt = Number.parseInt(columns[4] ?? "0", 10);
+      return [{ expiresAt: Number.isFinite(expiresAt) ? expiresAt : 0 }];
+    });
+  if (authRows.length === 0) {
+    throw new Error(
+      "YouTube cookies do not contain logged-in authentication cookies. Export cookies while signed in to YouTube."
+    );
+  }
+  if (
+    authRows.every(
+      (cookie) => cookie.expiresAt > 0 && cookie.expiresAt <= nowSeconds + 60
+    )
+  ) {
+    throw new Error(
+      "YouTube authentication cookies are expired. Export a fresh cookies.txt file and update YT_DLP_COOKIES_B64."
     );
   }
 }
@@ -377,54 +427,44 @@ function decodeCookiesBase64(value: string, label: string): Buffer {
   return decoded;
 }
 
-async function resolveYoutubeCookiesPath(): Promise<string | null> {
+async function readYoutubeCookies(): Promise<Buffer | null> {
   const configuredPath = process.env.YT_DLP_COOKIES_PATH?.trim();
   if (configuredPath) {
-    // Always copy to a runtime path. yt-dlp rewrites --cookies files in place
-    // and can strip LOGIN_INFO / SID, which immediately breaks later downloads.
-    if (!generatedCookiesPath) {
-      const contents = await fs.readFile(configuredPath);
-      validateNetscapeCookies(contents, "YouTube cookies");
-      await fs.writeFile(RUNTIME_COOKIES_PATH, contents, { mode: 0o600 });
-      await fs.chmod(RUNTIME_COOKIES_PATH, 0o600);
-      generatedCookiesPath = RUNTIME_COOKIES_PATH;
-    }
-    return generatedCookiesPath;
+    const contents = await fs.readFile(configuredPath);
+    validateNetscapeCookies(contents, "YouTube cookies");
+    validateYoutubeAuthenticationCookies(contents);
+    return contents;
   }
 
   const cookiesBase64 = process.env.YT_DLP_COOKIES_B64?.trim();
   if (!cookiesBase64) return null;
-  if (!generatedCookiesPath) {
-    const contents = decodeCookiesBase64(cookiesBase64, "YT_DLP_COOKIES_B64");
-    await fs.writeFile(RUNTIME_COOKIES_PATH, contents, { mode: 0o600 });
-    await fs.chmod(RUNTIME_COOKIES_PATH, 0o600);
-    generatedCookiesPath = RUNTIME_COOKIES_PATH;
-  }
-  return generatedCookiesPath;
+  const contents = decodeCookiesBase64(
+    cookiesBase64,
+    "YT_DLP_COOKIES_B64"
+  );
+  validateYoutubeAuthenticationCookies(contents);
+  return contents;
 }
 
-async function resolveTwitchCookiesPath(): Promise<string | null> {
+async function readTwitchCookies(): Promise<Buffer | null> {
   const configuredPath = process.env.TWITCH_COOKIES_PATH?.trim();
   if (configuredPath) {
-    if (!generatedTwitchCookiesPath) {
-      const contents = await fs.readFile(configuredPath);
-      validateNetscapeCookies(contents, "Twitch cookies");
-      await fs.writeFile(RUNTIME_TWITCH_COOKIES_PATH, contents, { mode: 0o600 });
-      await fs.chmod(RUNTIME_TWITCH_COOKIES_PATH, 0o600);
-      generatedTwitchCookiesPath = RUNTIME_TWITCH_COOKIES_PATH;
-    }
-    return generatedTwitchCookiesPath;
+    const contents = await fs.readFile(configuredPath);
+    validateNetscapeCookies(contents, "Twitch cookies");
+    return contents;
   }
 
   const cookiesBase64 = process.env.TWITCH_COOKIES_B64?.trim();
   if (!cookiesBase64) return null;
-  if (!generatedTwitchCookiesPath) {
-    const contents = decodeCookiesBase64(cookiesBase64, "TWITCH_COOKIES_B64");
-    await fs.writeFile(RUNTIME_TWITCH_COOKIES_PATH, contents, { mode: 0o600 });
-    await fs.chmod(RUNTIME_TWITCH_COOKIES_PATH, 0o600);
-    generatedTwitchCookiesPath = RUNTIME_TWITCH_COOKIES_PATH;
-  }
-  return generatedTwitchCookiesPath;
+  return decodeCookiesBase64(cookiesBase64, "TWITCH_COOKIES_B64");
+}
+
+async function writePrivateCookieFile(
+  destination: string,
+  contents: Buffer
+): Promise<void> {
+  await fs.writeFile(destination, contents, { mode: 0o600 });
+  await fs.chmod(destination, 0o600);
 }
 
 export async function getYoutubeCookieStatus(): Promise<YoutubeCookieStatus> {
@@ -434,7 +474,7 @@ export async function getYoutubeCookieStatus(): Promise<YoutubeCookieStatus> {
   );
   if (!configured) return { configured: false, valid: false, error: null };
   try {
-    await resolveYoutubeCookiesPath();
+    await readYoutubeCookies();
     return { configured: true, valid: true, error: null };
   } catch (error) {
     const rawMessage = error instanceof Error ? error.message : "";
@@ -451,12 +491,18 @@ export async function getYoutubeCookieStatus(): Promise<YoutubeCookieStatus> {
   }
 }
 
-/** Optional Railway egress/auth settings. Cookies are platform-scoped. */
-export async function getYtDlpDeploymentArgs(
+export interface YtDlpDeploymentLease {
+  args: string[];
+  cookiePath: string | null;
+  release: () => Promise<void>;
+}
+
+async function buildYtDlpDeploymentLease(
   platform: StreamPlatform | "unknown" = "unknown",
-  options?: { includeCookies?: boolean }
-): Promise<string[]> {
+  options?: { includeCookies?: boolean; privateCookieFile?: boolean }
+): Promise<YtDlpDeploymentLease> {
   const args: string[] = [];
+  let cookiePath: string | null = null;
   const proxy = process.env.YT_DLP_PROXY?.trim();
   if (proxy) args.push("--proxy", proxy);
 
@@ -469,8 +515,17 @@ export async function getYtDlpDeploymentArgs(
 
   if (platform === "twitch" && options?.includeCookies !== false) {
     try {
-      const twitchCookies = await resolveTwitchCookiesPath();
-      if (twitchCookies) args.push("--cookies", twitchCookies);
+      const contents = await readTwitchCookies();
+      if (contents) {
+        cookiePath = options?.privateCookieFile
+          ? path.join(
+              os.tmpdir(),
+              `clipper-twitch-cookies-${process.pid}-${randomUUID()}.txt`
+            )
+          : RUNTIME_TWITCH_COOKIES_PATH;
+        await writePrivateCookieFile(cookiePath, contents);
+        args.push("--cookies", cookiePath);
+      }
     } catch (error) {
       if (!warnedInvalidTwitchCookies) {
         warnedInvalidTwitchCookies = true;
@@ -480,7 +535,15 @@ export async function getYtDlpDeploymentArgs(
         );
       }
     }
-    return args;
+    return {
+      args,
+      cookiePath,
+      release: async () => {
+        if (options?.privateCookieFile && cookiePath) {
+          await fs.unlink(cookiePath).catch(() => {});
+        }
+      },
+    };
   }
 
   // YouTube (and unknown callers) keep the existing YouTube cookie path.
@@ -489,8 +552,17 @@ export async function getYtDlpDeploymentArgs(
     (platform === "youtube" || platform === "unknown")
   ) {
     try {
-      const cookiesPath = await resolveYoutubeCookiesPath();
-      if (cookiesPath) args.push("--cookies", cookiesPath);
+      const contents = await readYoutubeCookies();
+      if (contents) {
+        cookiePath = options?.privateCookieFile
+          ? path.join(
+              os.tmpdir(),
+              `clipper-youtube-cookies-${process.pid}-${randomUUID()}.txt`
+            )
+          : RUNTIME_COOKIES_PATH;
+        await writePrivateCookieFile(cookiePath, contents);
+        args.push("--cookies", cookiePath);
+      }
     } catch (error) {
       // Cookies improve access to private/restricted media, but a stale local
       // path must not prevent public videos from downloading at all.
@@ -504,7 +576,38 @@ export async function getYtDlpDeploymentArgs(
     }
   }
 
-  return args;
+  return {
+    args,
+    cookiePath,
+    release: async () => {
+      if (options?.privateCookieFile && cookiePath) {
+        await fs.unlink(cookiePath).catch(() => {});
+      }
+    },
+  };
+}
+
+/** Optional Railway egress/auth settings. Cookies are platform-scoped. */
+export async function getYtDlpDeploymentArgs(
+  platform: StreamPlatform | "unknown" = "unknown",
+  options?: { includeCookies?: boolean }
+): Promise<string[]> {
+  return (await buildYtDlpDeploymentLease(platform, options)).args;
+}
+
+/**
+ * Give one yt-dlp process an immutable private cookie copy. yt-dlp rewrites
+ * cookie files, so sharing one path across retries or concurrent jobs can
+ * corrupt the authentication used by every later capture.
+ */
+export async function acquireYtDlpDeploymentLease(
+  platform: StreamPlatform | "unknown" = "unknown",
+  options?: { includeCookies?: boolean }
+): Promise<YtDlpDeploymentLease> {
+  return buildYtDlpDeploymentLease(platform, {
+    ...options,
+    privateCookieFile: true,
+  });
 }
 
 async function supportsAutomaticChromeImpersonation(): Promise<boolean> {
@@ -666,15 +769,16 @@ export async function runYtDlp(
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt < retries; attempt++) {
+    let deploymentLease: YtDlpDeploymentLease | null = null;
     try {
-      const deploymentArgs = await getYtDlpDeploymentArgs(platform, {
+      deploymentLease = await acquireYtDlpDeploymentLease(platform, {
         includeCookies: options?.includeCookies,
       });
       return await runCommand(
         invocation.command,
         [
           ...invocation.prefixArgs,
-          ...deploymentArgs,
+          ...deploymentLease.args,
           ...extraArgs,
           url,
         ],
@@ -690,6 +794,8 @@ export async function runYtDlp(
         throw lastError;
       }
       await delay(600 * (attempt + 1));
+    } finally {
+      await deploymentLease?.release();
     }
   }
 
@@ -868,10 +974,23 @@ async function runYtDlpWithFormatFallback(
         return;
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
-        // Format swaps cannot repair a missing PO token / empty format list.
+        // Format swaps cannot repair extractor/auth failures. Move to the next
+        // player client immediately so stale cookies do not consume the whole
+        // source-preparation deadline before public fallbacks are attempted.
         // CDN 403s are often format-specific (e.g. progressive "best"), so keep
         // trying other formats before moving to the next player client.
-        if (platform === "youtube" && isYoutubePoTokenError(lastError)) break;
+        const errorKind = classifyYtDlpError(lastError);
+        if (
+          platform === "youtube" &&
+          (errorKind === "po_token_unavailable" ||
+            errorKind === "bot_verification" ||
+            errorKind === "private_video" ||
+            errorKind === "members_only" ||
+            errorKind === "age_restricted" ||
+            errorKind === "unavailable")
+        ) {
+          break;
+        }
       }
     }
   }
