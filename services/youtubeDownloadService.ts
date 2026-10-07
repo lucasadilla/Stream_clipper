@@ -33,6 +33,7 @@ let lastYtDlpProbeError: string | null = null;
 let automaticImpersonationPromise: Promise<boolean> | null = null;
 let warnedInvalidYoutubeCookies = false;
 let warnedInvalidTwitchCookies = false;
+let rejectedYoutubeCookiesReason: string | null = null;
 
 const RUNTIME_COOKIES_PATH = "/tmp/youtube-cookies.txt";
 const RUNTIME_TWITCH_COOKIES_PATH = "/tmp/twitch-cookies.txt";
@@ -42,6 +43,31 @@ export interface YoutubeCookieStatus {
   configured: boolean;
   valid: boolean;
   error: string | null;
+}
+
+const YOUTUBE_COOKIE_REJECTION_PATTERN =
+  /provided YouTube account cookies are no longer valid|cookies (?:are|were) (?:invalid|rejected)|account cookies.*rotated/i;
+
+export function isYoutubeCookieRejection(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return YOUTUBE_COOKIE_REJECTION_PATTERN.test(message);
+}
+
+/** Quarantine a rotated cookie secret for the rest of this server process. */
+export function markYoutubeCookiesRejected(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!isYoutubeCookieRejection(message)) return false;
+  if (!rejectedYoutubeCookiesReason) {
+    rejectedYoutubeCookiesReason =
+      "YouTube rejected the configured account cookies because the browser session rotated them. Replace YT_DLP_COOKIES_B64 with a fresh export.";
+    console.error(`[yt-dlp] ${rejectedYoutubeCookiesReason}`);
+  }
+  return true;
+}
+
+/** Test helper; a new deployment also clears the in-memory quarantine. */
+export function resetYoutubeCookieRejection(): void {
+  rejectedYoutubeCookiesReason = null;
 }
 
 export function getLastYtDlpProbeError(): string | null {
@@ -545,6 +571,13 @@ export async function getYoutubeCookieStatus(): Promise<YoutubeCookieStatus> {
       process.env.YT_DLP_COOKIES_B64?.trim()
   );
   if (!configured) return { configured: false, valid: false, error: null };
+  if (rejectedYoutubeCookiesReason) {
+    return {
+      configured: true,
+      valid: false,
+      error: rejectedYoutubeCookiesReason,
+    };
+  }
   try {
     await readYoutubeCookies();
     return { configured: true, valid: true, error: null };
@@ -621,6 +654,7 @@ async function buildYtDlpDeploymentLease(
   // YouTube (and unknown callers) keep the existing YouTube cookie path.
   if (
     options?.includeCookies !== false &&
+    !rejectedYoutubeCookiesReason &&
     (platform === "youtube" || platform === "unknown")
   ) {
     try {
@@ -731,6 +765,7 @@ export type YtDlpErrorKind =
   | "twitch_forbidden"
   | "twitch_live_from_start"
   | "ffmpeg_missing"
+  | "youtube_cookies_invalid"
   | "youtube_forbidden"
   | "unknown";
 
@@ -741,6 +776,9 @@ export function classifyYtDlpError(error: unknown): YtDlpErrorKind {
   }
   if (isLiveFromStartUnavailable(message)) {
     return "twitch_live_from_start";
+  }
+  if (isYoutubeCookieRejection(message)) {
+    return "youtube_cookies_invalid";
   }
   if (isYoutubePoTokenError(message)) {
     return "po_token_unavailable";
@@ -778,6 +816,8 @@ export function formatYtDlpUserError(error: unknown): string {
       return "YouTube did not return a playable format to this server. Clipper tried its token provider and fallback clients; retry shortly or upload the authorized VOD.";
     case "bot_verification":
       return "YouTube challenged this server's network after Clipper tried authenticated, cookieless, HLS, TV, and token-backed capture routes. Retry shortly; if it continues, use a clean Railway egress proxy or upload the authorized VOD.";
+    case "youtube_cookies_invalid":
+      return "The server's YouTube login cookies were rotated and rejected. Replace the Railway YT_DLP_COOKIES_B64 value with a fresh signed-in browser export, then retry.";
     case "private_video":
       return "This video is private. Use cookies from an account authorized to view it, or upload the VOD.";
     case "members_only":
@@ -861,6 +901,9 @@ export async function runYtDlp(
       );
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
+      if (platform === "youtube") {
+        markYoutubeCookiesRejected(lastError);
+      }
       const transient = isTransientYtDlpError(lastError.message);
       if (!transient || attempt === retries - 1) {
         throw lastError;
