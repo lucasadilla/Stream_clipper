@@ -541,9 +541,9 @@ class CompositeDetector:
             primary_faces[best_index]["mouthOpenRatio"] = landmark_face["mouthOpenRatio"]
             primary_faces[best_index]["lookDirectionX"] = landmark_face["lookDirectionX"]
 
-        # Dense landmarks need more facial pixels than YuNet. Refine up to six
-        # unmatched small faces on enlarged local crops so embedded facecams get
-        # the same mouth/head-direction quality as full-screen talking heads.
+        # Dense landmarks need more facial pixels than YuNet. Refine the three
+        # strongest unmatched faces; extra crop passes add substantial latency
+        # while rarely changing the active-speaker decision.
         height, width = frame.shape[:2]
         unmatched = [
             index
@@ -555,7 +555,7 @@ class CompositeDetector:
             * primary_faces[index]["rect"]["height"],
             reverse=True,
         )
-        for offset, primary_index in enumerate(unmatched[:6], start=1):
+        for offset, primary_index in enumerate(unmatched[:3], start=1):
             rect = primary_faces[primary_index]["rect"]
             center_x, center_y = _rect_center(rect)
             crop_w = min(1.0, max(rect["width"] * 2.2, 0.11))
@@ -786,6 +786,92 @@ def _recover_missed_faces(detector, frame, faces, previous_faces):
     return recovered
 
 
+def _reacquire_wide_shot_faces(detector, frame, faces):
+    """Find small people immediately after a cut or repeated full-frame miss.
+
+    Wide shots shrink faces below a full-frame detector's useful resolution.
+    Four overlapping, enlarged tiles give YuNet enough facial pixels to lock
+    again. This pass is event-driven so normal analysis stays fast.
+    """
+    import cv2
+
+    detect_region = getattr(detector, "detect_region", None)
+    if not callable(detect_region):
+        return faces
+
+    height, width = frame.shape[:2]
+    recovered = list(faces)
+    tile_width = 0.58
+    tile_height = 0.62
+    tiles = (
+        (0.0, 0.0),
+        (1.0 - tile_width, 0.0),
+        (0.0, 1.0 - tile_height),
+        (1.0 - tile_width, 1.0 - tile_height),
+    )
+    for left, top in tiles:
+        px_left = int(left * width)
+        px_top = int(top * height)
+        px_right = max(px_left + 2, int((left + tile_width) * width))
+        px_bottom = max(px_top + 2, int((top + tile_height) * height))
+        crop = frame[px_top:px_bottom, px_left:px_right]
+        if crop.size == 0:
+            continue
+
+        crop_height, crop_width = crop.shape[:2]
+        scale = max(1.0, 760.0 / max(1, crop_width))
+        inference_crop = (
+            cv2.resize(
+                crop,
+                (int(crop_width * scale), int(crop_height * scale)),
+                interpolation=cv2.INTER_CUBIC,
+            )
+            if scale > 1.01
+            else crop
+        )
+        try:
+            local_faces = detect_region(inference_crop)
+        except Exception:
+            continue
+
+        for local_face in local_faces:
+            local_rect = local_face["rect"]
+            mapped = {
+                "x": left + local_rect["x"] * tile_width,
+                "y": top + local_rect["y"] * tile_height,
+                "width": local_rect["width"] * tile_width,
+                "height": local_rect["height"] * tile_height,
+            }
+            mapped_center = _rect_center(mapped)
+            duplicate = False
+            for known_face in recovered:
+                known_rect = known_face["rect"]
+                known_center = _rect_center(known_rect)
+                center_distance = math.hypot(
+                    mapped_center[0] - known_center[0],
+                    mapped_center[1] - known_center[1],
+                )
+                if (
+                    _rect_iou(mapped, known_rect) >= 0.2
+                    or center_distance
+                    <= max(
+                        0.025,
+                        min(mapped["width"], known_rect["width"]) * 0.45,
+                    )
+                ):
+                    duplicate = True
+                    break
+            if duplicate:
+                continue
+            candidate = dict(local_face)
+            candidate["rect"] = mapped
+            # Preserve detector confidence so a real small face can begin a
+            # new track immediately after the edit.
+            candidate["confidence"] = clamp01(float(candidate["confidence"]))
+            recovered.append(candidate)
+    return recovered
+
+
 def _gameplay_importance_regions(previous_gray, current_gray):
     """Return a few normalized regions that carry action or readable detail.
 
@@ -926,6 +1012,7 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
     previous_gameplay_gray = None
     last_gameplay_signal = start - 10.0
     previous_faces = []
+    consecutive_face_misses = 0
     sample_times: list[float] = []
     last_scene_change = start - 10.0
     t = start
@@ -1009,6 +1096,15 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
                     faces = []
 
             faces = _recover_missed_faces(detector, frame, faces, previous_faces)
+            # Search the new scene immediately after a hard cut. In a
+            # continuous shot, require two full-frame misses so one detector
+            # wobble does not trigger the more expensive tiled pass.
+            if hard_scene_change or (not faces and consecutive_face_misses >= 1):
+                faces = _reacquire_wide_shot_faces(detector, frame, faces)
+            if faces:
+                consecutive_face_misses = 0
+            else:
+                consecutive_face_misses += 1
             _attach_appearance_descriptors(frame, faces)
             previous_faces = _attach_speaking_activity(
                 frame, faces, previous_faces

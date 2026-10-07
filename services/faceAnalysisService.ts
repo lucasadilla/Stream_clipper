@@ -53,7 +53,7 @@ import {
 import { buildCandidateVisualContexts } from "@/services/visualContextService";
 
 const FACE_ANALYSIS_WORKER_ID = `face-worker-${process.pid}`;
-const FACE_ANALYSIS_VERSION = 11;
+const FACE_ANALYSIS_VERSION = 12;
 
 /** Result JSON stored on the job row (adds source info to the shared shape). */
 export interface StoredFaceAnalysisResult extends FacecamAnalysisResult {

@@ -983,17 +983,16 @@ export function AgentClipStudioModal({
         });
       }
 
-      // Poll briefly so the preview can snap to the detected face.
-      for (let i = 0; i < 60; i++) {
+      // Keep following the server job for as long as Clip Studio is open. The
+      // worker may need to prepare remote media before detection starts, so a
+      // fixed client timeout can incorrectly report failure while a healthy
+      // job is still running or retrying.
+      for (let i = 0; !cancelled; i++) {
         if (cancelled) return;
         const status = await loadFaceFromJob(jobId);
         if (status === "completed" || status === "failed") return;
-        await new Promise((r) => setTimeout(r, i < 20 ? 500 : 1000));
-      }
-      if (!cancelled) {
-        setAnalyzingFace(false);
-        setAnalysisError(
-          "Face tracking is taking too long. Reopen this clip to retry."
+        await new Promise((r) =>
+          setTimeout(r, i < 20 ? 500 : i < 80 ? 1000 : 2500)
         );
       }
     })();

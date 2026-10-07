@@ -7,6 +7,7 @@ import {
   SessionAccessError,
 } from "@/services/sessionAccessService";
 import { requestFaceAnalysis } from "@/services/faceAnalysisService";
+import { MAX_CLIP_SECONDS } from "@/lib/clipConstants";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -40,6 +41,12 @@ export async function POST(
     const body = bodySchema.parse(await request.json());
     if (body.endSeconds <= body.startSeconds) {
       return errorResponse("endSeconds must be after startSeconds", 400);
+    }
+    if (body.endSeconds - body.startSeconds > MAX_CLIP_SECONDS) {
+      return errorResponse(
+        `Face tracking is limited to ${MAX_CLIP_SECONDS / 60} minute clips.`,
+        400
+      );
     }
 
     const { jobId, status } = await requestFaceAnalysis({

@@ -23,6 +23,7 @@ import {
   normalizeCaptionCueDirection,
   type CaptionCueDirection,
 } from "@/lib/captionDirector";
+import { MAX_CLIP_SECONDS } from "@/lib/clipConstants";
 
 interface ClientCaptionCue {
   id: string;
@@ -166,6 +167,12 @@ export async function POST(
       editorState.segments.length > 0
         ? sequenceDuration(editorState.segments)
         : clip.endTimeSeconds - clip.startTimeSeconds;
+    if (outputDuration > MAX_CLIP_SECONDS + 0.01) {
+      return errorResponse(
+        `Clips must be ${MAX_CLIP_SECONDS / 60} minutes or shorter.`,
+        400
+      );
+    }
     // Low-res 5s previews do not count against the export quota.
     if (!preview) {
       const usageGate = await canRenderExport(

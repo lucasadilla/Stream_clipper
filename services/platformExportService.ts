@@ -32,6 +32,7 @@ import { getLatestCompletedFinalRenderJob } from "@/services/renderSelectionServ
 import { parseRenderJobParams } from "@/services/renderService";
 import { assertDeliverableVideo } from "@/services/deliverableVideoService";
 import { readSpeakerContext } from "@/services/speakerContextService";
+import { MAX_CLIP_SECONDS } from "@/lib/clipConstants";
 
 const PLATFORM_WORKER_ID = `platform-${process.pid}-${randomUUID().slice(0, 8)}`;
 const STALE_EXPORT_MS = 15 * 60 * 1000;
@@ -198,6 +199,11 @@ export async function createPlatformExportPack(
     where: { id: clipSuggestionId },
   });
   if (!clip) throw new Error("Clip not found");
+  if (clip.endTimeSeconds - clip.startTimeSeconds > MAX_CLIP_SECONDS + 0.01) {
+    throw new Error(
+      `Clips must be ${MAX_CLIP_SECONDS / 60} minutes or shorter`
+    );
+  }
   const renderJob = await getLatestCompletedFinalRenderJob(clip.id);
   if (!renderJob?.outputPath || !fileExists(renderJob.outputPath)) {
     throw new Error("Render the clip before creating platform exports");

@@ -24,6 +24,7 @@ import { prepareSuggestedClips } from "@/services/clipAutoPrepareService";
 import { reclaimEphemeralStorage } from "@/services/storageReclaimService";
 import { prepareCaptionDirections } from "@/services/captionDirectorService";
 import { getPostHogClient } from "@/lib/posthog-server";
+import { MAX_CLIP_SECONDS } from "@/lib/clipConstants";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -70,6 +71,41 @@ export async function POST(
     const cap =
       body.cap ??
       (isLiveAgent ? LIVE_NOW_SUGGESTION_CAP : 40);
+
+    // Bring older suggested/saved clips under the current short-form limit.
+    // Their previous face jobs describe a different range and must not be
+    // reused after the endpoint is shortened.
+    const editableClips = await prisma.clipSuggestion.findMany({
+      where: {
+        streamSessionId: sessionId,
+        status: { in: ["suggested", "saved"] },
+      },
+      select: {
+        id: true,
+        startTimeSeconds: true,
+        endTimeSeconds: true,
+      },
+    });
+    const overlongClips = editableClips.filter(
+      (clip) =>
+        clip.endTimeSeconds - clip.startTimeSeconds > MAX_CLIP_SECONDS + 0.01
+    );
+    if (overlongClips.length > 0) {
+      const overlongIds = overlongClips.map((clip) => clip.id);
+      await prisma.$transaction([
+        prisma.faceAnalysisJob.deleteMany({
+          where: { clipSuggestionId: { in: overlongIds } },
+        }),
+        ...overlongClips.map((clip) =>
+          prisma.clipSuggestion.update({
+            where: { id: clip.id },
+            data: {
+              endTimeSeconds: clip.startTimeSeconds + MAX_CLIP_SECONDS,
+            },
+          })
+        ),
+      ]);
+    }
 
     // Refresh only untouched suggestions made before title/evidence grounding.
     // Selected, saved, and rendered clips remain exactly as the creator left them.
