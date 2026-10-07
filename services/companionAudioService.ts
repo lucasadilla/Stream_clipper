@@ -14,6 +14,7 @@ import {
   resolveYtDlpInvocation,
   detectDownloadPlatform,
   isLiveFromStartUnavailable,
+  markYoutubeCookiesRejected,
 } from "@/services/youtubeDownloadService";
 
 /** Detached bestaudio capture when the primary file is video-only DASH. */
@@ -180,10 +181,9 @@ function startCompanionAudioDownload(
       proc.stderr?.setEncoding("utf8");
       proc.stderr?.on("data", (chunk: string) => {
         const previous = companionErrors.get(streamSessionId) ?? "";
-        companionErrors.set(
-          streamSessionId,
-          `${previous}${chunk}`.slice(-8_000)
-        );
+        const detail = `${previous}${chunk}`.slice(-8_000);
+        companionErrors.set(streamSessionId, detail);
+        if (platform === "youtube") markYoutubeCookiesRejected(detail);
       });
       proc.unref();
       activeCompanionAudio.set(streamSessionId, proc);
