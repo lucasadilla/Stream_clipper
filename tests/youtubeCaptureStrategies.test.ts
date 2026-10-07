@@ -8,10 +8,13 @@ import {
   getYoutubeCaptureStrategies,
   getYoutubeCookieStatus,
   isYoutubePoTokenError,
+  isYoutubeCookieRejection,
+  markYoutubeCookiesRejected,
   orderYoutubeCaptureStrategies,
   preferredBestAudio,
   renderSourceFormatChains,
   renderSourceFormatSort,
+  resetYoutubeCookieRejection,
 } from "@/services/youtubeDownloadService";
 
 const originalClient = process.env.YT_DLP_YOUTUBE_CLIENT;
@@ -20,6 +23,7 @@ const originalCookiesBase64 = process.env.YT_DLP_COOKIES_B64;
 const originalCookiesPath = process.env.YT_DLP_COOKIES_PATH;
 
 afterEach(() => {
+  resetYoutubeCookieRejection();
   if (originalClient === undefined) {
     delete process.env.YT_DLP_YOUTUBE_CLIENT;
   } else {
@@ -98,6 +102,32 @@ describe("YouTube capture strategies", () => {
     expect(message).toContain("cookieless");
     expect(message).toContain("egress proxy");
     expect(message).not.toContain("Refresh the Railway YouTube cookies");
+  });
+
+  it("quarantines cookies after yt-dlp reports browser-session rotation", async () => {
+    delete process.env.YT_DLP_COOKIES_PATH;
+    process.env.YT_DLP_COOKIES_B64 = Buffer.from(
+      [
+        "# Netscape HTTP Cookie File",
+        ".youtube.com\tTRUE\t/\tTRUE\t2147483647\tSID\trotated-session",
+        "",
+      ].join("\n")
+    ).toString("base64");
+    const rejection =
+      "WARNING: [youtube] The provided YouTube account cookies are no longer valid. They have likely been rotated in the browser.";
+
+    expect(isYoutubeCookieRejection(rejection)).toBe(true);
+    expect(markYoutubeCookiesRejected(rejection)).toBe(true);
+    expect(classifyYtDlpError(rejection)).toBe("youtube_cookies_invalid");
+
+    const status = await getYoutubeCookieStatus();
+    expect(status).toMatchObject({ configured: true, valid: false });
+    expect(status.error).toMatch(/fresh export/i);
+
+    const lease = await acquireYtDlpDeploymentLease("youtube");
+    expect(lease.cookiePath).toBeNull();
+    expect(lease.args).not.toContain("--cookies");
+    await lease.release();
   });
 
   it("deduplicates the configured provider strategy", () => {
