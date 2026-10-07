@@ -23,6 +23,7 @@ import {
   resolveYtDlpInvocation,
   formatYtDlpUserError,
   isYoutubePoTokenError,
+  markYoutubeCookiesRejected,
   resolveStreamCaptureUrl,
   detectDownloadPlatform,
   isLiveFromStartUnavailable,
@@ -335,10 +336,9 @@ async function startLiveRecordingAttempt(
   proc.stderr?.setEncoding("utf8");
   proc.stderr?.on("data", (chunk: string) => {
     const previous = activeRecordingErrors.get(streamSessionId) ?? "";
-    activeRecordingErrors.set(
-      streamSessionId,
-      `${previous}${chunk}`.slice(-12_000)
-    );
+    const detail = `${previous}${chunk}`.slice(-12_000);
+    activeRecordingErrors.set(streamSessionId, detail);
+    if (platform === "youtube") markYoutubeCookiesRejected(detail);
   });
   proc.unref();
   activeRecordings.set(streamSessionId, proc);
