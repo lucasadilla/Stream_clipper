@@ -215,6 +215,9 @@ Every title must read as a complete headline with a clear subject and action.
 Never use a raw transcript fragment, verbal filler such as "you know" or
 "I mean," or a title beginning with a conjunction or preposition. When a
 verified person is central to the moment, prefer their name over a vague pronoun.
+Never end with "that's why," "that's how," "on an ongoing basis," or another
+fragment that depends on missing context. Never use analysis labels such as
+scene change, visual motion detected, event window, or narrative arc as copy.
 
 Return JSON only:
 {"reviews":[{"momentId":"id","selectedCandidateId":"candidate-id","decisionEvidence":["concise grounded reason"],"warnings":[],"titles":[{"strategy":"specific_fact","title":"Specific title","evidence":"exact source phrase","specificity":90,"curiosity":80,"accuracy":98,"brevity":90,"naturalness":92,"spoilerRisk":10,"clickbaitRisk":3}]}]}

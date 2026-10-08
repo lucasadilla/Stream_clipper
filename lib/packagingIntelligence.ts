@@ -1,5 +1,9 @@
 import { z } from "zod";
 import type { PlatformCopy, PlatformKey } from "@/lib/platforms/types";
+import {
+  containsInternalClipSignalLanguage,
+  hasIncompleteClipThoughtEnding,
+} from "@/lib/clipTitleQuality";
 
 export const PACKAGING_POLICY_VERSION = "packaging-policy-v1";
 
@@ -131,6 +135,9 @@ export function packagingWarnings(
     warnings.push("No exact source evidence supports this package.");
   }
   if (GENERIC.test(primary)) warnings.push("Primary copy uses generic hype language.");
+  if (containsInternalClipSignalLanguage(primary)) {
+    warnings.push("Primary copy exposes an internal analysis label.");
+  }
   if (copy.description && FILLER_DESCRIPTION.test(copy.description)) {
     warnings.push("Description contains generic engagement filler.");
   }
@@ -147,6 +154,9 @@ export function packagingWarnings(
   }
   if (INCOMPLETE_ENDING.test(primary.trim()) || /(?:^|\s)\p{L}$/u.test(primary.trim())) {
     warnings.push("Primary copy appears cut off or grammatically incomplete.");
+  }
+  if (hasIncompleteClipThoughtEnding(primary)) {
+    warnings.push("Primary copy ends with a context-dependent fragment.");
   }
   const important = (options.importantEntities ?? []).slice(0, 3)
     .map((entity) => normalize(entity))
@@ -173,6 +183,13 @@ export function rankPlatformPackagingCandidate(
   const incompletePenalty = warnings.some((warning) => warning.includes("cut off"))
     ? 30
     : 0;
+  const internalCopyPenalty = warnings.some(
+    (warning) =>
+      warning.includes("internal analysis") ||
+      warning.includes("context-dependent fragment")
+  )
+    ? 55
+    : 0;
   const entityPenalty = warnings.some((warning) => warning.includes("verified person"))
     ? 10
     : 0;
@@ -189,6 +206,7 @@ export function rankPlatformPackagingCandidate(
       candidate.clickbaitRisk * 0.14 -
       groundingPenalty -
       incompletePenalty -
+      internalCopyPenalty -
       entityPenalty -
       spamPenalty +
       12

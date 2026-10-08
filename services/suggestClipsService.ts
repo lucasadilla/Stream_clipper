@@ -26,7 +26,6 @@ import {
 import {
   applyVisualContextToNarrativePlan,
   narrativePlanQualityBonus,
-  narrativePlanSummary,
   planNarrativeClip,
   type NarrativeBeat,
   type NarrativePlan,
@@ -42,7 +41,7 @@ import {
 import { buildHookPackages } from "@/services/hookEngineService";
 import { parseSpeakerContext } from "@/lib/speakerContext";
 
-export const CLIP_SUGGESTION_VERSION = 9;
+export const CLIP_SUGGESTION_VERSION = 10;
 
 const MIN_SCORE = 6;
 const OVERLAP_RATIO = 0.45;
@@ -785,7 +784,6 @@ export async function autoSuggestClips(
       candidate.context = [plan.selectedText, candidate.context]
         .filter(Boolean)
         .join(" | ");
-      candidate.reason = `${candidate.reason} ${narrativePlanSummary(plan)}`.trim();
     }
   }
 

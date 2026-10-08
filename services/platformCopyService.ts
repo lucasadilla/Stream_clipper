@@ -19,6 +19,7 @@ import {
 } from "@/lib/packagingIntelligence";
 import { getTranscriptChunksForRange } from "@/services/transcriptService";
 import { readSpeakerContext } from "@/services/speakerContextService";
+import { isSpecificClickableClipTitle } from "@/lib/clipTitleQuality";
 
 const platformPackagingResponseSchema = z.object({
   candidates: z.array(platformPackagingCandidateSchema).min(8).max(20),
@@ -143,6 +144,25 @@ function normalizeCopy(
     platform === "tiktok" ||
     platform.startsWith("instagram") ||
     platform.startsWith("facebook");
+  const proposedTitle = cleanText(raw.title, null);
+  const safeTitle =
+    proposedTitle && isSpecificClickableClipTitle(proposedTitle)
+      ? proposedTitle
+      : fallback.title;
+  let proposedDescription = cleanText(raw.description, null);
+  for (const title of [proposedTitle, safeTitle]) {
+    if (!title || !proposedDescription) continue;
+    const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    proposedDescription = proposedDescription
+      .replace(new RegExp(`^${escaped}[.!?:;\\s-]*`, "i"), "")
+      .trim();
+  }
+  const safeDescription =
+    proposedDescription &&
+    proposedDescription.split(/\s+/).length >= 8 &&
+    !/^From\s+.+[.!?]?$/i.test(proposedDescription)
+      ? proposedDescription
+      : fallback.description;
 
   const hashtagMaximum = preset.hashtagRange?.max ?? 5;
   const rawHashtags = groundedHashtags(
@@ -189,7 +209,7 @@ function normalizeCopy(
   return {
     title: isYouTube
       ? truncatePlatformText(
-          cleanText(raw.title, fallback.title) ?? "",
+          safeTitle ?? "",
           preset.titleLimit ?? 100
         ) || null
       : null,
@@ -197,7 +217,7 @@ function normalizeCopy(
     postText,
     description: isYouTube
       ? truncatePlatformText(
-          cleanText(raw.description, fallback.description) ?? "",
+          safeDescription ?? "",
           5000
         ) || null
       : null,
@@ -305,6 +325,8 @@ Editorial requirements:
 - Use searchable proper names, people, games, shows, products, teams, events, or pop-culture topics when they are supported by the transcript or source metadata.
 - The verified people/entities below are identity evidence from creator metadata, explicit speaker labels, titles, or transcript text. Use the central name early when it makes the clip clearer or more searchable. Never identify a person from appearance.
 - Every title and first caption line must be a complete thought. Never end on an article, conjunction, preposition, or visibly cut-off word.
+- Never end a title or first caption line with a backward-looking fragment such as "that's why," "that's how," "on an ongoing basis," "or whatever," or "for some reason."
+- Visual-analysis labels are private evidence. Never publish or paraphrase phrases such as scene change detected, burst of visual motion, interface changed, event window, or narrative arc.
 - Never invent a name, keyword, quote, outcome, or controversy.
 - Make the title/caption worth clicking without vague clickbait.
 - Vary strategies across specific_fact, curiosity, result, conflict, quote, unexpected_outcome, challenge, explanation, and reaction.
@@ -312,6 +334,7 @@ Editorial requirements:
 - For TikTok, Instagram, Facebook, and X: write platform-native caption/postText and include only a few relevant hashtags.
 - For YouTube: provide a specific title, a non-redundant description, up to 3 relevant hashtags, up to 8 search keywords, and a grounded pinned comment.
 - Description should explain what happens and why it matters without discussing the clipping process.
+- Description must add concrete context beyond the title. Do not repeat the title as its opening sentence and do not describe the detector, edit, framing, transcript, or narrative structure.
 - Pinned comments should ask a specific conversation-starting question about this clip.
 - EVIDENCE must be an exact 2-12 word phrase copied from the transcript below.
 - Score each option honestly from 0-100. Accuracy is factual support, never predicted virality.

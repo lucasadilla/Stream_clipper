@@ -95,6 +95,14 @@ describe("clickable title quality gate", () => {
     expect(
       isSpecificClickableTitle("Because The Business Became Hugely Profitable")
     ).toBe(false);
+    expect(
+      isSpecificClickableTitle(
+        "He Got The Part On An Ongoing Basis That's Why"
+      )
+    ).toBe(false);
+    expect(
+      isSpecificClickableTitle("A Significant Visual Scene Change Was Detected")
+    ).toBe(false);
   });
 });
 

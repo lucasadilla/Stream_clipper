@@ -1,4 +1,9 @@
 import { extractClipHook } from "@/lib/clipDescriptions";
+import {
+  containsInternalClipSignalLanguage,
+  hasIncompleteClipThoughtEnding,
+  isSpecificClickableClipTitle,
+} from "@/lib/clipTitleQuality";
 import { PLATFORM_PRESETS } from "@/lib/platforms/presets";
 import type { PlatformCopy, PlatformKey } from "@/lib/platforms/types";
 
@@ -35,11 +40,24 @@ const PROPER_NAME_STOP_WORDS = new Set([
 ]);
 
 export function stripInternalClipCopy(value: string): string {
-  return value
+  const cleaned = value
     .replace(/\bGreat\s+\d+s\s+Short candidate at\s+\d{1,3}:\d{2}(?::\d{2})?\.?/gi, " ")
     .replace(/\b(?:Short candidate|candidate at|ranking score|confidence score)\b[^.]*\.?/gi, " ")
     .replace(/\b(?:Hook line|Audio|Hype spike|Chat reacted hard):\s*/gi, "")
     .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "";
+  return cleaned
+    .split(/(?<=[.!?])\s+|\s*\|\s*/)
+    .map((sentence) => sentence.trim())
+    .filter(
+      (sentence) =>
+        sentence.length > 0 &&
+        !containsInternalClipSignalLanguage(sentence) &&
+        !hasIncompleteClipThoughtEnding(sentence) &&
+        !/\b(?:was detected|analysis signal|producer note)\b/i.test(sentence)
+    )
+    .join(" ")
     .trim();
 }
 
@@ -201,36 +219,71 @@ function publishableTitle(input: PlatformCopyContext): string {
     .trim();
   const generic = /^(?:stream moment|stream highlight|highlight|moment|untitled)$/i;
   const transcriptHook = extractClipHook(cleanSourceText(input.transcriptText));
-  const candidate = raw && !generic.test(raw) ? raw : transcriptHook ?? "Worth Hearing Twice";
-  return truncatePlatformText(candidate, 100);
+  const streamTitle = truncatePlatformText(
+    cleanSourceText(input.streamTitle ?? ""),
+    72
+  );
+  for (const candidate of [raw, transcriptHook, streamTitle]) {
+    if (!candidate || generic.test(candidate)) continue;
+    const shortened = truncatePlatformText(candidate, 72);
+    if (isSpecificClickableClipTitle(shortened)) return shortened;
+  }
+  const verifiedPerson = input.people?.find((person) => person.trim().length >= 3);
+  const safeFallback = verifiedPerson
+    ? `${verifiedPerson.trim()} Explains the Central Point`
+    : "The Conversation Reaches Its Central Point";
+  return truncatePlatformText(safeFallback, 72);
 }
 
 function transcriptSummary(input: PlatformCopyContext, keywords: string[]): string {
-  const transcript = cleanSourceText(input.transcriptText);
-  const sentences = transcript
-    .split(/(?<=[.!?])\s+|\n+/)
-    .map((sentence) => sentence.trim())
-    .filter((sentence) => sentence.length >= 28 && sentence.length <= 260);
+  const title = publishableTitle(input);
   const keywordSet = keywords.slice(0, 5).map((keyword) => keyword.toLocaleLowerCase());
-  const best = sentences
-    .map((sentence, index) => ({
+  const sources = [
+    { value: input.transcriptText, sourceScore: 8 },
+    { value: input.clipReason, sourceScore: 6 },
+    { value: input.streamDescription ?? "", sourceScore: 3 },
+  ];
+  const candidates = sources.flatMap(({ value, sourceScore }, sourceIndex) =>
+    cleanSourceText(value)
+      .split(/(?<=[.!?])\s+|\n+/)
+      .map((sentence) => sentence.trim())
+      .filter(
+        (sentence) =>
+          sentence.length >= 28 &&
+          sentence.length <= 360 &&
+          !containsInternalClipSignalLanguage(sentence) &&
+          !hasIncompleteClipThoughtEnding(sentence) &&
+          sentence.toLocaleLowerCase() !== title.toLocaleLowerCase() &&
+          !/self-contained excerpt from the original conversation/i.test(sentence)
+      )
+      .map((sentence, index) => ({ sentence, index, sourceIndex, sourceScore }))
+  );
+  const best = candidates
+    .map(({ sentence, index, sourceIndex, sourceScore }) => ({
       sentence,
       index,
+      sourceIndex,
       score:
+        sourceScore +
         keywordSet.reduce(
           (score, keyword) =>
             score + (sentence.toLocaleLowerCase().includes(keyword) ? 4 : 0),
           0
         ) + (/[!?]$/.test(sentence) ? 2 : 0),
     }))
-    .sort((a, b) => b.score - a.score || a.index - b.index)[0]?.sentence;
+    .sort(
+      (a, b) =>
+        b.score - a.score || a.sourceIndex - b.sourceIndex || a.index - b.index
+    )[0]?.sentence;
   if (best) return best;
-
-  const reason = cleanSourceText(input.clipReason);
-  if (reason.length >= 28) return reason.slice(0, 360).trim();
-  const hook = extractClipHook(transcript);
-  if (hook) return hook;
-  return publishableTitle(input);
+  const verifiedPerson = input.people?.find((person) => person.trim().length >= 3);
+  if (verifiedPerson) {
+    return `${verifiedPerson.trim()} develops the main idea in this excerpt.`;
+  }
+  if (input.streamerName?.trim()) {
+    return `${input.streamerName.trim()} develops the main idea with its surrounding context.`;
+  }
+  return "The speaker develops the main idea with its surrounding context.";
 }
 
 function platformHashtags(

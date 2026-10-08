@@ -82,6 +82,28 @@ describe("platform-ready fallback copy", () => {
       expect.arrayContaining(["#Reels", "#Highlights", "#LiveStream"])
     );
   });
+
+  it("does not publish detector language or a dangling transcript title", () => {
+    const copy = buildFallbackPlatformCopy({
+      platform: "youtube_shorts",
+      clipTitle: "He Got The Part On An Ongoing Basis That's Why",
+      clipReason:
+        "A burst of visual motion was detected independently of speech. A complete reaction arc with setup, reaction, payoff.",
+      transcriptText: "He Got The Part On An Ongoing Basis That's Why.",
+      streamTitle:
+        "Ben Affleck’s Turbulent Year: Navigating Grief and Not Caring",
+      streamerName: "One More Question",
+      people: ["Ben Affleck"],
+      durationSeconds: 45,
+    });
+
+    expect(copy.title).toContain("Ben Affleck");
+    expect(copy.title).not.toMatch(/ongoing basis|that's why|detected/i);
+    expect(copy.description).not.toMatch(
+      /ongoing basis|that's why|visual motion|reaction arc|setup, reaction, payoff/i
+    );
+    expect(copy.description).toContain("Ben Affleck");
+  });
 });
 
 describe("clip descriptions", () => {
@@ -93,5 +115,22 @@ describe("clip descriptions", () => {
     });
     expect(description).toContain("Taylor Swift");
     expect(description).not.toMatch(/Great 45s|candidate|24:37/i);
+  });
+
+  it("removes broken transcript fragments and visual-analysis notes", () => {
+    const description = buildSpecificClipReason({
+      startTimeSeconds: 0,
+      endTimeSeconds: 45,
+      transcriptText:
+        "He Got The Part On An Ongoing Basis That's Why.",
+      eventSummary:
+        "A burst of visual motion was detected independently of speech. A complete reaction arc with setup, reaction, payoff.",
+    });
+    expect(description).toBe(
+      "A self-contained excerpt from the original conversation."
+    );
+    expect(description).not.toMatch(
+      /ongoing basis|that's why|visual motion|reaction arc|setup, reaction, payoff/i
+    );
   });
 });

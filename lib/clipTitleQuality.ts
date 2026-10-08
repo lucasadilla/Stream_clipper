@@ -51,6 +51,10 @@ const GENERIC_CLICKBAIT =
   /\b(?:you won'?t believe|what happens next|must watch|breaks the internet)\b/i;
 const GENERIC_NOUNS =
   /\b(?:random|something|stuff|the biggest ones|this moment|stream highlight|stream clip)\b/i;
+const DISCOURSE_FRAGMENT_ENDING =
+  /\b(?:(?:that|this|which)(?:'s| is)\s+(?:how|what|when|where|why)|on an ongoing basis|for some reason|and everything|or whatever)\??$/i;
+const INTERNAL_SIGNAL_LANGUAGE =
+  /\b(?:significant visual scene change|visual scene change|burst of visual motion|visual motion (?:was )?detected|detected independently of speech|prominent on-screen (?:interface|text) region changed|complete (?:reaction|narrative|story|setup-payoff|question-answer|problem-solution|claim-evidence|visual-payoff) arc|visually driven moment with a clear outcome|setup\s*,\s*(?:action\s*,\s*)?(?:reaction\s*,\s*)?payoff|structured visual (?:context|evidence)|ranking evidence|audio event|event window)\b/i;
 
 function normalizeTitleWord(word: string): string {
   return word.toLocaleLowerCase().replace(/[^a-z0-9']/g, "");
@@ -70,13 +74,27 @@ export function meaningfulClipTitleWords(value: string): string[] {
     );
 }
 
+/** Machine analysis notes are evidence for editors, never public copy. */
+export function containsInternalClipSignalLanguage(value: string): boolean {
+  return INTERNAL_SIGNAL_LANGUAGE.test(value);
+}
+
+/** Spoken fragments that depend on a missing prior sentence are not headlines. */
+export function hasIncompleteClipThoughtEnding(value: string): boolean {
+  const cleaned = value.trim().replace(/[.!?,;:]+$/g, "").trim();
+  return DANGLING_ENDING.test(cleaned) || DISCOURSE_FRAGMENT_ENDING.test(cleaned);
+}
+
 /** Deterministic final gate for titles shown to creators or used in exports. */
 export function isSpecificClickableClipTitle(title: string): boolean {
   const cleaned = title.trim();
   const words = cleaned.split(/\s+/).filter(Boolean);
   if (words.length < 4 || words.length > 11 || cleaned.length > 72) return false;
-  if (BROKEN_OPENING.test(cleaned) || DANGLING_ENDING.test(cleaned)) return false;
+  if (BROKEN_OPENING.test(cleaned) || hasIncompleteClipThoughtEnding(cleaned)) {
+    return false;
+  }
   if (SPOKEN_FILLER.test(cleaned)) return false;
+  if (containsInternalClipSignalLanguage(cleaned)) return false;
   if (/^(?:insane|crazy|epic|shocking|unbelievable)\b/i.test(cleaned)) {
     return false;
   }

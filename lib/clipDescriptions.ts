@@ -1,5 +1,9 @@
 import { formatSeconds } from "@/lib/time";
-import { isSpecificClickableClipTitle } from "@/lib/clipTitleQuality";
+import {
+  containsInternalClipSignalLanguage,
+  hasIncompleteClipThoughtEnding,
+  isSpecificClickableClipTitle,
+} from "@/lib/clipTitleQuality";
 
 interface ChatQuote {
   authorName?: string;
@@ -136,12 +140,30 @@ export function buildSpecificClipTitle(input: BuildClipCopyInput): string {
   return `Peak moment · ${formatSeconds(startTimeSeconds)}`;
 }
 
-function cleanPublishableContext(value: string | null | undefined): string {
-  return (value ?? "")
+function isPublishableContextSentence(value: string): boolean {
+  const cleaned = value.trim();
+  if (cleaned.split(/\s+/).filter(Boolean).length < 4) return false;
+  if (containsInternalClipSignalLanguage(cleaned)) return false;
+  if (hasIncompleteClipThoughtEnding(cleaned)) return false;
+  if (/\b(?:was detected|analysis signal|confidence score|ranking score)\b/i.test(cleaned)) {
+    return false;
+  }
+  return true;
+}
+
+export function cleanPublishableContext(value: string | null | undefined): string {
+  const cleaned = (value ?? "")
     .replace(/\[(?:silence|processing error|live transcript[^\]]*)\]/gi, " ")
     .replace(/\bGreat\s+\d+s\s+Short candidate at\s+\d{1,3}:\d{2}(?::\d{2})?\.?/gi, " ")
     .replace(/^(?:Hook line|Audio|Hype spike|Chat reacted hard):\s*/i, "")
     .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "";
+  return cleaned
+    .split(/(?<=[.!?])\s+|\s*\|\s*/)
+    .map((sentence) => sentence.trim())
+    .filter(isPublishableContextSentence)
+    .join(" ")
     .trim();
 }
 
@@ -158,7 +180,12 @@ export function buildSpecificClipReason(input: BuildClipCopyInput): string {
   const transcriptSentences = transcript
     .split(/(?<=[.!?])\s+/)
     .map((sentence) => sentence.trim())
-    .filter((sentence) => sentence.length >= 18 && sentence.length <= 240);
+    .filter(
+      (sentence) =>
+        sentence.length >= 18 &&
+        sentence.length <= 240 &&
+        isPublishableContextSentence(sentence)
+    );
   const transcriptSummary = transcriptSentences.slice(0, 2).join(" ").slice(0, 420);
   if (transcriptSummary) return transcriptSummary;
 
@@ -177,7 +204,7 @@ export function buildSpecificClipReason(input: BuildClipCopyInput): string {
   if (chatLine) return chatLine.slice(0, 280);
   const hypeLine = hypeHits?.map(cleanPublishableContext).find(Boolean);
   if (hypeLine) return hypeLine.slice(0, 280);
-  return "A complete standout moment with the setup and payoff intact.";
+  return "A self-contained excerpt from the original conversation.";
 }
 
 function pickBestChatLine(messages: ChatQuote[]): ChatQuote | null {

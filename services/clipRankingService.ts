@@ -548,6 +548,10 @@ Rules:
 - Never begin with a dangling connector such as And, But, Because, Of, or So.
   Never copy verbal filler such as you know, I mean, kind of,
   sort of, or you feel like into a title.
+- Never end with a backward-looking fragment such as "that's why," "that's
+  how," "on an ongoing basis," "or whatever," or "for some reason."
+- Never turn analysis labels such as scene change, visual motion detected,
+  interface change, event window, or narrative arc into a public title.
 - A transcript sentence is source evidence, not automatically a headline.
   Rewrite it into natural headline grammar while preserving the exact claim.
 - Return clips in strongest-to-weakest order.
