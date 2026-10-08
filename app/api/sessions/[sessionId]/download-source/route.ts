@@ -1,3 +1,4 @@
+import { YoutubeCapturePausedError } from "@/lib/youtubeCaptureBackoff";
 import { NextRequest } from "next/server";
 import { acquireSourceMedia } from "@/services/liveRecordingService";
 import { errorResponse, jsonResponse } from "@/lib/utils";
@@ -40,6 +41,12 @@ export async function POST(
   } catch (error) {
     if (error instanceof SessionAccessError) {
       return errorResponse(error.message, error.status);
+    }
+    if (error instanceof YoutubeCapturePausedError) {
+      return Response.json({ error: error.message, retryAt: error.retryAt }, {
+        status: 429,
+        headers: { "Retry-After": String(Math.max(1, Math.ceil((error.retryAt - Date.now()) / 1000))) },
+      });
     }
     const message = formatYtDlpUserError(error);
     return errorResponse(message, 500);

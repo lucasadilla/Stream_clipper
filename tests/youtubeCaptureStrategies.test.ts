@@ -99,8 +99,9 @@ describe("YouTube capture strategies", () => {
       new Error("ERROR: Sign in to confirm you're not a bot")
     );
 
-    expect(message).toContain("cookieless");
-    expect(message).toContain("egress proxy");
+    expect(message).toContain("refusing capture requests from this server");
+    expect(message).toContain("upload the video file");
+    expect(message).not.toContain("after Clipper tried");
     expect(message).not.toContain("Refresh the Railway YouTube cookies");
   });
 

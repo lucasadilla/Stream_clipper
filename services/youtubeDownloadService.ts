@@ -4,6 +4,7 @@ import os from "os";
 import { randomUUID } from "crypto";
 import fs from "fs/promises";
 import { prisma } from "@/lib/db";
+import { YoutubeCapturePausedError, youtubeCaptureRetryAt, recordYoutubeCaptureChallenge, clearYoutubeCaptureChallenge } from "@/lib/youtubeCaptureBackoff";
 import {
   canDecodeVideoFrame,
   getFfmpegPath,
@@ -811,11 +812,12 @@ export function classifyYtDlpError(error: unknown): YtDlpErrorKind {
 }
 
 export function formatYtDlpUserError(error: unknown): string {
+  if (error instanceof YoutubeCapturePausedError) return error.message;
   switch (classifyYtDlpError(error)) {
     case "po_token_unavailable":
       return "YouTube did not return a playable format to this server. Clipper tried its token provider and fallback clients; retry shortly or upload the authorized VOD.";
     case "bot_verification":
-      return "YouTube challenged this server's network after Clipper tried authenticated, cookieless, HLS, TV, and token-backed capture routes. Retry shortly; if it continues, use a clean Railway egress proxy or upload the authorized VOD.";
+      return "YouTube is refusing capture requests from this server. Server access must be restored before this link can be processed. You can upload the video file instead.";
     case "youtube_cookies_invalid":
       return "The server's YouTube login cookies were rotated and rejected. Replace the Railway YT_DLP_COOKIES_B64 value with a fresh signed-in browser export, then retry.";
     case "private_video":
@@ -868,6 +870,8 @@ export async function runYtDlp(
     onOutputLine?: (line: string) => void;
   }
 ): Promise<{ stdout: string; stderr: string }> {
+  const retryAt = youtubeCaptureRetryAt(url);
+  if (retryAt) throw new YoutubeCapturePausedError(retryAt);
   const invocation = await resolveYtDlpInvocation();
   if (!invocation) {
     throw new Error(
@@ -990,6 +994,8 @@ async function runYtDlpWithFormatFallback(
     onAttempt?: (attempt: number) => void;
   }
 ): Promise<void> {
+  const retryAt = youtubeCaptureRetryAt(url);
+  if (retryAt) throw new YoutubeCapturePausedError(retryAt);
   let lastError: Error | null = null;
   const deadline = options?.timeoutMs
     ? Date.now() + Math.max(1_000, options.timeoutMs)
@@ -1079,6 +1085,7 @@ async function runYtDlpWithFormatFallback(
           );
         }
       }
+      clearYoutubeCaptureChallenge(url);
       return;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
@@ -1102,6 +1109,9 @@ async function runYtDlpWithFormatFallback(
     }
   }
 
+  if (lastError && platform === "youtube" && classifyYtDlpError(lastError) === "bot_verification") {
+    recordYoutubeCaptureChallenge(url, true);
+  }
   throw lastError ?? new Error("yt-dlp download failed");
 }
 

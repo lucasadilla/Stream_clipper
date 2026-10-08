@@ -1,3 +1,4 @@
+import { youtubeCaptureRetryAt, recordYoutubeCaptureChallenge, clearYoutubeCaptureChallenge } from "@/lib/youtubeCaptureBackoff";
 import path from "path";
 import { existsSync } from "fs";
 import { type ChildProcess, spawn } from "child_process";
@@ -15,6 +16,7 @@ import {
   detectDownloadPlatform,
   isLiveFromStartUnavailable,
   markYoutubeCookiesRejected,
+  classifyYtDlpError,
 } from "@/services/youtubeDownloadService";
 
 /** Detached bestaudio capture when the primary file is video-only DASH. */
@@ -122,6 +124,9 @@ function startCompanionAudioDownload(
   const existingProc = activeCompanionAudio.get(streamSessionId);
   if (existingProc && !existingProc.killed) return;
 
+  // A separate session for the same video must not restart blocked traffic.
+  if (youtubeCaptureRetryAt(youtubeUrl, true)) return;
+
   const last = companionAttemptAt.get(streamSessionId) ?? 0;
   if (Date.now() - last < COMPANION_RETRY_MS && !existsSync(outputPath)) {
     return;
@@ -192,6 +197,12 @@ function startCompanionAudioDownload(
           activeCompanionAudio.delete(streamSessionId);
         }
         const detail = companionErrors.get(streamSessionId) ?? "";
+        if (platform === "youtube") {
+          if (code === 0) clearYoutubeCaptureChallenge(youtubeUrl);
+          else if (classifyYtDlpError(detail) === "bot_verification") {
+            recordYoutubeCaptureChallenge(youtubeUrl);
+          }
+        }
         if (code !== 0) {
           console.warn(
             `[companion-audio] ${streamSessionId}: yt-dlp exited with code ${code}${

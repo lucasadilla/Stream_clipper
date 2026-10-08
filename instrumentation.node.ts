@@ -54,7 +54,7 @@ async function logMediaRuntime(): Promise<void> {
   console.info(
     `[runtime] YouTube cookies: ${
       cookieStatus.valid
-        ? "configured and valid"
+        ? "file format valid; YouTube login acceptance unverified"
         : cookieStatus.configured
           ? `invalid (${cookieStatus.error ?? "format error"})`
           : "not configured"
