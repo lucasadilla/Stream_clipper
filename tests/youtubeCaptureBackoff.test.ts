@@ -45,6 +45,15 @@ describe("blocked YouTube capture backoff", () => {
       .rejects.toBeInstanceOf(YoutubeCapturePausedError);
   });
 
+  it("allows fresh fallback clients after the pause even if companion audio fails first", () => {
+    vi.useFakeTimers();
+    recordYoutubeCaptureChallenge(url, true);
+    vi.advanceTimersByTime(5 * 60_000);
+    recordYoutubeCaptureChallenge(url);
+    expect(youtubeCaptureRetryAt(url, true)).toBeGreaterThan(Date.now());
+    expect(youtubeCaptureRetryAt(url)).toBeNull();
+  });
+
   it("clears the pause after a successful download", () => {
     recordYoutubeCaptureChallenge(url, true);
     clearYoutubeCaptureChallenge(url);

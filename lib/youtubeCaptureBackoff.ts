@@ -29,7 +29,7 @@ export function recordYoutubeCaptureChallenge(url: string, exhausted = false): v
   failures.set(id, {
     count,
     until: alreadyPaused ? prior.until : Date.now() + Math.min(MAX_DELAY_MS, INITIAL_DELAY_MS * 2 ** (count - 1)),
-    exhausted: exhausted || (prior?.exhausted ?? false),
+    exhausted: exhausted || Boolean(alreadyPaused && prior.exhausted),
   });
   // Bound memory even when users submit many distinct unavailable sources.
   if (failures.size > 500) failures.delete(failures.keys().next().value!);
