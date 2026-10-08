@@ -125,17 +125,13 @@ export async function POST(
         ? [row.id]
         : [];
     });
-    if (legacyIds.length > 0) {
-      await prisma.$transaction([
-        prisma.faceAnalysisJob.deleteMany({
-          where: { clipSuggestionId: { in: legacyIds } },
-        }),
-        prisma.clipSuggestion.deleteMany({ where: { id: { in: legacyIds } } }),
-      ]);
-    }
-
+    // Replace stale copy only after its replacements pass editorial review.
+    // A provider outage must not erase the creator's existing pick list.
     const existingCount = await prisma.clipSuggestion.count({
-      where: { streamSessionId: sessionId, status: { not: "rejected" } },
+      where: {
+        streamSessionId: sessionId, status: { not: "rejected" },
+        id: { notIn: legacyIds },
+      },
     });
 
     let result: Awaited<ReturnType<typeof autoSuggestClips>> = {
@@ -155,6 +151,7 @@ export async function POST(
         const room = Math.max(0, cap - existingCount);
         result = await autoSuggestClips(sessionId, 0, {
           extraLimit: Math.min(body.extra, room),
+          replaceSuggestionIds: legacyIds,
           ...rollingWindow,
         });
       } else if (existingCount >= body.limit) {
@@ -163,7 +160,7 @@ export async function POST(
         result = await autoSuggestClips(
           sessionId,
           Math.min(body.limit - existingCount, cap - existingCount),
-          rollingWindow
+          { ...rollingWindow, replaceSuggestionIds: legacyIds }
         );
       }
     }

@@ -1,9 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ create: vi.fn(), available: vi.fn() }));
+const mocks = vi.hoisted(() => ({ create: vi.fn(), direct: vi.fn(), available: vi.fn(), router: vi.fn() }));
 vi.mock("@/lib/aiProvider", () => ({
   hasAnyAiKey: mocks.available,
   getAiClient: () => ({ chat: { completions: { create: mocks.create } } }),
+  getOpenAiDirectClient: () => ({ chat: { completions: { create: mocks.direct } } }),
+  isOpenRouterEnabled: mocks.router,
 }));
 vi.mock("@/lib/aiModelPolicy", () => ({
   getHookEnginePolicy: () => ({ strong: { model: "editor", maxTokens: 6000, timeoutMs: 30000 } }),
@@ -38,8 +40,12 @@ const write = (value = proposal) => response({ clips: [value] });
 const approve = () => response({ reviews: [review] });
 
 describe("final clip editorial boundary", () => {
+  afterEach(() => vi.unstubAllEnvs());
   beforeEach(() => {
     mocks.create.mockReset();
+    mocks.direct.mockReset();
+    mocks.router.mockReturnValue(true);
+    vi.stubEnv("OPENAI_API_KEY", "");
     mocks.available.mockReturnValue(true);
   });
 
@@ -104,5 +110,19 @@ describe("final clip editorial boundary", () => {
     mocks.available.mockReturnValue(false);
     await expect(writeReviewedClipEditorial([source])).rejects.toThrow("AI is unavailable");
     expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it("reports credit failures without pretending a retry will fix billing", async () => {
+    mocks.create.mockRejectedValue(Object.assign(new Error("payment required"), { status: 402 }));
+    await expect(writeReviewedClipEditorial([source])).rejects.toThrow("insufficient credits");
+    expect(mocks.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses a configured backup for credit failures and still requires review", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-backup");
+    mocks.create.mockRejectedValue(Object.assign(new Error("payment required"), { status: 402 }));
+    mocks.direct.mockResolvedValueOnce(write()).mockResolvedValueOnce(approve());
+    expect((await writeReviewedClipEditorial([source])).get(source.id)?.title).toBe(proposal.title);
+    expect(mocks.direct).toHaveBeenCalledTimes(2);
   });
 });

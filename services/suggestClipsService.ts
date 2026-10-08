@@ -351,6 +351,7 @@ export async function autoSuggestClips(
     extraLimit?: number;
     fromSeconds?: number;
     throughSeconds?: number;
+    replaceSuggestionIds?: string[];
   }
 ) {
   const extra = Math.max(0, Math.min(15, options?.extraLimit ?? 0));
@@ -404,7 +405,10 @@ export async function autoSuggestClips(
         take: 60,
       }),
       prisma.clipSuggestion.findMany({
-        where: { streamSessionId, status: { not: "rejected" } },
+        where: {
+          streamSessionId, status: { not: "rejected" },
+          id: { notIn: options?.replaceSuggestionIds ?? [] },
+        },
       }),
       prisma.transcriptChunk.findMany({
         where: {
@@ -1140,9 +1144,9 @@ export async function autoSuggestClips(
       } : candidate.hookPackage,
     }];
   });
-  const created = await Promise.all(
+  const createReviewedClips = (db: Pick<typeof prisma, "clipSuggestion">) => Promise.all(
     reviewedCandidates.map((candidate) =>
-      prisma.clipSuggestion.create({
+      db.clipSuggestion.create({
         data: {
           streamSessionId,
           title: candidate.title.slice(0, 200),
@@ -1194,6 +1198,19 @@ export async function autoSuggestClips(
     )
   );
 
+  const replacementIds = options?.replaceSuggestionIds ?? [];
+  const created = replacementIds.length && reviewedCandidates.length
+    ? await prisma.$transaction(async (tx) => {
+        const replaceable = await tx.clipSuggestion.findMany({
+          where: { id: { in: replacementIds }, streamSessionId, status: "suggested" },
+          select: { id: true },
+        });
+        const ids = replaceable.map((clip) => clip.id);
+        await tx.faceAnalysisJob.deleteMany({ where: { clipSuggestionId: { in: ids } } });
+        await tx.clipSuggestion.deleteMany({ where: { id: { in: ids } } });
+        return createReviewedClips(tx);
+      })
+    : await createReviewedClips(prisma);
   return { created: created.length, clips: created };
 }
 
