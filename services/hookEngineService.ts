@@ -394,11 +394,17 @@ function applyReview(
  * bounded strong-model call comparing only the best configured subset.
  */
 export async function buildHookPackages(
-  inputs: BuildHookPackageInput[]
+  inputs: BuildHookPackageInput[],
+  options: { useAi?: boolean } = {}
 ): Promise<Map<string, ClipPackage>> {
   const policy = getHookEnginePolicy();
   const localPackages = inputs.map((input) => buildLocalClipPackage(input));
   if (policy.mode === "legacy") return new Map();
+  // Automatic clip discovery uses free local opening selection. AI judging is
+  // opt-in, rather than rewriting and scoring copy that the writer replaces.
+  if (!options.useAi) {
+    return new Map(inputs.map((input, index) => [input.momentId, localPackages[index]!]));
+  }
 
   const seriousInputs = inputs.slice(0, policy.seriousCandidateLimit);
   const seriousPackages = localPackages.slice(0, policy.seriousCandidateLimit);

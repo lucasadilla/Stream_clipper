@@ -380,8 +380,8 @@ async function completeRenderJob(input: {
   }
 
   let qualityReview: PostRenderQualityReview | null = null;
-  const previewReviewEnabled = !/^(0|false|off|no)$/i.test(
-    process.env.POST_RENDER_CRITIC_PREVIEWS_ENABLED?.trim() ?? "true"
+  const previewReviewEnabled = /^(1|true|on|yes)$/i.test(
+    process.env.POST_RENDER_CRITIC_PREVIEWS_ENABLED?.trim() ?? "false"
   );
   if (!input.params.preview || previewReviewEnabled) {
     await updateJobProgress(input.jobId, 94, "quality_check");

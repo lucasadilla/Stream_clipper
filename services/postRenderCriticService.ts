@@ -91,8 +91,8 @@ function gameplayCriticContext(
 
 function criticEnabled(): boolean {
   if (process.env.NODE_ENV === "test") return false;
-  return !/^(0|false|off|no)$/i.test(
-    process.env.POST_RENDER_CRITIC_ENABLED?.trim() ?? "true"
+  return /^(1|true|on|yes)$/i.test(
+    process.env.POST_RENDER_CRITIC_ENABLED?.trim() ?? "false"
   );
 }
 

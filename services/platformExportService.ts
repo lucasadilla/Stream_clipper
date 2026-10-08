@@ -634,7 +634,7 @@ export async function failPlatformExport(
 
 export async function regeneratePlatformExportCopy(platformExportId: string) {
   const { platformExport, copyInput } = await buildCopyContext(platformExportId);
-  const generatedPackage = await generatePlatformCopyPackage(copyInput);
+  const generatedPackage = await generatePlatformCopyPackage(copyInput, { generate: true });
   const copy = generatedPackage.copy;
   const settings = parseSettings(platformExport.exportSettings);
   const warnings = validateCompletedPlatformExport({

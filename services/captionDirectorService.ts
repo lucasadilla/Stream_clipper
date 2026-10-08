@@ -201,7 +201,7 @@ export async function getCaptionDirectionForClip(
   const cached = options.force
     ? null
     : parseCaptionDirectionPlan(clip.captionDirection, cues);
-  if (cached && (cached.generatedBy === "ai" || !hasAnyAiKey())) {
+  if (cached) {
     return { plan: cached, cues };
   }
 

@@ -22,7 +22,11 @@ import { readSpeakerContext } from "@/services/speakerContextService";
 import { isSpecificClickableClipTitle } from "@/lib/clipTitleQuality";
 
 const platformPackagingResponseSchema = z.object({
-  candidates: z.array(platformPackagingCandidateSchema).min(8).max(20),
+  candidates: z.array(platformPackagingCandidateSchema.omit({
+    specificity: true, curiosity: true, accuracy: true, brevity: true,
+    naturalness: true, keywordRelevance: true, platformSuitability: true,
+    spoilerRisk: true, clickbaitRisk: true,
+  })).length(1),
 });
 
 export interface GeneratePlatformCopyInput {
@@ -278,7 +282,8 @@ function fallbackCandidate(
 }
 
 export async function generatePlatformCopyPackage(
-  input: GeneratePlatformCopyInput
+  input: GeneratePlatformCopyInput,
+  options: { generate?: boolean } = {}
 ): Promise<RankedPlatformPackage> {
   const fallback = fallbackCopy(input);
   const localCandidate = fallbackCandidate(input, fallback);
@@ -308,11 +313,13 @@ export async function generatePlatformCopyPackage(
     warnings: localRank.warnings,
     reasoningEvidence: localCandidate.evidence,
   });
-  if (!hasAnyAiKey()) return localPackage();
+  // Adapt already-written clip copy locally by default. Only an explicit
+  // regenerate action spends on new platform wording.
+  if (!options.generate || !hasAnyAiKey()) return localPackage();
 
   const preset = PLATFORM_PRESETS[input.platform];
   const entities = verifiedEntities(input);
-  const prompt = `Generate 12-16 distinct, ready-to-publish packages for ${preset.name}, then let application code rank them. Each option must sound native to the platform, specific to this exact clip, and human.
+  const prompt = `Write exactly ONE ready-to-publish package for ${preset.name}. Make it specific to this exact clip and human. Do not generate alternatives, scores, ratings, or critiques.
 
 Limits:
 - title: ${preset.titleLimit ?? 100} characters maximum when used
@@ -331,7 +338,7 @@ Editorial requirements:
 - Visual-analysis labels are private evidence. Never publish or paraphrase phrases such as scene change detected, burst of visual motion, interface changed, event window, or narrative arc.
 - Never invent a name, keyword, quote, outcome, or controversy.
 - Make the title/caption worth clicking without vague clickbait.
-- Vary strategies across specific_fact, curiosity, result, conflict, quote, unexpected_outcome, challenge, explanation, and reaction.
+- Choose one suitable strategy: specific_fact, curiosity, result, conflict, quote, unexpected_outcome, challenge, explanation, or reaction.
 - Fill every field that ${preset.name} actually uses. Keep irrelevant fields null.
 - For TikTok, Instagram, Facebook, and X: write platform-native caption/postText and include only a few relevant hashtags.
 - For YouTube: provide a specific title, a non-redundant description, up to 3 relevant hashtags, up to 8 search keywords, and a grounded pinned comment.
@@ -339,7 +346,6 @@ Editorial requirements:
 - Description must add concrete context beyond the title. Do not repeat the title as its opening sentence and do not describe the detector, edit, framing, transcript, or narrative structure.
 - Pinned comments should ask a specific conversation-starting question about this clip.
 - EVIDENCE must be an exact 2-12 word phrase copied from the transcript below.
-- Score each option honestly from 0-100. Accuracy is factual support, never predicted virality.
 
 Grounded working title: ${fallback.title}
 Why it matters: ${stripInternalClipCopy(input.clipReason) || fallback.description || fallback.caption || "Use the transcript context"}
@@ -353,16 +359,16 @@ Transcript: ${input.transcriptText.slice(0, 7000) || "Unavailable"}
 Chat signals: ${(input.chatSignals ?? "Unavailable").slice(0, 1200)}
 
 Return only JSON in this structure:
-{"candidates":[{"candidateId":"stable-id","strategy":"specific_fact","title":"...","caption":null,"postText":null,"description":"...","hashtags":["#Relevant"],"tags":["relevant keyword"],"quoteText":"...","thumbnailText":null,"pinnedComment":"...","evidence":["exact source phrase"],"specificity":90,"curiosity":75,"accuracy":98,"brevity":88,"naturalness":92,"keywordRelevance":85,"platformSuitability":94,"spoilerRisk":12,"clickbaitRisk":3}]}
+{"candidates":[{"candidateId":"single-package","strategy":"specific_fact","title":"...","caption":null,"postText":null,"description":"...","hashtags":["#Relevant"],"tags":["relevant keyword"],"quoteText":"...","thumbnailText":null,"pinnedComment":"...","evidence":["exact source phrase"]}]}
 Use null when a field is irrelevant.`;
 
   try {
     const policy = getHookEnginePolicy();
     const response = await getAiClient().chat.completions.create(
       {
-        model: policy.strong.model,
-        temperature: policy.strong.temperature,
-        max_tokens: policy.strong.maxTokens,
+        model: policy.cheap.model,
+        temperature: policy.cheap.temperature,
+        max_tokens: 1200,
         response_format: { type: "json_object" },
         messages: [
           {
@@ -373,50 +379,29 @@ Use null when a field is irrelevant.`;
           { role: "user", content: prompt },
         ],
       },
-      { timeout: policy.strong.timeoutMs }
+      { timeout: Math.min(30_000, policy.cheap.timeoutMs), maxRetries: 0 }
     );
     const content = response.choices[0]?.message?.content;
     if (!content) return localPackage();
     const parsed = platformPackagingResponseSchema.parse(parseJson(content));
-    const ranked = [
-      ...parsed.candidates.map((candidate) => {
-        const copy = normalizeCopy(candidate, fallback, input);
-        const quality = rankPlatformPackagingCandidate(
-          candidate,
-          copy,
-          context,
-          { importantEntities: entities }
-        );
-        return { candidate, copy, ...quality };
-      }),
-      {
-        candidate: localCandidate,
-        copy: fallback,
-        rankScore: localRank.rankScore,
-        warnings: localRank.warnings,
-      },
-    ]
-      .filter(
-        (item, index, all) =>
-          all.findIndex(
-            (other) =>
-              (other.copy.title ?? other.copy.caption ?? other.copy.postText ?? "")
-                .toLocaleLowerCase() ===
-              (item.copy.title ?? item.copy.caption ?? item.copy.postText ?? "")
-                .toLocaleLowerCase()
-          ) === index
-      )
-      .sort((a, b) => b.rankScore - a.rankScore);
-    const selected = ranked[0];
-    if (!selected) return localPackage();
+    // Legacy packaging metadata retains local metrics, but the model produces
+    // no scores and there is no alternatives/reranking pass.
+    const candidate = { ...localCandidate, ...parsed.candidates[0]! };
+    const normalizedSource = input.transcriptText.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ");
+    if (!candidate.evidence.every((phrase) => normalizedSource.includes(
+      phrase.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ")
+    ))) return localPackage();
+    const copy = normalizeCopy(candidate, fallback, input);
+    const quality = rankPlatformPackagingCandidate(candidate, copy, context, { importantEntities: entities });
+    const selected = { candidate, copy, ...quality };
     return {
       copy: selected.copy,
       packagingDNA: buildPackagingDNA({
         platform: input.platform,
         selected: selected.candidate,
         copy: selected.copy,
-        alternatives: ranked,
-        modelVersion: `${policy.strong.provider}:${policy.strong.model}`,
+        alternatives: [selected],
+        modelVersion: `${policy.cheap.provider}:${policy.cheap.model}`,
       }),
       warnings: selected.warnings,
       reasoningEvidence: selected.candidate.evidence,
@@ -510,7 +495,9 @@ export async function generatePlatformCopiesForClip(
   const copies = await Promise.all(
     uniquePlatforms.map(async (platform) => [
       platform,
-      await generatePlatformCopy({ platform, ...base }),
+      // Studio reuses the clip's written title/description and adapts limits
+      // locally. Opening eight platform tabs must not trigger eight AI jobs.
+      buildFallbackPlatformCopy({ platform, ...base }),
     ] as const)
   );
   return Object.fromEntries(copies) as Partial<Record<PlatformKey, PlatformCopy>>;

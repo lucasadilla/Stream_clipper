@@ -15,8 +15,6 @@ import {
 } from "@/lib/clipContentProfile";
 import {
   isSpecificClickableTitle,
-  rankClipCandidatesWithAI,
-  type RankedCandidate,
 } from "@/services/clipRankingService";
 import {
   refineClipToCompleteSpeech,
@@ -26,7 +24,6 @@ import {
   applyVisualContextToNarrativePlan,
   narrativePlanQualityBonus,
   planNarrativeClip,
-  type NarrativeBeat,
   type NarrativePlan,
 } from "@/lib/narrativeBeats";
 import type { StructuredVisualContext } from "@/lib/visualAnalysis";
@@ -39,7 +36,7 @@ import {
 } from "@/lib/hookIntelligence";
 import { buildHookPackages } from "@/services/hookEngineService";
 import { parseSpeakerContext } from "@/lib/speakerContext";
-import { writeReviewedClipEditorial } from "@/services/clipEditorialService";
+import { writeClipEditorial } from "@/services/clipEditorialService";
 
 export const CLIP_SUGGESTION_VERSION = 12;
 
@@ -120,146 +117,6 @@ function transcriptSnippetFromChunks(
     if (text.length >= take) break;
   }
   return text.join(" ");
-}
-
-function normalizeEvidenceText(value: string): string {
-  return value
-    .toLocaleLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function evidenceTimeFromChunks(
-  chunks: TranscriptSnippetChunk[],
-  start: number,
-  end: number,
-  evidence: string
-): number | null {
-  const needle = normalizeEvidenceText(evidence);
-  if (!needle) return null;
-  for (const chunk of chunks) {
-    if (chunk.startTimeSeconds > end) break;
-    if (chunk.endTimeSeconds < start) continue;
-    if (normalizeEvidenceText(chunk.text).includes(needle)) {
-      return Math.max(
-        start,
-        Math.min(end, (chunk.startTimeSeconds + chunk.endTimeSeconds) / 2)
-      );
-    }
-  }
-  return null;
-}
-
-function rankedBeatStrength(
-  role: NarrativeBeat["role"],
-  scores: NonNullable<RankedCandidate["narrativeScores"]>
-): number {
-  switch (role) {
-    case "hook":
-      return scores.hook / 100;
-    case "payoff":
-    case "reaction":
-      return scores.payoff / 100;
-    case "resolution":
-      return scores.completeness / 100;
-    case "setup":
-    case "escalation":
-      return scores.coherence / 100;
-  }
-}
-
-function mergeRankedNarrativePlan(
-  base: NarrativePlan | undefined,
-  ranked: RankedCandidate
-): NarrativePlan | undefined {
-  if (
-    !base ||
-    ranked.startTimeSeconds == null ||
-    ranked.endTimeSeconds == null ||
-    ranked.focusTimeSeconds == null ||
-    !ranked.narrativeArcType ||
-    !ranked.narrativeScores
-  ) {
-    return base;
-  }
-  const rankedStart = ranked.startTimeSeconds;
-  const rankedEnd = ranked.endTimeSeconds;
-  const rankedFocus = ranked.focusTimeSeconds;
-  const selectedChunks = base.contextChunks.filter(
-    (chunk) =>
-      chunk.endTimeSeconds >= rankedStart - 0.5 &&
-      chunk.startTimeSeconds <= rankedEnd + 0.5
-  );
-  const chunkById = new Map(
-    base.contextChunks.map((chunk) => [chunk.id, chunk])
-  );
-  const beats = (ranked.narrativeBeats ?? []).flatMap((beat) => {
-    const chunk = chunkById.get(beat.chunkId);
-    if (!chunk) return [];
-    return [
-      {
-        ...beat,
-        startTimeSeconds: chunk.startTimeSeconds,
-        endTimeSeconds: chunk.endTimeSeconds,
-        strength: rankedBeatStrength(beat.role, ranked.narrativeScores!),
-      },
-    ];
-  });
-  const first = selectedChunks[0];
-  const last = selectedChunks.at(-1);
-  const focusChunk = selectedChunks.reduce<TranscriptSnippetChunk | null>(
-    (closest, chunk) => {
-      if (!closest) return chunk;
-      const chunkDistance = Math.abs(
-        (chunk.startTimeSeconds + chunk.endTimeSeconds) / 2 -
-          rankedFocus
-      );
-      const closestDistance = Math.abs(
-        (closest.startTimeSeconds + closest.endTimeSeconds) / 2 -
-          rankedFocus
-      );
-      return chunkDistance < closestDistance ? chunk : closest;
-    },
-    null
-  );
-  const blendScore = (deterministic: number, ai: number) =>
-    Math.round(deterministic * 0.35 + ai * 0.65);
-  const blendedScores = {
-    hook: blendScore(base.scores.hook, ranked.narrativeScores.hook),
-    payoff: blendScore(base.scores.payoff, ranked.narrativeScores.payoff),
-    completeness: blendScore(
-      base.scores.completeness,
-      ranked.narrativeScores.completeness
-    ),
-    standalone: blendScore(
-      base.scores.standalone,
-      ranked.narrativeScores.standalone
-    ),
-    coherence: blendScore(
-      base.scores.coherence,
-      ranked.narrativeScores.coherence
-    ),
-    pacing: blendScore(base.scores.pacing, ranked.narrativeScores.pacing),
-    total: blendScore(base.scores.total, ranked.narrativeScores.total),
-  };
-
-  return {
-    ...base,
-    startTimeSeconds: rankedStart,
-    endTimeSeconds: rankedEnd,
-    focusTimeSeconds: rankedFocus,
-    startChunkId: first?.id ?? null,
-    endChunkId: last?.id ?? null,
-    focusChunkId: focusChunk?.id ?? null,
-    arcType: ranked.narrativeArcType,
-    beats,
-    scores: blendedScores,
-    selectedText: selectedChunks.map((chunk) => chunk.text).join(" "),
-    endingComplete: true,
-    accepted: true,
-    rejectionReason: undefined,
-  };
 }
 
 function chatInRange(
@@ -858,9 +715,6 @@ export async function autoSuggestClips(
       }
     }
   }
-  const aiCandidatesById = new Map(
-    aiCandidateEntries.map((entry) => [entry.id, entry.candidate])
-  );
   const speakerContext = parseSpeakerContext(session?.metadataJson);
   const verifiedPeopleForRange = (start: number, end: number): string[] => {
     const namedSpeakers = speakerContext
@@ -883,98 +737,6 @@ export async function autoSuggestClips(
       ...namedSpeakers,
     ])];
   };
-  const aiRanking = await rankClipCandidatesWithAI({
-    streamTitle: session?.title,
-    streamDescription: session?.description,
-    channelTitle: session?.channelTitle,
-    editorialRequest:
-      session?.metadataJson && typeof session.metadataJson === "object"
-        ? String(
-            (session.metadataJson as Record<string, unknown>)
-              .onboardingAgentPrompt ?? ""
-          ) || null
-        : null,
-    contentType,
-    candidates: aiCandidateEntries.map(({ id, candidate }) => ({
-      id,
-      startTimeSeconds: candidate.start,
-      endTimeSeconds: candidate.end,
-      source: candidate.source,
-      currentTitle: candidate.title,
-      context: candidate.context,
-      signalScore: candidate.worth,
-      focusTimeSeconds: candidate.focusTimeSeconds,
-      targetMinSeconds: Math.min(profile.targetMinSeconds, 18),
-      maximumDurationSeconds: narrativeMaximumSeconds,
-      transcriptChunks: candidate.narrativePlan?.contextChunks,
-      visualContext: candidate.visualContext,
-      knownPeople: verifiedPeopleForRange(candidate.start, candidate.end),
-    })),
-  });
-  if (aiRanking?.length) {
-    const rankedCandidates = aiRanking.flatMap((ranked) => {
-      const candidate = aiCandidatesById.get(ranked.id);
-      if (!candidate) return [];
-      const narrativePlan = mergeRankedNarrativePlan(
-        candidate.narrativePlan,
-        ranked
-      );
-      return [
-        {
-          ...candidate,
-          title: ranked.title,
-          // `reason` is surfaced as public description/caption context. Keep
-          // ranking rationale internal so producer notes never reach a post.
-          reason: candidate.reason,
-          rankingEvidence: ranked.evidence,
-          titleAccuracyScore: ranked.titleAccuracyScore,
-          clickabilityScore: ranked.clickabilityScore,
-          start: ranked.startTimeSeconds ?? candidate.start,
-          end: ranked.endTimeSeconds ?? candidate.end,
-          focusTimeSeconds:
-            ranked.focusTimeSeconds ??
-            evidenceTimeFromChunks(
-              transcriptChunks,
-              ranked.startTimeSeconds ?? candidate.start,
-              ranked.endTimeSeconds ?? candidate.end,
-              ranked.evidence
-            ) ??
-            candidate.focusTimeSeconds,
-          narrativePlan,
-          narrativeSource: "ai" as const,
-          worth:
-            candidate.worth * 0.2 +
-            ranked.interestScore * 0.45 +
-            (narrativePlan?.scores.total ?? 0) * 0.2 +
-            (ranked.clickabilityScore ?? 70) * 0.15,
-          confidence: Math.max(
-            candidate.confidence,
-            Math.min(
-              0.98,
-              (ranked.interestScore * 0.62 +
-                (narrativePlan?.scores.total ?? ranked.interestScore) * 0.23 +
-                (ranked.clickabilityScore ?? 70) * 0.15) /
-                100
-            )
-          ),
-        },
-      ];
-    });
-    rankedCandidates.sort((a, b) => b.worth - a.worth);
-    const rankedOriginals = new Set(
-      aiRanking.flatMap((ranked) => {
-        const original = aiCandidatesById.get(ranked.id);
-        return original ? [original] : [];
-      })
-    );
-    candidates.splice(
-      0,
-      candidates.length,
-      ...rankedCandidates,
-      ...candidates.filter((candidate) => !rankedOriginals.has(candidate))
-    );
-  }
-
   const selected: ClipCandidate[] = [];
   const accepted = existingClips.map((c) => ({
     startTimeSeconds: c.startTimeSeconds,
@@ -1111,8 +873,8 @@ export async function autoSuggestClips(
     }
   });
 
-  // Both ranked and fallback candidates converge here AFTER all boundary and
-  // hook changes. Only independently reviewed copy can cross the DB boundary.
+  // All selected candidates converge here AFTER all boundary and
+  // hook changes. One generation supplies the final copy; local evidence checks guard persistence.
   const editorialInputs = selected.map((candidate, index) => ({
     id: rankingCandidateId(candidate, index),
     transcript: transcriptSnippetFromChunks(usableTranscriptChunks, candidate.start, candidate.end, Infinity),
@@ -1120,11 +882,11 @@ export async function autoSuggestClips(
       ? candidate.visualContext.summary : undefined,
     knownPeople: verifiedPeopleForRange(candidate.start, candidate.end),
   }));
-  const editorial = await writeReviewedClipEditorial(
+  const editorial = await writeClipEditorial(
     editorialInputs,
     existingClips.map((clip) => clip.title)
   );
-  const reviewedCandidates = selected.flatMap((candidate, index) => {
+  const writtenCandidates = selected.flatMap((candidate, index) => {
     const copy = editorial.get(editorialInputs[index]!.id);
     if (!copy) return [];
     const packageTitle = candidate.hookPackage?.titleCandidates.find(
@@ -1136,7 +898,7 @@ export async function autoSuggestClips(
       reason: copy.description,
       editorial: copy,
       // Studio must not offer the earlier unreviewed hook title as a way to
-      // overwrite the final headline. Keep only the reviewed candidate.
+      // overwrite the final headline. Keep only the final written candidate.
       hookPackage: candidate.hookPackage && packageTitle ? {
         ...candidate.hookPackage,
         titleCandidates: [{ ...packageTitle, title: copy.title }],
@@ -1144,8 +906,8 @@ export async function autoSuggestClips(
       } : candidate.hookPackage,
     }];
   });
-  const createReviewedClips = (db: Pick<typeof prisma, "clipSuggestion">) => Promise.all(
-    reviewedCandidates.map((candidate) =>
+  const createWrittenClips = (db: Pick<typeof prisma, "clipSuggestion">) => Promise.all(
+    writtenCandidates.map((candidate) =>
       db.clipSuggestion.create({
         data: {
           streamSessionId,
@@ -1199,7 +961,7 @@ export async function autoSuggestClips(
   );
 
   const replacementIds = options?.replaceSuggestionIds ?? [];
-  const created = replacementIds.length && reviewedCandidates.length
+  const created = replacementIds.length && writtenCandidates.length
     ? await prisma.$transaction(async (tx) => {
         const replaceable = await tx.clipSuggestion.findMany({
           where: { id: { in: replacementIds }, streamSessionId, status: "suggested" },
@@ -1208,9 +970,9 @@ export async function autoSuggestClips(
         const ids = replaceable.map((clip) => clip.id);
         await tx.faceAnalysisJob.deleteMany({ where: { clipSuggestionId: { in: ids } } });
         await tx.clipSuggestion.deleteMany({ where: { id: { in: ids } } });
-        return createReviewedClips(tx);
+        return createWrittenClips(tx);
       })
-    : await createReviewedClips(prisma);
+    : await createWrittenClips(prisma);
   return { created: created.length, clips: created };
 }
 
