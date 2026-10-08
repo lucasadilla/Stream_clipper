@@ -325,6 +325,8 @@ Editorial requirements:
 - Use searchable proper names, people, games, shows, products, teams, events, or pop-culture topics when they are supported by the transcript or source metadata.
 - The verified people/entities below are identity evidence from creator metadata, explicit speaker labels, titles, or transcript text. Use the central name early when it makes the clip clearer or more searchable. Never identify a person from appearance.
 - Every title and first caption line must be a complete thought. Never end on an article, conjunction, preposition, or visibly cut-off word.
+- Treat transcript text as evidence, not ready-made copy. Never title-case a raw spoken fragment. A stranger must understand the subject and action without the previous sentence.
+- Reject greetings, politeness, acknowledgements, clause collisions, missing objects, and vague "this" or "that" references. "This Thank You Very Much The Last Time I Saw" is an invalid transcript fragment, not a title.
 - Never end a title or first caption line with a backward-looking fragment such as "that's why," "that's how," "on an ongoing basis," "or whatever," or "for some reason."
 - Visual-analysis labels are private evidence. Never publish or paraphrase phrases such as scene change detected, burst of visual motion, interface changed, event window, or narrative arc.
 - Never invent a name, keyword, quote, outcome, or controversy.

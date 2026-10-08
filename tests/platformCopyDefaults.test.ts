@@ -104,6 +104,22 @@ describe("platform-ready fallback copy", () => {
     );
     expect(copy.description).toContain("Ben Affleck");
   });
+
+  it("does not publish a title-cased transcript fragment", () => {
+    const copy = buildFallbackPlatformCopy({
+      platform: "youtube_shorts",
+      clipTitle: "This Thank You Very Much The Last Time I Saw",
+      clipReason: "This Thank You Very Much The Last Time I Saw.",
+      transcriptText: "This Thank You Very Much The Last Time I Saw.",
+      streamTitle: "Ben Affleck Reflects on His Career",
+      streamerName: "One More Question",
+      people: ["Ben Affleck"],
+      durationSeconds: 40,
+    });
+
+    expect(copy.title).toBe("Ben Affleck Reflects on His Career");
+    expect(copy.description).not.toMatch(/thank you very much|last time i saw/i);
+  });
 });
 
 describe("clip descriptions", () => {

@@ -4,6 +4,7 @@ import {
   getChatModel,
   hasAnyAiKey,
 } from "@/lib/aiProvider";
+import { getHookEnginePolicy } from "@/lib/aiModelPolicy";
 import type { ClipContentType } from "@/lib/clipContentProfile";
 import {
   cleanNarrativeText,
@@ -120,6 +121,9 @@ const titleVerificationSchema = z.object({
       approved: z.boolean(),
       title: z.string().min(3).max(100),
       evidence: z.string().min(3).max(180),
+      completeThought: z.boolean(),
+      standaloneClarityScore: z.number().min(0).max(100),
+      specificityScore: z.number().min(0).max(100),
       accuracyScore: z.number().min(0).max(100),
       clickabilityScore: z.number().min(0).max(100),
     })
@@ -384,6 +388,8 @@ Rules:
 - Questions are allowed only when the clip contains or clearly sets up the answer.
 - Use no quotation marks. Never improve or invent dialogue.
 - Titles must be complete, specific, 4-11 words, and under 72 characters.
+- Treat transcript wording only as factual evidence. Never title-case and reuse a
+  spoken phrase unless it already reads as a complete standalone headline.
 - Prefer 5-9 words with a concrete subject, a strong verb, and the specific
   tension, reveal, mistake, decision, or payoff that makes this moment distinct.
 - Lead with the most compelling supported idea. Remove throat-clearing, filler,
@@ -392,14 +398,21 @@ Rules:
   while still naming what the clip is actually about.
 - Avoid vague pronouns when the subject would be unclear outside the stream.
 - Avoid generic hype such as shocking, insane, unbelievable, or must watch.
+- Reject greetings, politeness, acknowledgements, deictic fragments, and clauses
+  missing an object. Examples of invalid structures include "This Thank You Very
+  Much The Last Time I Saw," "That's Why," and "The Last Time I Saw."
+- COMPLETE_THOUGHT means the title has no missing subject, object, antecedent,
+  setup, or ending. STANDALONE_CLARITY means a stranger can understand what the
+  clip is about without seeing the transcript or the preceding sentence.
 - EVIDENCE must be an exact 2-12 word phrase copied from this candidate.
 - ACCURACY is factual/title-to-clip support, not writing quality.
 - CLICKABILITY rewards clear tension, surprise, usefulness, conflict, or payoff
   without exaggeration.
-- APPROVED may be true only when accuracyScore >= 90 and clickabilityScore >= 75.
+- APPROVED may be true only when completeThought is true, standaloneClarityScore
+  >= 90, specificityScore >= 80, accuracyScore >= 90, and clickabilityScore >= 75.
 
 Return JSON only:
-{"reviews":[{"id":"candidate_id","approved":true,"title":"Accurate clickable title","evidence":"exact candidate phrase","accuracyScore":96,"clickabilityScore":82}]}
+{"reviews":[{"id":"candidate_id","approved":true,"title":"Accurate clickable title","evidence":"exact candidate phrase","completeThought":true,"standaloneClarityScore":95,"specificityScore":90,"accuracyScore":96,"clickabilityScore":82}]}
 
 Candidates:
 ${ranked
@@ -410,8 +423,9 @@ ${ranked
   .join("\n\n")}`;
 
   try {
+    const titlePolicy = getHookEnginePolicy().strong;
     const response = await getAiClient().chat.completions.create({
-      model: getChatModel(),
+      model: titlePolicy.model,
       messages: [
         {
           role: "system",
@@ -421,9 +435,9 @@ ${ranked
         { role: "user", content: prompt },
       ],
       response_format: { type: "json_object" },
-      temperature: 0.1,
-      max_tokens: 1800,
-    });
+      temperature: Math.min(0.1, titlePolicy.temperature),
+      max_tokens: Math.min(2400, titlePolicy.maxTokens),
+    }, { timeout: titlePolicy.timeoutMs });
     const content = response.choices[0]?.message?.content;
     if (!content) return null;
     const decoded: unknown = JSON.parse(content);
@@ -439,6 +453,9 @@ ${ranked
       if (!original || !candidate || seen.has(review.id)) return [];
       if (
         !review.approved ||
+        !review.completeThought ||
+        review.standaloneClarityScore < 90 ||
+        review.specificityScore < 80 ||
         review.accuracyScore < 90 ||
         review.clickabilityScore < 75 ||
         !isRankingEvidenceGrounded(review.evidence, candidate.context)
@@ -554,6 +571,11 @@ Rules:
   interface change, event window, or narrative arc into a public title.
 - A transcript sentence is source evidence, not automatically a headline.
   Rewrite it into natural headline grammar while preserving the exact claim.
+- Never title-case a transcript fragment and call it finished. Reject a moment
+  when no complete, specific, standalone headline can be written from its evidence.
+- Invalid examples include politeness ("thank you very much"), clause collisions
+  ("This Thank You Very Much The Last Time I Saw"), missing objects ("The Last
+  Time I Saw"), and vague references whose subject is only "this" or "that."
 - Return clips in strongest-to-weakest order.
 - Never invent an event, quote, person, result or claim absent from the context.
 - For each clip, return EVIDENCE as an exact 2-12 word phrase copied from that

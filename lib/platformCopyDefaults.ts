@@ -3,6 +3,7 @@ import {
   containsInternalClipSignalLanguage,
   hasIncompleteClipThoughtEnding,
   isSpecificClickableClipTitle,
+  looksLikeRawTranscriptFragment,
 } from "@/lib/clipTitleQuality";
 import { PLATFORM_PRESETS } from "@/lib/platforms/presets";
 import type { PlatformCopy, PlatformKey } from "@/lib/platforms/types";
@@ -55,6 +56,7 @@ export function stripInternalClipCopy(value: string): string {
         sentence.length > 0 &&
         !containsInternalClipSignalLanguage(sentence) &&
         !hasIncompleteClipThoughtEnding(sentence) &&
+        !looksLikeRawTranscriptFragment(sentence) &&
         !/\b(?:was detected|analysis signal|producer note)\b/i.test(sentence)
     )
     .join(" ")
@@ -253,6 +255,7 @@ function transcriptSummary(input: PlatformCopyContext, keywords: string[]): stri
           sentence.length <= 360 &&
           !containsInternalClipSignalLanguage(sentence) &&
           !hasIncompleteClipThoughtEnding(sentence) &&
+          !looksLikeRawTranscriptFragment(sentence) &&
           sentence.toLocaleLowerCase() !== title.toLocaleLowerCase() &&
           !/self-contained excerpt from the original conversation/i.test(sentence)
       )

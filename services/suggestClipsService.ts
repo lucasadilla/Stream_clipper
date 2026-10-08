@@ -41,7 +41,7 @@ import {
 import { buildHookPackages } from "@/services/hookEngineService";
 import { parseSpeakerContext } from "@/lib/speakerContext";
 
-export const CLIP_SUGGESTION_VERSION = 10;
+export const CLIP_SUGGESTION_VERSION = 11;
 
 const MIN_SCORE = 6;
 const OVERLAP_RATIO = 0.45;

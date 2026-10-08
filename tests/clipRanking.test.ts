@@ -103,6 +103,17 @@ describe("clickable title quality gate", () => {
     expect(
       isSpecificClickableTitle("A Significant Visual Scene Change Was Detected")
     ).toBe(false);
+    expect(
+      isSpecificClickableTitle(
+        "This Thank You Very Much The Last Time I Saw"
+      )
+    ).toBe(false);
+    expect(
+      isSpecificClickableTitle("The Last Time I Saw")
+    ).toBe(false);
+    expect(
+      isSpecificClickableTitle("The Last Time Ben Affleck Saw Matt Damon")
+    ).toBe(true);
   });
 });
 

@@ -3,6 +3,7 @@ import {
   containsInternalClipSignalLanguage,
   hasIncompleteClipThoughtEnding,
   isSpecificClickableClipTitle,
+  looksLikeRawTranscriptFragment,
 } from "@/lib/clipTitleQuality";
 
 interface ChatQuote {
@@ -145,6 +146,7 @@ function isPublishableContextSentence(value: string): boolean {
   if (cleaned.split(/\s+/).filter(Boolean).length < 4) return false;
   if (containsInternalClipSignalLanguage(cleaned)) return false;
   if (hasIncompleteClipThoughtEnding(cleaned)) return false;
+  if (looksLikeRawTranscriptFragment(cleaned)) return false;
   if (/\b(?:was detected|analysis signal|confidence score|ranking score)\b/i.test(cleaned)) {
     return false;
   }

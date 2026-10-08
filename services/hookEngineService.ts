@@ -215,6 +215,9 @@ Every title must read as a complete headline with a clear subject and action.
 Never use a raw transcript fragment, verbal filler such as "you know" or
 "I mean," or a title beginning with a conjunction or preposition. When a
 verified person is central to the moment, prefer their name over a vague pronoun.
+Transcript wording is evidence, not a ready-made title. Reject greetings,
+politeness, acknowledgements, clause collisions, missing objects, and vague
+"this" or "that" references. A stranger must understand the subject and action.
 Never end with "that's why," "that's how," "on an ongoing basis," or another
 fragment that depends on missing context. Never use analysis labels such as
 scene change, visual motion detected, event window, or narrative arc as copy.
