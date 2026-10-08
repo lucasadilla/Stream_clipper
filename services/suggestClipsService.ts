@@ -16,7 +16,6 @@ import {
 import {
   isSpecificClickableTitle,
   rankClipCandidatesWithAI,
-  sanitizeRankedClipTitle,
   type RankedCandidate,
 } from "@/services/clipRankingService";
 import {
@@ -40,8 +39,9 @@ import {
 } from "@/lib/hookIntelligence";
 import { buildHookPackages } from "@/services/hookEngineService";
 import { parseSpeakerContext } from "@/lib/speakerContext";
+import { writeReviewedClipEditorial } from "@/services/clipEditorialService";
 
-export const CLIP_SUGGESTION_VERSION = 11;
+export const CLIP_SUGGESTION_VERSION = 12;
 
 const MIN_SCORE = 6;
 const OVERLAP_RATIO = 0.45;
@@ -1028,8 +1028,6 @@ export async function autoSuggestClips(
       };
     }
     if (isTooSimilar(c, accepted)) continue;
-    const cleanTitle = sanitizeRankedClipTitle(c.title);
-    if (!isSpecificClickableTitle(cleanTitle)) continue;
     if (
       c.source === "even_sample" &&
       selected.length >= Math.ceil(targetCount * 0.6)
@@ -1037,7 +1035,6 @@ export async function autoSuggestClips(
       continue;
     }
 
-    c.title = cleanTitle;
     selected.push(c);
     accepted.push({
       startTimeSeconds: c.start,
@@ -1110,8 +1107,41 @@ export async function autoSuggestClips(
     }
   });
 
+  // Both ranked and fallback candidates converge here AFTER all boundary and
+  // hook changes. Only independently reviewed copy can cross the DB boundary.
+  const editorialInputs = selected.map((candidate, index) => ({
+    id: rankingCandidateId(candidate, index),
+    transcript: transcriptSnippetFromChunks(usableTranscriptChunks, candidate.start, candidate.end, Infinity),
+    visualSummary: candidate.visualContext?.sufficient && candidate.visualContext.confidence >= 0.62
+      ? candidate.visualContext.summary : undefined,
+    knownPeople: verifiedPeopleForRange(candidate.start, candidate.end),
+  }));
+  const editorial = await writeReviewedClipEditorial(
+    editorialInputs,
+    existingClips.map((clip) => clip.title)
+  );
+  const reviewedCandidates = selected.flatMap((candidate, index) => {
+    const copy = editorial.get(editorialInputs[index]!.id);
+    if (!copy) return [];
+    const packageTitle = candidate.hookPackage?.titleCandidates.find(
+      (title) => title.id === candidate.hookPackage?.selectedTitleCandidateId
+    ) ?? candidate.hookPackage?.titleCandidates[0];
+    return [{
+      ...candidate,
+      title: copy.title,
+      reason: copy.description,
+      editorial: copy,
+      // Studio must not offer the earlier unreviewed hook title as a way to
+      // overwrite the final headline. Keep only the reviewed candidate.
+      hookPackage: candidate.hookPackage && packageTitle ? {
+        ...candidate.hookPackage,
+        titleCandidates: [{ ...packageTitle, title: copy.title }],
+        selectedTitleCandidateId: packageTitle.id,
+      } : candidate.hookPackage,
+    }];
+  });
   const created = await Promise.all(
-    selected.map((candidate) =>
+    reviewedCandidates.map((candidate) =>
       prisma.clipSuggestion.create({
         data: {
           streamSessionId,
@@ -1125,6 +1155,7 @@ export async function autoSuggestClips(
           rawAiJson: toJsonValue({
             source: "auto_suggest",
             suggestionVersion: CLIP_SUGGESTION_VERSION,
+            editorial: candidate.editorial,
             kind: candidate.source,
             worth: candidate.worth,
             contentType: candidate.contentType,

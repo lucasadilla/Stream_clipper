@@ -27,7 +27,7 @@ import { getPostHogClient } from "@/lib/posthog-server";
 import { MAX_CLIP_SECONDS } from "@/lib/clipConstants";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 const bodySchema = z.object({
   limit: z.number().int().min(1).max(20).optional().default(10),

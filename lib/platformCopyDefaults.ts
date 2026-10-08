@@ -220,12 +220,11 @@ function publishableTitle(input: PlatformCopyContext): string {
     .replace(/^Clip\s+\d{1,3}:\d{2}(?::\d{2})?$/i, "")
     .trim();
   const generic = /^(?:stream moment|stream highlight|highlight|moment|untitled)$/i;
-  const transcriptHook = extractClipHook(cleanSourceText(input.transcriptText));
   const streamTitle = truncatePlatformText(
     cleanSourceText(input.streamTitle ?? ""),
     72
   );
-  for (const candidate of [raw, transcriptHook, streamTitle]) {
+  for (const candidate of [raw, streamTitle]) {
     if (!candidate || generic.test(candidate)) continue;
     const shortened = truncatePlatformText(candidate, 72);
     if (isSpecificClickableClipTitle(shortened)) return shortened;
@@ -239,6 +238,15 @@ function publishableTitle(input: PlatformCopyContext): string {
 
 function transcriptSummary(input: PlatformCopyContext, keywords: string[]): string {
   const title = publishableTitle(input);
+  // The final editorial pass writes this for the selected moment. Do not
+  // replace it with a keyword-heavy sentence extracted from spoken audio.
+  const writtenDescription = cleanSourceText(input.clipReason);
+  if (writtenDescription.length >= 35 &&
+    writtenDescription.toLocaleLowerCase().replace(/[.!?]+$/, "") !==
+      title.toLocaleLowerCase().replace(/[.!?]+$/, "") &&
+    !/self-contained excerpt from the original conversation/i.test(writtenDescription)) {
+    return writtenDescription;
+  }
   const keywordSet = keywords.slice(0, 5).map((keyword) => keyword.toLocaleLowerCase());
   const sources = [
     { value: input.transcriptText, sourceScore: 8 },

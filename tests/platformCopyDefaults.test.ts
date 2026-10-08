@@ -25,7 +25,7 @@ describe("platform-ready fallback copy", () => {
     });
 
     expect(copy.title).toContain("Taylor Swift");
-    expect(copy.description).toContain("surprise song");
+    expect(copy.description).toContain("Taylor explains why the song changed.");
     expect(copy.description).not.toMatch(/candidate|24:37/i);
     expect(copy.caption).toBeNull();
     expect(copy.hashtags).toEqual([]);

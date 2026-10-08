@@ -73,13 +73,7 @@ export function extractClipHook(transcriptText: string | null | undefined): stri
     }
   }
 
-  // Fall back to a clean word window, never a mid-word cut.
-  const words = cleaned.split(/\s+/).filter(Boolean);
-  if (words.length < 4) return null;
-  const start = Math.max(0, Math.floor(words.length * 0.25));
-  const slice = words.slice(start, start + 10).join(" ");
-  const candidate = tidyTitle(slice);
-  return isSpecificClickableClipTitle(candidate) ? candidate : null;
+  return null;
 }
 
 function tidyTitle(raw: string): string {
