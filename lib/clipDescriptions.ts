@@ -1,4 +1,5 @@
 import { formatSeconds } from "@/lib/time";
+import { isSpecificClickableClipTitle } from "@/lib/clipTitleQuality";
 
 interface ChatQuote {
   authorName?: string;
@@ -35,7 +36,8 @@ export function extractClipHook(transcriptText: string | null | undefined): stri
   for (const pattern of HOOK_PATTERNS) {
     const match = cleaned.match(pattern);
     if (match?.[0]) {
-      return tidyTitle(match[0]);
+      const candidate = tidyTitle(match[0]);
+      if (isSpecificClickableClipTitle(candidate)) return candidate;
     }
   }
 
@@ -60,15 +62,19 @@ export function extractClipHook(transcriptText: string | null | undefined): stri
         };
       })
       .sort((a, b) => b.score - a.score);
-    return tidyTitle(scored[0]!.sentence);
+    for (const item of scored) {
+      const candidate = tidyTitle(item.sentence);
+      if (isSpecificClickableClipTitle(candidate)) return candidate;
+    }
   }
 
   // Fall back to a clean word window, never a mid-word cut.
   const words = cleaned.split(/\s+/).filter(Boolean);
-  if (words.length < 4) return tidyTitle(cleaned.slice(0, 60));
+  if (words.length < 4) return null;
   const start = Math.max(0, Math.floor(words.length * 0.25));
   const slice = words.slice(start, start + 10).join(" ");
-  return tidyTitle(slice);
+  const candidate = tidyTitle(slice);
+  return isSpecificClickableClipTitle(candidate) ? candidate : null;
 }
 
 function tidyTitle(raw: string): string {
@@ -103,7 +109,7 @@ export function buildSpecificClipTitle(input: BuildClipCopyInput): string {
     const best = pickBestChatLine(chatMessages);
     if (best) {
       const short = tidyTitle(best.messageText);
-      if (short.length >= 8) return short;
+      if (isSpecificClickableClipTitle(short)) return short;
     }
   }
 
@@ -111,15 +117,20 @@ export function buildSpecificClipTitle(input: BuildClipCopyInput): string {
   if (hook) return hook;
 
   if (eventSummary && eventSummary.trim().length > 8) {
-    return tidyTitle(eventSummary);
+    const eventTitle = tidyTitle(eventSummary);
+    if (isSpecificClickableClipTitle(eventTitle)) return eventTitle;
   }
 
   if (audioSummary && audioSummary.trim().length > 8) {
-    return tidyTitle(audioSummary);
+    const audioTitle = tidyTitle(audioSummary);
+    if (isSpecificClickableClipTitle(audioTitle)) return audioTitle;
   }
 
   if (hypeHits?.length) {
-    return `Chat loses it: “${hypeHits.slice(0, 2).join('", "')}”`;
+    const hypeTitle = tidyTitle(
+      `Chat reacts to ${hypeHits.slice(0, 2).join(" and ")}`
+    );
+    if (isSpecificClickableClipTitle(hypeTitle)) return hypeTitle;
   }
 
   return `Peak moment · ${formatSeconds(startTimeSeconds)}`;

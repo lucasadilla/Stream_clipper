@@ -14,6 +14,10 @@ import {
 } from "@/lib/narrativeBeats";
 import { speechEndingNeedsContinuation } from "@/lib/clipBoundaries";
 import type { StructuredVisualContext } from "@/lib/visualAnalysis";
+import {
+  isSpecificClickableClipTitle,
+  meaningfulClipTitleWords,
+} from "@/lib/clipTitleQuality";
 
 export type RankingCandidate = {
   id: string;
@@ -162,16 +166,8 @@ export function sanitizeRankedClipTitle(title: string): string {
   return cleaned.slice(0, 72).replace(/\s+\S*$/, "").trim();
 }
 
-const TITLE_STOP_WORDS = new Set([
-  "a", "an", "and", "are", "at", "but", "by", "for", "from", "how",
-  "in", "is", "it", "of", "on", "or", "that", "the", "this", "to",
-  "was", "what", "when", "why", "with",
-]);
-
 function meaningfulWords(value: string): string[] {
-  return normalizeGroundingText(value)
-    .split(" ")
-    .filter((word) => word.length >= 3 && !TITLE_STOP_WORDS.has(word));
+  return meaningfulClipTitleWords(value);
 }
 
 function titleGroundingContext(candidate: RankingCandidate): string {
@@ -203,39 +199,7 @@ export function isRankedTitleGrounded(
 
 /** Reject vague, incomplete, or manufactured clickbait before it reaches UI. */
 export function isSpecificClickableTitle(title: string): boolean {
-  const words = title.trim().split(/\s+/).filter(Boolean);
-  if (words.length < 4 || words.length > 11) return false;
-  if (
-    words.some((word) => {
-      const normalized = word.toLowerCase().replace(/[^a-z0-9]/g, "");
-      return normalized.length === 1 && normalized !== "a" && normalized !== "i";
-    })
-  ) {
-    return false;
-  }
-  if (/\b(?:a|an|and|but|for|from|in|of|on|or|the|to|with)\??$/i.test(title)) {
-    return false;
-  }
-  if (
-    /^(?:insane|crazy|epic|shocking|unbelievable)\b/i.test(title) ||
-    /\b(?:you won'?t believe|what happens next|must watch|breaks the internet)\b/i.test(
-      title
-    ) ||
-    /\b(?:random|something|stuff|the biggest ones|this moment)\b/i.test(title)
-  ) {
-    return false;
-  }
-  if (/^(?:bro+|dude|lol|lmao)\b/i.test(title)) return false;
-  const meaningful = meaningfulWords(title);
-  const uniqueMeaningful = new Set(meaningful);
-  if (
-    meaningful.length >= 4 &&
-    uniqueMeaningful.size / meaningful.length < 0.72
-  ) {
-    return false;
-  }
-  if (/^[A-Z\d\W]+$/.test(title) && /[A-Z]/.test(title)) return false;
-  return meaningful.length >= 2;
+  return isSpecificClickableClipTitle(title);
 }
 
 type NarrativeSelection = {
@@ -580,6 +544,12 @@ Rules:
   more precise action, conflict, reason, or outcome.
 - The title must describe the same exact event or statement as EVIDENCE.
 - Write a complete grammatical title without quotation marks.
+- Every title needs a clear subject and action, decision, conflict, or payoff.
+- Never begin with a dangling connector such as And, But, Because, Of, or So.
+  Never copy verbal filler such as you know, I mean, kind of,
+  sort of, or you feel like into a title.
+- A transcript sentence is source evidence, not automatically a headline.
+  Rewrite it into natural headline grammar while preserving the exact claim.
 - Return clips in strongest-to-weakest order.
 - Never invent an event, quote, person, result or claim absent from the context.
 - For each clip, return EVIDENCE as an exact 2-12 word phrase copied from that

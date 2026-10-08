@@ -42,7 +42,7 @@ import {
 import { buildHookPackages } from "@/services/hookEngineService";
 import { parseSpeakerContext } from "@/lib/speakerContext";
 
-export const CLIP_SUGGESTION_VERSION = 8;
+export const CLIP_SUGGESTION_VERSION = 9;
 
 const MIN_SCORE = 6;
 const OVERLAP_RATIO = 0.45;
@@ -1061,6 +1061,7 @@ export async function autoSuggestClips(
     return {
       momentId,
       creator: session?.channelTitle,
+      knownPeople: verifiedPeopleForRange(candidate.start, candidate.end),
       contentCategory: candidate.contentType,
       title: candidate.title,
       startTimeSeconds: candidate.start,
@@ -1102,7 +1103,12 @@ export async function autoSuggestClips(
       const selectedTitle = clipPackage.titleCandidates.find(
         (title) => title.id === clipPackage.selectedTitleCandidateId
       );
-      if (selectedTitle) candidate.title = selectedTitle.title;
+      if (
+        selectedTitle &&
+        isSpecificClickableTitle(selectedTitle.title)
+      ) {
+        candidate.title = selectedTitle.title;
+      }
     }
   });
 

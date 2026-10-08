@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { NarrativePlan } from "@/lib/narrativeBeats";
 import type { StructuredVisualContext } from "@/lib/visualAnalysis";
+import { isSpecificClickableClipTitle } from "@/lib/clipTitleQuality";
 
 export const HOOK_ENGINE_VERSION = "hook-engine-v1";
 export const HOOK_POLICY_VERSION = "hook-policy-v1";
@@ -256,6 +257,7 @@ export interface HookTranscriptChunk {
 export interface BuildHookPackageInput {
   momentId: string;
   creator?: string | null;
+  knownPeople?: string[];
   contentCategory: string;
   title: string;
   startTimeSeconds: number;
@@ -642,11 +644,17 @@ function titleScore(title: string, strategy: TitleCandidate["strategy"]): TitleC
   const titleWords = words(cleaned);
   const generic = GENERIC_TITLE.test(cleaned);
   const allCaps = /^[A-Z\d\W]+$/.test(cleaned) && /[A-Z]/.test(cleaned);
-  const specificity = clampScore(78 - (generic ? 50 : 0) + (titleWords.length >= 5 ? 8 : 0));
+  const publishable = isSpecificClickableClipTitle(cleaned);
+  const specificity = clampScore(
+    78 - (generic ? 50 : 0) - (publishable ? 0 : 55) +
+      (titleWords.length >= 5 ? 8 : 0)
+  );
   const curiosity = clampScore(48 + (CURIOSITY.test(cleaned) ? 28 : 0));
   const accuracy = generic ? 58 : 88;
   const brevity = clampScore(100 - Math.max(0, titleWords.length - 9) * 10);
-  const naturalness = clampScore(88 - (allCaps ? 55 : 0) - (generic ? 25 : 0));
+  const naturalness = clampScore(
+    88 - (allCaps ? 55 : 0) - (generic ? 25 : 0) - (publishable ? 0 : 60)
+  );
   const spoilerRisk = strategy === "result" || strategy === "unexpected_outcome" ? 32 : 12;
   const clickbaitRisk = clampScore((generic ? 70 : 5) + (allCaps ? 25 : 0));
   const rankScore = clampScore(
@@ -675,6 +683,7 @@ function titleScore(title: string, strategy: TitleCandidate["strategy"]): TitleC
     warnings: [
       ...(generic ? ["Generic short-form language was penalized."] : []),
       ...(allCaps ? ["Excessive capitalization was penalized."] : []),
+      ...(!publishable ? ["Title reads like an incomplete transcript fragment."] : []),
     ],
   });
 }
@@ -697,7 +706,8 @@ export function buildLocalTitleCandidates(
       ? [titleScore(hook.firstCaptionText, "quote")]
       : []),
   ];
-  return candidates
+  const publishable = candidates
+    .filter((candidate) => isSpecificClickableClipTitle(candidate.title))
     .filter(
       (candidate, index, all) =>
         all.findIndex(
@@ -705,6 +715,9 @@ export function buildLocalTitleCandidates(
         ) === index
     )
     .sort((a, b) => b.rankScore - a.rankScore);
+  // Keep the package structurally valid for an old/manual clip with no usable
+  // title. Callers must not apply this low-scoring fallback automatically.
+  return publishable.length > 0 ? publishable : candidates.slice(0, 1);
 }
 
 export function reviewHookCandidate(candidate: HookCandidate) {

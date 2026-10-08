@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildLocalClipPackage,
+  buildLocalTitleCandidates,
   generateHookCandidates,
   reviewHookCandidate,
   shouldApplyHookDecision,
@@ -172,6 +173,22 @@ describe("hook intelligence", () => {
       clipPackage.selectedHook.firstCaptionText
     );
     expect(clipPackage.qualityReview.repairPasses).toBeLessThanOrEqual(1);
+  });
+
+  it("does not promote a broken first-caption fragment into a title", () => {
+    const hook = {
+      ...generateHookCandidates(input())[0]!,
+      firstCaptionText:
+        "Of Because It's You Know Hugely Profitable You Feel Like",
+    };
+    const titles = buildLocalTitleCandidates(
+      "He Wins the Round With One HP",
+      hook
+    );
+    expect(titles.map((candidate) => candidate.title)).not.toContain(
+      hook.firstCaptionText
+    );
+    expect(titles[0]?.title).toBe("He Wins the Round With One HP");
   });
 
   it("rejects confusion and missing context in the bounded critic", () => {

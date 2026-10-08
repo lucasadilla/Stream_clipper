@@ -69,6 +69,9 @@ describe("clickable title quality gate", () => {
   it("accepts a specific title with a clear payoff", () => {
     expect(isSpecificClickableTitle("Why the Council Rejected the Budget"))
       .toBe(true);
+    expect(
+      isSpecificClickableTitle("With One HP Left, Tarik Wins the Round")
+    ).toBe(true);
   });
 
   it("rejects generic clickbait and incomplete titles", () => {
@@ -83,6 +86,14 @@ describe("clickable title quality gate", () => {
     ).toBe(false);
     expect(
       isSpecificClickableTitle("Creator Explains Why Creator Explains Why")
+    ).toBe(false);
+    expect(
+      isSpecificClickableTitle(
+        "Of Because It's You Know Hugely Profitable You Feel Like"
+      )
+    ).toBe(false);
+    expect(
+      isSpecificClickableTitle("Because The Business Became Hugely Profitable")
     ).toBe(false);
   });
 });
@@ -107,5 +118,18 @@ describe("fallback clip title writing", () => {
     });
     expect(title).toContain("What's");
     expect(title).not.toMatch(/\sf$/i);
+  });
+
+  it("uses grounded event context instead of a broken transcript fragment", () => {
+    expect(
+      buildSpecificClipTitle({
+        startTimeSeconds: 0,
+        endTimeSeconds: 30,
+        transcriptText:
+          "of because it's you know hugely profitable you feel like",
+        eventSummary:
+          "The startup's subscription model became hugely profitable",
+      })
+    ).toBe("The Startup's Subscription Model Became Hugely Profitable");
   });
 });

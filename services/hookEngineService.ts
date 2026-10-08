@@ -77,7 +77,12 @@ function safeTitleCandidates(
   input: BuildHookPackageInput,
   fallback: TitleCandidate[]
 ): TitleCandidate[] {
-  const context = input.transcriptChunks.map((chunk) => chunk.text).join(" ");
+  const context = [
+    input.transcriptChunks.map((chunk) => chunk.text).join(" "),
+    ...(input.knownPeople ?? []),
+  ]
+    .filter(Boolean)
+    .join(" ");
   const candidates = review.titles.flatMap((candidate, index) => {
     const title = sanitizeRankedClipTitle(candidate.title);
     if (
@@ -164,6 +169,7 @@ function promptForPackages(
       momentId: input.momentId,
       contentCategory: input.contentCategory,
       currentTitle: input.title,
+      verifiedPeople: input.knownPeople ?? [],
       sourceTranscript: input.transcriptChunks
         .map(
           (chunk) =>
@@ -205,6 +211,10 @@ Generate 8-12 truthful title candidates per moment, using varied strategies.
 Titles must be specific, natural, 4-11 words, under 72 characters, and supported
 by an exact evidence phrase from that moment. Do not invent quotes, outcomes,
 names, stakes, or context. Avoid generic hype, ALL CAPS, emojis, and hashtags.
+Every title must read as a complete headline with a clear subject and action.
+Never use a raw transcript fragment, verbal filler such as "you know" or
+"I mean," or a title beginning with a conjunction or preposition. When a
+verified person is central to the moment, prefer their name over a vague pronoun.
 
 Return JSON only:
 {"reviews":[{"momentId":"id","selectedCandidateId":"candidate-id","decisionEvidence":["concise grounded reason"],"warnings":[],"titles":[{"strategy":"specific_fact","title":"Specific title","evidence":"exact source phrase","specificity":90,"curiosity":80,"accuracy":98,"brevity":90,"naturalness":92,"spoilerRisk":10,"clickbaitRisk":3}]}]}
