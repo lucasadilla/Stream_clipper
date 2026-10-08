@@ -12,7 +12,7 @@ vi.mock("@/lib/ffmpeg", () => ({ extractAudioSegment: extract }));
 vi.mock("@/lib/storage", () => ({ ensureDir: vi.fn(), getUploadDir: () => "unused-caption-test" }));
 vi.mock("@/services/accurateClipTranscriptionService", () => ({ transcribeClipAccurately: transcribe }));
 vi.mock("@/services/transcriptionSyncService", () => ({ resolveSourceForTranscription: vi.fn() }));
-import { refineClipTranscript } from "@/services/clipTranscriptRefinementService";
+import { refineClipTranscript, hasSavedClipTranscriptRefinement } from "@/services/clipTranscriptRefinementService";
 
 describe("selected clip transcript updates", () => {
   beforeEach(() => {
@@ -30,6 +30,30 @@ describe("selected clip transcript updates", () => {
     ];
     transcribe.mockResolvedValue([{ startTimeSeconds: 10, endTimeSeconds: 18.5,
       text: "hello recovered ending", words }]);
+  });
+
+  it("reuses an improved transcript on repeated requests without extracting or transcribing audio", async () => {
+    db.clipSuggestion.findUnique.mockResolvedValue({ id: "clip", streamSessionId: "session",
+      startTimeSeconds: 10, endTimeSeconds: 20,
+      rawAiJson: { transcriptRefinement: { version: "candidate-transcript-v3", status: "completed",
+        model: "quality-model", start: 10, end: 20, updatedChunks: 2 } } });
+    for (let request = 0; request < 3; request++) {
+      expect(await refineClipTranscript("clip")).toMatchObject({ status: "cached", updatedChunks: 2 });
+    }
+    expect(extract).not.toHaveBeenCalled();
+    expect(transcribe).not.toHaveBeenCalled();
+  });
+
+  it("uses saved improvements for exports only when they cover the whole requested range", async () => {
+    db.clipSuggestion.findUnique.mockResolvedValue({ rawAiJson: { transcriptRefinement: {
+      version: "candidate-transcript-v3", status: "completed", start: 10, end: 20,
+    } } });
+    expect(await hasSavedClipTranscriptRefinement("clip", 10, 20)).toBe(true);
+    expect(await hasSavedClipTranscriptRefinement("clip", 12, 18)).toBe(true);
+    expect(await hasSavedClipTranscriptRefinement("clip", 9, 20)).toBe(false);
+    expect(await hasSavedClipTranscriptRefinement("clip", 10, 21)).toBe(false);
+    expect(extract).not.toHaveBeenCalled();
+    expect(transcribe).not.toHaveBeenCalled();
   });
 
   it("writes recovered gap words and preserves speech outside the selected clip", async () => {

@@ -56,6 +56,20 @@ function clipMarker(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+/** Cache-only export lookup. Never extracts audio or calls a provider. */
+export async function hasSavedClipTranscriptRefinement(
+  clipSuggestionId: string,
+  startTimeSeconds: number,
+  endTimeSeconds: number
+): Promise<boolean> {
+  const clip = await prisma.clipSuggestion.findUnique({
+    where: { id: clipSuggestionId }, select: { rawAiJson: true },
+  });
+  const marker = clipMarker(clip?.rawAiJson);
+  return Boolean(marker && typeof marker.start === "number" && typeof marker.end === "number" &&
+    marker.start <= startTimeSeconds && marker.end >= endTimeSeconds);
+}
+
 export function isClipTranscriptRefinementConfigured(): boolean {
   return Boolean(
     process.env.OPENAI_API_KEY?.trim() &&

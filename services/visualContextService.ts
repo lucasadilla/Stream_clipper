@@ -369,11 +369,13 @@ async function callGemini(parts: Array<Record<string, unknown>>): Promise<string
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
     {
       method: "POST",
+      signal: AbortSignal.timeout(60_000),
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ role: "user", parts }],
         generationConfig: {
           temperature: 0.1,
+          maxOutputTokens: 8000,
           responseMimeType: "application/json",
         },
       }),
@@ -433,6 +435,7 @@ async function analyzeScreenshots(
   }
   const response = await getAiClient().chat.completions.create({
     model: getVisualAnalysisModel(),
+    max_tokens: 8000,
     response_format: { type: "json_object" },
     temperature: 0.1,
     messages: [
@@ -443,7 +446,7 @@ async function analyzeScreenshots(
       },
       { role: "user", content },
     ],
-  });
+  }, { timeout: 60_000, maxRetries: 0 });
   const result = response.choices[0]?.message?.content;
   if (!result) throw new Error("Visual analysis returned no content");
   return modelVisualContextSchema.parse(parseModelJson(result));

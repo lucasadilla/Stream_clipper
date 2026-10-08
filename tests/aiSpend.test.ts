@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ create: vi.fn(), clip: vi.fn() }));
+const mocks = vi.hoisted(() => ({ create: vi.fn(), clip: vi.fn(), update: vi.fn() }));
 vi.mock("@/lib/aiProvider", () => ({
   hasAnyAiKey: () => true,
   getAiClient: () => ({ chat: { completions: { create: mocks.create } } }),
@@ -12,14 +12,17 @@ vi.mock("@/lib/aiModelPolicy", () => ({
   }),
 }));
 vi.mock("@/lib/db", () => ({ prisma: {
-  clipSuggestion: { findUnique: mocks.clip },
+  clipSuggestion: { findUnique: mocks.clip, update: mocks.update },
   eventWindow: { findMany: async () => [] },
 } }));
 vi.mock("@/services/transcriptService", () => ({
-  getTranscriptChunksForRange: async () => [{ text: "Replacing the cable fixed the camera and avoided a new purchase." }],
+  getTranscriptChunksForRange: async () => [{ id: "speech", startTimeSeconds: 0, endTimeSeconds: 8, text: "Replacing the cable fixed the camera and avoided a new purchase." }],
 }));
 vi.mock("@/services/speakerContextService", () => ({ readSpeakerContext: async () => null }));
 
+vi.mock("@/services/captionEditService", () => ({ readCaptionEdits: async () => ({}) }));
+
+import { getCaptionDirectionForClip } from "@/services/captionDirectorService";
 import { buildHookPackages } from "@/services/hookEngineService";
 import { generatePlatformCopiesForClip, generatePlatformCopyPackage } from "@/services/platformCopyService";
 import type { PlatformKey } from "@/lib/platforms/types";
@@ -35,6 +38,7 @@ const context = {
 describe("automatic AI spend boundaries", () => {
   beforeEach(() => {
     mocks.create.mockReset();
+    mocks.update.mockResolvedValue({});
     mocks.clip.mockResolvedValue({
       id: "clip", title: context.clipTitle, reason: context.clipReason,
       streamSessionId: "session", startTimeSeconds: 0, endTimeSeconds: 45,
@@ -68,6 +72,21 @@ describe("automatic AI spend boundaries", () => {
   it("ordinary exports reuse written copy without spending on new alternatives", async () => {
     expect((await generatePlatformCopyPackage(context)).copy.title).toBe(context.clipTitle);
     expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it("styles new and changed captions locally even when AI styling was configured", async () => {
+    vi.stubEnv("CAPTION_DIRECTOR_AI_ENABLED", "true");
+    try {
+      const initial = await getCaptionDirectionForClip("clip");
+      expect(initial.cues.length).toBeGreaterThan(0);
+      expect(initial.plan.generatedBy).toBe("automatic");
+      const regenerated = await getCaptionDirectionForClip("clip", { force: true });
+      expect(regenerated.plan.generatedBy).toBe("automatic");
+      expect(mocks.update).toHaveBeenCalledTimes(2);
+      expect(mocks.create).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("an explicit regeneration makes one request with one unscored package", async () => {

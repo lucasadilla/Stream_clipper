@@ -123,6 +123,8 @@ interface AgentClipEditorProps {
   captionDirectionPlan?: CaptionDirectionPlan | null;
   captionDirectorLoading?: boolean;
   captionRefinementLoading?: boolean;
+  onImproveCaptions?: () => void;
+  captionRefinementMessage?: string | null;
 }
 
 export function AgentClipEditor({
@@ -160,6 +162,8 @@ export function AgentClipEditor({
   captionDirectionPlan = null,
   captionDirectorLoading = false,
   captionRefinementLoading = false,
+  onImproveCaptions,
+  captionRefinementMessage,
 }: AgentClipEditorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
@@ -1079,6 +1083,16 @@ export function AgentClipEditor({
               </span>
             )}
           </div>
+          {includeCaptions && onImproveCaptions && (
+            <button type="button" onClick={onImproveCaptions}
+              disabled={captionRefinementLoading || chunksLoading}
+              className="rounded-md border border-white/15 px-3 py-1.5 text-xs disabled:opacity-50">
+              {captionRefinementLoading ? "Improving captions…" : "Improve captions"}
+            </button>
+          )}
+          {captionRefinementMessage && (
+            <p role="status" className="text-xs text-[var(--color-muted)]">{captionRefinementMessage}</p>
+          )}
           <CaptionAppearancePanel
             appearance={captionAppearance}
             onChange={handleCaptionAppearanceChange}

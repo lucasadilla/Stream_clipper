@@ -795,26 +795,18 @@ export async function executeRenderJob(
 
   if (includeCaptions || textOverlays.length > 0) {
     await updateJobProgress(jobId, 35, "captions");
-    let authoritativeRefinement = false;
-    if (includeCaptions && !preview && clipSuggestionId) {
-      const { refineClipTranscript } = await import("@/services/clipTranscriptRefinementService");
-      const refinement = await refineClipTranscript(clipSuggestionId, {
-        inputPath, timelineOffsetSeconds: effectiveStart - renderStart,
-        startTimeSeconds: effectiveStart, endTimeSeconds: effectiveEnd,
-      });
-      authoritativeRefinement = refinement.status === "refined" || refinement.status === "cached";
-      await appendRenderJobLog(jobId, "caption_refinement",
-        authoritativeRefinement ? "Verified captions against the source audio" :
-          `Using the available transcript: ${refinement.reason ?? refinement.status}`);
-    }
     const speakerContext = includeCaptions
       ? await ensureSpeakerContext(streamSessionId).catch((error) => {
           console.warn("[render] speaker context unavailable:", error);
           return null;
         })
       : null;
-    // Persisted manual edits are applied below. A stale browser copy must not
-    // overwrite words recovered by the final audio verification pass.
+    // Reuse improved words without another paid audio pass. Persisted manual
+    // edits below still apply; an old browser tab cannot undo the improvement.
+    const authoritativeRefinement = includeCaptions && clipSuggestionId
+      ? await import("@/services/clipTranscriptRefinementService").then((service) =>
+          service.hasSavedClipTranscriptRefinement(clipSuggestionId, effectiveStart, effectiveEnd))
+      : false;
     const clientCues = (authoritativeRefinement ? [] : clientCaptionCues ?? []).filter(
       (cue) => {
         if (sequenceSegments.length === 0) {

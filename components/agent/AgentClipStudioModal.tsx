@@ -393,6 +393,8 @@ export function AgentClipStudioModal({
     useState<CaptionDirectionPlan | null>(null);
   const [captionDirectorLoading, setCaptionDirectorLoading] = useState(false);
   const [captionRefinementLoading, setCaptionRefinementLoading] = useState(false);
+  const captionRefinementControllerRef = useRef<AbortController | null>(null);
+  const [captionRefinementMessage, setCaptionRefinementMessage] = useState<string | null>(null);
   const [selectedPlatforms, setSelectedPlatforms] = useState<PlatformKey[]>([
     "youtube_shorts",
     "tiktok",
@@ -1199,45 +1201,14 @@ export function AgentClipStudioModal({
   }, [open, sessionId, clip.id, clip.startTimeSeconds, clip.endTimeSeconds]);
 
   useEffect(() => {
-    if (!open) return;
-    const controller = new AbortController();
-    setCaptionRefinementLoading(true);
+    setCaptionRefinementLoading(false);
+    setCaptionRefinementMessage(null);
+    return () => {
+      captionRefinementControllerRef.current?.abort();
+      captionRefinementControllerRef.current = null;
+    };
+  }, [open, clip.id]);
 
-    void fetch(`/api/clips/${clip.id}/transcript-refinement`, {
-      method: "POST",
-      cache: "no-store",
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        const body = (await response.json()) as {
-          status?: "refined" | "cached" | "skipped";
-        };
-        if (!response.ok || (body.status !== "refined" && body.status !== "cached")) return;
-
-        invalidateClipStudioCaptionCache(sessionId);
-        const currentRange = clipRangeRef.current;
-        const bundle = await loadClipStudioCaptions(
-          sessionId,
-          currentRange.startTimeSeconds,
-          currentRange.endTimeSeconds
-        );
-        if (controller.signal.aborted) return;
-        setPlatformCaptionChunks(bundle.chunks);
-        setSpeakerContext(bundle.speakerContext);
-        setPlatformCaptionEdits(bundle.edits);
-        platformCaptionEditsRef.current = bundle.edits;
-        setCaptionDirectionPlan(null);
-      })
-      .catch((error) => {
-        if (error instanceof DOMException && error.name === "AbortError") return;
-        // Refinement is opportunistic; the initial transcript remains editable.
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setCaptionRefinementLoading(false);
-      });
-
-    return () => controller.abort();
-  }, [open, sessionId, clip.id]);
 
   useEffect(() => {
     if (
@@ -1467,6 +1438,46 @@ export function AgentClipStudioModal({
     );
     if (!ok) throw new Error(data.error ?? "Could not save the current clip range");
   }, [clip.id, clip.startTimeSeconds, clip.endTimeSeconds]);
+  const improveCaptions = useCallback(async () => {
+    if (!open || captionRefinementControllerRef.current) return;
+    const controller = new AbortController();
+    captionRefinementControllerRef.current = controller;
+    setCaptionRefinementLoading(true);
+    setCaptionRefinementMessage(null);
+    try {
+      await persistCurrentClipRange();
+      if (controller.signal.aborted) return;
+      const response = await fetch(`/api/clips/${clip.id}/transcript-refinement`, {
+        method: "POST", cache: "no-store", signal: controller.signal,
+      });
+      const body = await response.json() as {
+        status?: "refined" | "cached" | "skipped"; error?: string;
+      };
+      if (!response.ok || (body.status !== "refined" && body.status !== "cached")) {
+        throw new Error(body.error || "Caption improvement is unavailable. Your existing captions are still saved.");
+      }
+      invalidateClipStudioCaptionCache(sessionId);
+      const range = clipRangeRef.current;
+      const bundle = await loadClipStudioCaptions(sessionId, range.startTimeSeconds, range.endTimeSeconds);
+      if (controller.signal.aborted) return;
+      setPlatformCaptionChunks(bundle.chunks);
+      setSpeakerContext(bundle.speakerContext);
+      setPlatformCaptionEdits(bundle.edits);
+      platformCaptionEditsRef.current = bundle.edits;
+      setCaptionDirectionPlan(null);
+      setCaptionRefinementMessage("Improved captions saved for preview and download.");
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setCaptionRefinementMessage(error instanceof Error ? error.message : "Couldn't improve captions. Please retry.");
+      }
+    } finally {
+      if (captionRefinementControllerRef.current === controller) {
+        captionRefinementControllerRef.current = null;
+        setCaptionRefinementLoading(false);
+      }
+    }
+  }, [open, clip.id, sessionId, persistCurrentClipRange]);
+
   const activePlatformCaptionCue = useMemo(
     () => lookupCueAtTime(platformCaptionCues, previewTime),
     [platformCaptionCues, previewTime]
@@ -2591,6 +2602,8 @@ export function AgentClipStudioModal({
                 captionDirectionPlan={captionDirectionPlan}
                 captionDirectorLoading={captionDirectorLoading}
                 captionRefinementLoading={captionRefinementLoading}
+                onImproveCaptions={improveCaptions}
+                captionRefinementMessage={captionRefinementMessage}
               />
             </div>
           </div>

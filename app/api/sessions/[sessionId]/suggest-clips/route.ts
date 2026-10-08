@@ -20,7 +20,6 @@ import {
   withAgentWizardState,
 } from "@/lib/agentWizard";
 import { ensureClipSuggestionThumbnails } from "@/services/clipThumbnailService";
-import { prepareSuggestedClips } from "@/services/clipAutoPrepareService";
 import { reclaimEphemeralStorage } from "@/services/storageReclaimService";
 import { prepareCaptionDirections } from "@/services/captionDirectorService";
 import { getPostHogClient } from "@/lib/posthog-server";
@@ -191,16 +190,6 @@ export async function POST(
         ),
       ]);
 
-    // Auto-compose vertical layouts (face detection → recommended crop).
-    // Fire-and-forget so the pick grid isn't blocked.
-      await prepareSuggestedClips(
-        sessionId,
-        (result.clips.length > 0 ? result.clips : clips.slice(0, 3)).map((c) => ({
-          id: c.id,
-          startTimeSeconds: c.startTimeSeconds,
-          endTimeSeconds: c.endTimeSeconds,
-        }))
-      );
     })().catch((error) => {
       console.warn("[suggest-clips] asset warmup failed", error);
     });

@@ -18,16 +18,13 @@ import {
 } from "@/services/clipRankingService";
 import {
   refineClipToCompleteSpeech,
-  refineClipToVisualEvents,
 } from "@/lib/clipBoundaries";
 import {
-  applyVisualContextToNarrativePlan,
   narrativePlanQualityBonus,
   planNarrativeClip,
   type NarrativePlan,
 } from "@/lib/narrativeBeats";
 import type { StructuredVisualContext } from "@/lib/visualAnalysis";
-import { buildCandidateVisualContexts } from "@/services/visualContextService";
 import { getHookEnginePolicy } from "@/lib/aiModelPolicy";
 import {
   clipPackageSchema,
@@ -650,71 +647,7 @@ export async function autoSuggestClips(
 
   candidates.sort((a, b) => b.worth - a.worth || b.confidence - a.confidence);
 
-  const aiPoolSize = Math.min(20, Math.max(10, targetCount * 2));
-  const aiPool = candidates.slice(0, aiPoolSize);
-  const aiCandidateEntries = aiPool.map((candidate, index) => ({
-    id: rankingCandidateId(candidate, index),
-    candidate,
-  }));
-  const visualContexts = await buildCandidateVisualContexts({
-    streamSessionId,
-    candidates: aiCandidateEntries.map(({ id, candidate }) => ({
-      id,
-      startTimeSeconds: candidate.start,
-      endTimeSeconds: candidate.end,
-      focusTimeSeconds: candidate.focusTimeSeconds,
-      signalScore: candidate.worth,
-      context: candidate.context,
-      contentType,
-    })),
-  }).catch((error) => {
-    console.warn(
-      "[suggest-clips] visual context unavailable; continuing with existing signals:",
-      error instanceof Error ? error.message : error
-    );
-    return null;
-  });
-  if (visualContexts) {
-    for (const { id, candidate } of aiCandidateEntries) {
-      const visualContext = visualContexts.contexts.get(id);
-      if (!visualContext) continue;
-      candidate.visualContext = visualContext;
-      const rankingContext = visualContexts.rankingContext.get(id);
-      if (rankingContext) {
-        candidate.context = [candidate.context, rankingContext]
-          .filter(Boolean)
-          .join(" | ");
-      }
-      if (candidate.narrativePlan) {
-        const priorBonus = narrativePlanQualityBonus(candidate.narrativePlan);
-        candidate.narrativePlan = applyVisualContextToNarrativePlan(
-          candidate.narrativePlan,
-          visualContext
-        );
-        candidate.worth +=
-          narrativePlanQualityBonus(candidate.narrativePlan) - priorBonus;
-      }
-      if (visualContext.sufficient) {
-        const visualBoundary = refineClipToVisualEvents({
-          start: candidate.start,
-          end: candidate.end,
-          events: visualContext.events,
-          maximumDurationSeconds: narrativeMaximumSeconds,
-        });
-        candidate.start = visualBoundary.start;
-        candidate.end = visualBoundary.end;
-        candidate.boundaryAdjusted =
-          candidate.boundaryAdjusted || visualBoundary.adjusted;
-        if (candidate.narrativePlan) {
-          candidate.narrativePlan = {
-            ...candidate.narrativePlan,
-            startTimeSeconds: candidate.start,
-            endTimeSeconds: candidate.end,
-          };
-        }
-      }
-    }
-  }
+  // Paid frame analysis belongs to the selected clip, not the discovery pool.
   const speakerContext = parseSpeakerContext(session?.metadataJson);
   const verifiedPeopleForRange = (start: number, end: number): string[] => {
     const namedSpeakers = speakerContext
