@@ -985,6 +985,8 @@ export function renderSourceFormatSort(): string {
   return "lang,res,fps,br,codec:vp9:av01:avc1";
 }
 
+class UnusableDownloadedVideoError extends Error {}
+
 async function runYtDlpWithFormatFallback(
   baseArgs: string[],
   url: string,
@@ -1026,7 +1028,8 @@ async function runYtDlpWithFormatFallback(
   const exhaustedStrategies = new Set<YoutubeCaptureStrategy["id"]>();
   let totalAttempts = 0;
 
-  for (const { strategy, format } of attemptPlan) {
+  for (let attemptIndex = 0; attemptIndex < attemptPlan.length; attemptIndex++) {
+    const { strategy, format } = attemptPlan[attemptIndex]!;
     if (exhaustedStrategies.has(strategy.id)) continue;
     const remainingMs = deadline ? deadline - Date.now() : undefined;
     if (remainingMs !== undefined && remainingMs <= 0) {
@@ -1078,7 +1081,7 @@ async function runYtDlpWithFormatFallback(
       });
       if (outputPath && !(await canDecodeVideoFrame(outputPath))) {
         await fs.unlink(outputPath).catch(() => {});
-        throw new Error(
+        throw new UnusableDownloadedVideoError(
           `yt-dlp produced video that FFmpeg could not decode for format ${format}`
         );
       }
@@ -1086,7 +1089,7 @@ async function runYtDlpWithFormatFallback(
         const probe = await probeMedia(outputPath);
         if ((probe.height ?? 0) < options.minVideoHeight) {
           await fs.unlink(outputPath).catch(() => {});
-          throw new Error(
+          throw new UnusableDownloadedVideoError(
             `yt-dlp returned ${probe.width}x${probe.height} for format ${format}; need at least ${options.minVideoHeight}p`
           );
         }
@@ -1101,6 +1104,23 @@ async function runYtDlpWithFormatFallback(
       // CDN 403s can be format-specific, so keep this strategy eligible for
       // later format rounds after the other clients receive their first try.
       const errorKind = classifyYtDlpError(lastError);
+      const formatUnavailable = /requested format (?:is )?not available/i.test(lastError.message);
+      // This client reached the media CDN, but its selected codec/transport
+      // produced no video (or only low resolution). Try its next format now:
+      // rotating every client through the same broken HLS stream can consume
+      // the entire clip deadline before a usable HD alternative is attempted.
+      if (
+        lastError instanceof UnusableDownloadedVideoError ||
+        formatUnavailable
+      ) {
+        const nextFormatIndex = attemptPlan.findIndex(
+          (candidate, index) => index > attemptIndex && candidate.strategy.id === strategy.id
+        );
+        if (nextFormatIndex > attemptIndex + 1) {
+          const [nextFormat] = attemptPlan.splice(nextFormatIndex, 1);
+          attemptPlan.splice(attemptIndex + 1, 0, nextFormat!);
+        }
+      }
       // Switching YouTube clients cannot repair an unavailable proxy.
       if (errorKind === "proxy_unavailable") break;
       if (
@@ -1110,7 +1130,7 @@ async function runYtDlpWithFormatFallback(
           errorKind === "private_video" ||
           errorKind === "members_only" ||
           errorKind === "age_restricted" ||
-          errorKind === "unavailable")
+          (errorKind === "unavailable" && !formatUnavailable))
       ) {
         exhaustedStrategies.add(strategy.id);
       }
@@ -1174,7 +1194,7 @@ export function renderSourceFormatChains(
   const hlsAudio = preferredBestAudio("[protocol^=m3u8]");
   return [
     `bestvideo[protocol^=m3u8][height<=${renderHeight}][fps>50]+${hlsAudio}/bestvideo[protocol^=m3u8][height<=${renderHeight}]+${hlsAudio}`,
-    `bestvideo[protocol^=m3u8][height<=${renderHeight}]+${hlsAudio}`,
+    `bestvideo[protocol^=m3u8][vcodec^=avc1][height<=${renderHeight}]+${hlsAudio}`,
     `bestvideo[protocol^=m3u8][height<=${renderHeight}]+${audio}`,
     `bestvideo[height<=${renderHeight}][fps>50]+${audio}/bestvideo[height<=${renderHeight}]+${audio}`,
     `bestvideo[height<=${renderHeight}]+${audio}`,
