@@ -11,6 +11,7 @@ import {
 } from "@/lib/ffmpeg";
 import { toJsonValue } from "@/lib/utils";
 import { MIN_CLIP_SECONDS } from "@/lib/clipConstants";
+import { YoutubeCapturePausedError } from "@/lib/youtubeCaptureBackoff";
 import {
   getUploadDir,
   ensureDir,
@@ -22,7 +23,9 @@ import {
 } from "@/lib/storage";
 import {
   acceptableFinalSourceHeight,
+  classifyYtDlpError,
   downloadClipSegmentFromStream,
+  formatYtDlpUserError,
   isYtDlpAvailable,
   minFinalSourceHeight,
   renderSourceMaxHeight,
@@ -764,6 +767,7 @@ export async function ensureClipSourceForRender(
     }
 
     const streamUrl = resolveStreamCaptureUrl(session) || session.youtubeUrl;
+    let sourceRetrievalFailure: unknown;
     if (streamUrl) {
       let sourceProgressQueue = Promise.resolve();
       const reportSourceProgress = (progress: number, step: string) => {
@@ -803,6 +807,7 @@ export async function ensureClipSourceForRender(
         await sourceProgressQueue;
         if (master) return master;
       } catch (error) {
+        sourceRetrievalFailure = error;
         await sourceProgressQueue.catch(() => {});
         const message =
           error instanceof Error ? error.message : String(error);
@@ -832,8 +837,17 @@ export async function ensureClipSourceForRender(
 
     // Final downloads must never silently use a low-resolution editing proxy.
     // Leave the preview usable and let the user retry or supply the original.
+    // Keep actionable capture errors visible rather than disguising an account
+    // or network block as a render-quality problem. Never expose raw yt-dlp URLs.
+    const captureError = sourceRetrievalFailure != null &&
+      (sourceRetrievalFailure instanceof YoutubeCapturePausedError ||
+        classifyYtDlpError(sourceRetrievalFailure) !== "unknown")
+      ? formatYtDlpUserError(sourceRetrievalFailure)
+      : null;
     throw new Error(
-      "Could not retrieve the full-quality source video. Export stopped instead of enlarging the low-resolution preview. Retry the render or upload the original video."
+      captureError
+        ? `Could not retrieve the full-quality source video. ${captureError}`
+        : "Could not retrieve the full-quality source video. Export stopped instead of enlarging the low-resolution preview. Retry the render or upload the original video."
     );
   }
 
