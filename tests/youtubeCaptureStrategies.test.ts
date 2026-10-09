@@ -47,6 +47,15 @@ afterEach(() => {
 });
 
 describe("YouTube capture strategies", () => {
+  it("separates an unavailable proxy from a YouTube block and hides raw diagnostics", () => {
+    const error = new Error("yt-dlp failed: curl (56) Proxy CONNECT aborted; ProxyError: retrying (1/3)");
+    expect(classifyYtDlpError(error)).toBe("proxy_unavailable");
+    const message = formatYtDlpUserError(error);
+    expect(message).toContain("traffic allowance");
+    expect(message).toContain("subscription status");
+    expect(message).not.toContain("curl");
+    expect(message).not.toContain("retrying (1/3)");
+  });
   it("falls back from mweb token capture to current cookieless clients", () => {
     process.env.YT_DLP_YOUTUBE_CLIENT = "mweb";
 

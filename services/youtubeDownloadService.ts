@@ -757,6 +757,7 @@ export function isFatalTwitchCaptureError(error: unknown): boolean {
 }
 
 export type YtDlpErrorKind =
+  | "proxy_unavailable"
   | "po_token_unavailable"
   | "bot_verification"
   | "private_video"
@@ -772,6 +773,9 @@ export type YtDlpErrorKind =
 
 export function classifyYtDlpError(error: unknown): YtDlpErrorKind {
   const message = error instanceof Error ? error.message : String(error);
+  if (/proxy connect aborted|proxyerror|proxy authentication|connect tunnel failed|tunnel connection failed/i.test(message)) {
+    return "proxy_unavailable";
+  }
   if (/ffmpeg could not be found|ffmpeg is not installed/i.test(message)) {
     return "ffmpeg_missing";
   }
@@ -814,6 +818,8 @@ export function classifyYtDlpError(error: unknown): YtDlpErrorKind {
 export function formatYtDlpUserError(error: unknown): string {
   if (error instanceof YoutubeCapturePausedError) return error.message;
   switch (classifyYtDlpError(error)) {
+    case "proxy_unavailable":
+      return "The capture proxy cannot connect. Check its traffic allowance, subscription status, and connection settings, then retry or upload the video file.";
     case "po_token_unavailable":
       return "YouTube did not return a playable format to this server. Clipper tried its token provider and fallback clients; retry shortly or upload the authorized VOD.";
     case "bot_verification":
@@ -1095,6 +1101,8 @@ async function runYtDlpWithFormatFallback(
       // CDN 403s can be format-specific, so keep this strategy eligible for
       // later format rounds after the other clients receive their first try.
       const errorKind = classifyYtDlpError(lastError);
+      // Switching YouTube clients cannot repair an unavailable proxy.
+      if (errorKind === "proxy_unavailable") break;
       if (
         platform === "youtube" &&
         (errorKind === "po_token_unavailable" ||
