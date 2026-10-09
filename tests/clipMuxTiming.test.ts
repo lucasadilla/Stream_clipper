@@ -5,6 +5,7 @@ import os from "os";
 import path from "path";
 import {
   getFfmpegPath,
+  canDecodeVideoFrame,
   getFfprobePath,
   hasAlignedClipStreams,
   muxAccurateClipSegment,
@@ -40,6 +41,12 @@ describe.skipIf(!available)("companion-track cut timing", () => {
   afterAll(async () => {
     if (directory) await rm(directory, { recursive: true, force: true });
   });
+
+  it("rejects a seek that produces no frames even when FFmpeg exits successfully", async () => {
+    expect(await canDecodeVideoFrame(video, 1)).toBe(true);
+    expect(await canDecodeVideoFrame(video, 20)).toBe(false);
+    expect(await canDecodeVideoFrame(video, 1)).toBe(true);
+  }, 30_000);
 
   it("rejects an old keyframe-offset mux instead of reusing it", async () => {
     const output = path.join(directory, "old.mp4");

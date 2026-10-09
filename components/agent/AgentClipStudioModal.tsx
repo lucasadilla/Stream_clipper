@@ -2508,7 +2508,7 @@ export function AgentClipStudioModal({
                     </button>
                   </div>
                 )}
-                {analysisError && (
+                {analysisError && analysisError !== playbackError && (
                   <p className="mt-2 text-xs text-[var(--color-warning,#e6b84d)]">
                     {analysisError}
                   </p>

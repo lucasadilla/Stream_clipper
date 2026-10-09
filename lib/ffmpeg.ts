@@ -468,11 +468,12 @@ export async function canDecodeVideoFrame(
   filePath: string,
   timeSeconds = 1
 ): Promise<boolean> {
+  const cacheKey = `${filePath}:${timeSeconds}`;
   let signature: { size: number; mtimeMs: number } | null = null;
   try {
     const stat = statSync(filePath);
     signature = { size: stat.size, mtimeMs: stat.mtimeMs };
-    const cached = videoDecodeCache.get(filePath);
+    const cached = videoDecodeCache.get(cacheKey);
     if (
       cached &&
       cached.size === signature.size &&
@@ -486,11 +487,13 @@ export async function canDecodeVideoFrame(
 
   let decodable = false;
   try {
-    await runCommand(
+    const { stdout } = await runCommand(
       getFfmpegPath(),
       [
         "-v",
         "error",
+        "-progress",
+        "pipe:1",
         "-ss",
         String(Math.max(0, timeSeconds)),
         "-i",
@@ -508,11 +511,15 @@ export async function canDecodeVideoFrame(
       ],
       { timeoutMs: 30_000 }
     );
-    decodable = true;
+    // FFmpeg can exit successfully after EOF without decoding any frames.
+    // Container metadata and exit code alone cannot prove the range exists.
+    decodable = [...stdout.matchAll(/^frame=(\d+)\s*$/gm)].some(
+      (match) => Number(match[1]) > 0
+    );
   } catch {
     decodable = false;
   }
-  videoDecodeCache.set(filePath, { ...signature, decodable });
+  videoDecodeCache.set(cacheKey, { ...signature, decodable });
   return decodable;
 }
 

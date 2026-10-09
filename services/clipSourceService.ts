@@ -227,7 +227,8 @@ async function preferAudibleClipSource(
   renderStart: number;
   renderEnd: number;
 }> {
-  if (await hasAudioStream(absolutePath)) {
+  const localHasAudio = await hasAudioStream(absolutePath);
+  if (localHasAudio && await canDecodeVideoFrame(absolutePath, local.renderStart)) {
     // Older companion-track caches have audio several seconds after video.
     // Rebuild these before either preview or export can reuse their timestamps.
     if (!/^segment-\d+-\d+\.mp4$/i.test(path.basename(absolutePath)) ||
@@ -254,10 +255,10 @@ async function preferAudibleClipSource(
       break;
     }
   }
-  if (companionExists) {
-    throw new Error(
-      "Could not combine video and audio for export (often low disk space). Free storage and try again."
-    );
+  if (companionExists || localHasAudio) {
+    // A truncated video can advertise the full VOD duration while containing
+    // only its beginning. Recover this range instead of blaming disk space.
+    return recoverClipSourceRange(streamSessionId, startTimeSeconds, endTimeSeconds);
   }
 
   console.warn(
@@ -265,6 +266,53 @@ async function preferAudibleClipSource(
     { streamSessionId, file: path.basename(absolutePath) }
   );
   return local;
+}
+
+const sourceRecoveryInFlight = new Map<string, Promise<{
+  sourceMediaId: string;
+  renderStart: number;
+  renderEnd: number;
+}>>();
+
+async function recoverClipSourceRange(
+  streamSessionId: string,
+  startTimeSeconds: number,
+  endTimeSeconds: number
+): Promise<{ sourceMediaId: string; renderStart: number; renderEnd: number }> {
+  const key = `${streamSessionId}:${startTimeSeconds}:${endTimeSeconds}`;
+  const existing = sourceRecoveryInFlight.get(key);
+  if (existing) return existing;
+  const pending = (async () => {
+    const session = await prisma.streamSession.findUnique({
+      where: { id: streamSessionId },
+      include: { liveRecording: true },
+    });
+    const streamUrl = session && (resolveStreamCaptureUrl(session) || session.youtubeUrl);
+    if (!session || !streamUrl) {
+      throw new Error("The source video is incomplete for this clip. Upload the original video or retry source capture.");
+    }
+    console.warn("[render] Recovering unreadable local video range", {
+      streamSessionId, startTimeSeconds, endTimeSeconds,
+    });
+    try {
+      const recovered = await highQualityRemoteClipSource({
+        streamSessionId, streamUrl, startTimeSeconds, endTimeSeconds,
+        liveFromStart: session.platform !== "kick" && isActivelyRecordingLive(session),
+      });
+      if (recovered) return recovered;
+    } catch (error) {
+      if (isNoSpaceError(error)) throw noSpaceLeftError();
+      console.warn("[render] Clip-range recovery failed:", formatYtDlpUserError(error));
+      throw new Error(`Could not recover the source video for this clip. ${formatYtDlpUserError(error)}`);
+    }
+    throw new Error("Could not recover the source video for this clip. Retry or upload the original video.");
+  })();
+  sourceRecoveryInFlight.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    sourceRecoveryInFlight.delete(key);
+  }
 }
 
 /** Best known duration: local video, live buffer, transcripts, or chat timestamps. */
@@ -417,6 +465,7 @@ async function highQualityRemoteClipSource(options: {
     Math.max(0, options.startTimeSeconds - leadIn)
   );
   const segmentEnd = Math.ceil(options.endTimeSeconds + trailOut);
+  const requiredDuration = options.endTimeSeconds - segmentStart;
   const targetHeight = renderSourceMaxHeight();
   // Including the requested source quality invalidates old 480p/720p cache
   // files created before high-resolution final rendering was introduced.
@@ -436,8 +485,11 @@ async function highQualityRemoteClipSource(options: {
       probe = await probeMedia(outputPath);
       if (
         !probe.videoCodec ||
+        !probe.audioCodec ||
+        probe.durationSeconds < requiredDuration - 0.25 ||
         (probe.height ?? 0) < minHeight ||
-        !(await canDecodeVideoFrame(outputPath))
+        !(await canDecodeVideoFrame(outputPath)) ||
+        !(await canDecodeVideoFrame(outputPath, Math.max(0, requiredDuration - 0.1)))
       ) {
         probe = null;
       }
@@ -471,7 +523,10 @@ async function highQualityRemoteClipSource(options: {
         }
       );
       probe = await probeMedia(tempPath);
-      if (!probe.videoCodec || !(await canDecodeVideoFrame(tempPath))) {
+      if (!probe.videoCodec || !probe.audioCodec ||
+        probe.durationSeconds < requiredDuration - 0.25 ||
+        !(await canDecodeVideoFrame(tempPath)) ||
+        !(await canDecodeVideoFrame(tempPath, Math.max(0, requiredDuration - 0.1)))) {
         throw new Error("High-resolution clip source was not decodable");
       }
       if ((probe.height ?? 0) < minHeight) {
