@@ -84,4 +84,13 @@ describe("clip source format recovery", () => {
     expect(attempts[1]).toContain("youtube:player_client=web_safari");
     expect(attempts[1]![attempts[1]!.indexOf("-f") + 1]).toBe(attempts[0]![attempts[0]!.indexOf("-f") + 1]);
   });
+
+  it("stops on disk exhaustion instead of retrying until a misleading timeout", async () => {
+    mocks.command.mockImplementation(async (_command, args: string[]) => {
+      if (args.includes("--download-sections")) throw new Error("ERROR: No space left on device");
+      return { stdout: "", stderr: "" };
+    });
+    await expect(capture()).rejects.toThrow("Server storage is full");
+    expect(downloads()).toHaveLength(1);
+  });
 });

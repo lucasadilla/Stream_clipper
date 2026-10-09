@@ -26,6 +26,8 @@ import {
   resolveStoragePath,
 } from "@/lib/storage";
 import { getYtDlpInvocationCandidates, type YtDlpInvocation } from "@/lib/ytDlp";
+import { downloadSourceInWorkspace } from "@/lib/sourceDownloadWorkspace";
+import { isNoSpaceError, noSpaceLeftError } from "@/lib/storageErrors";
 
 export { getYtDlpPath } from "@/lib/ytDlp";
 
@@ -946,7 +948,7 @@ function sourceMaxHeight(options?: { agent?: boolean }): number {
   return process.env.NODE_ENV === "production" ? 480 : 1080;
 }
 
-function sourceFormatChains(height = sourceMaxHeight()): string[] {
+export function sourceFormatChains(height = sourceMaxHeight()): string[] {
   const audio = preferredBestAudio();
   const aacAudio = preferredBestAudio("[acodec^=mp4a]");
   // Avoid bare "best" / pre-merged progressive formats — YouTube CDN often
@@ -956,8 +958,8 @@ function sourceFormatChains(height = sourceMaxHeight()): string[] {
     `bestvideo[vcodec^=avc1][height<=${height}]+${aacAudio}/bestvideo[height<=${height}]+${audio}`,
     `bestvideo[vcodec^=avc1][height<=${height}]+${audio}/bestvideo[height<=${height}]+${audio}`,
     `bestvideo[height<=${height}]+${audio}`,
-    `bestvideo*+${audio}/b`,
-    "b",
+    `bestvideo*[height<=${height}]+${audio}/best[height<=${height}]`,
+    `best[height<=${height}]`,
   ];
 }
 
@@ -1098,6 +1100,9 @@ async function runYtDlpWithFormatFallback(
       return;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
+      // Retrying formats cannot repair a full disk and would mask the real
+      // failure with the overall source-download deadline.
+      if (isNoSpaceError(lastError)) throw noSpaceLeftError();
       // Format swaps cannot repair extractor/auth failures. Move to the next
       // player client immediately so stale cookies do not consume the whole
       // source-preparation deadline before public fallbacks are attempted.
@@ -1306,13 +1311,13 @@ export async function downloadSourceFromYouTube(streamSessionId: string) {
         ? 8 * 60_000
         : 12 * 60_000;
 
-  await runYtDlpWithFormatFallback(
+  await downloadSourceInWorkspace(outputPath, (stagedOutput) => runYtDlpWithFormatFallback(
     [
       ...baseYtDlpArgs({ platform, url: captureUrl }),
       "-f",
       formatFallbacks[0]!,
       "-o",
-      outputPath,
+      stagedOutput,
     ],
     captureUrl,
     formatFallbacks,
@@ -1323,7 +1328,7 @@ export async function downloadSourceFromYouTube(streamSessionId: string) {
       retriesPerFormat: 1,
       preferPublicClients: platform === "youtube",
     }
-  );
+  ));
 
   // yt-dlp may write source.mp4 or source.f140.m4a etc. — find the output file
   let absolutePath = outputPath;

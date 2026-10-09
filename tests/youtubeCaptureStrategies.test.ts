@@ -15,6 +15,7 @@ import {
   renderSourceFormatChains,
   renderSourceFormatSort,
   resetYoutubeCookieRejection,
+  sourceFormatChains,
 } from "@/services/youtubeDownloadService";
 
 const originalClient = process.env.YT_DLP_YOUTUBE_CLIENT;
@@ -47,6 +48,12 @@ afterEach(() => {
 });
 
 describe("YouTube capture strategies", () => {
+  it("keeps every full-VOD analysis fallback within the configured resolution", () => {
+    const formats = sourceFormatChains(480);
+    expect(formats.every((format) => format.includes("height<=480"))).toBe(true);
+    expect(formats).not.toContain("b");
+    expect(formats.join("/")).not.toMatch(/bestvideo\*\+/);
+  });
   it("separates an unavailable proxy from a YouTube block and hides raw diagnostics", () => {
     const error = new Error("yt-dlp failed: curl (56) Proxy CONNECT aborted; ProxyError: retrying (1/3)");
     expect(classifyYtDlpError(error)).toBe("proxy_unavailable");
