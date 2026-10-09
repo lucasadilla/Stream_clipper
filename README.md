@@ -171,20 +171,38 @@ Checkout sessions are created with `managed_payments.enabled=true` using Stripe 
    - `FFMPEG_PATH=ffmpeg`, `FFPROBE_PATH=ffprobe`, `YT_DLP_PATH=yt-dlp`
    - `OPENROUTER_API_KEY` or `OPENAI_API_KEY`
    - `YOUTUBE_API_KEY`
-   - `YT_DLP_COOKIES_B64` containing a Base64-encoded Netscape `cookies.txt`
-     export from a separate YouTube account (server-only; never `NEXT_PUBLIC_*`)
+   - Optional for videos requiring login: `YT_DLP_COOKIES_B64` containing a
+     Base64-encoded Netscape `cookies.txt` export from an authorized YouTube
+     account (server-only; never `NEXT_PUBLIC_*`)
    - Stripe keys and real `price_...` IDs for every `STRIPE_PRICE_*` var
    - Optional: `WORKER_ENABLED=1`, `WORKER_SECRET=...` (background renders/transcription/retention)
 5. Do not copy local Windows paths like `C:\...\ffmpeg.exe` into Railway. The Docker image already installs Linux `ffmpeg`, `ffprobe`, and `yt-dlp`; use the bare command names above.
 6. Redeploy, then verify **`/health`** or **`/api/health`** shows database, Stripe billing, FFmpeg, yt-dlp, AI, Whisper, and storage as ready.
 7. Optional cron: `POST /api/worker/tick` with `Authorization: Bearer $WORKER_SECRET` every minute (the in-process poller also runs when `WORKER_ENABLED` is on).
 
-Before redeploying cookie changes, test the export locally:
+Test actual HD media capture (an 8-second sample, including audio and decoding):
 
 ```powershell
-$env:YT_DLP_COOKIES_PATH = "C:\secure\youtube-cookies.txt"
+# Optional, only when the video requires login:
+# $env:YT_DLP_COOKIES_PATH = "C:\secure\youtube-cookies.txt"
 npm run youtube:verify -- "https://www.youtube.com/watch?v=YOUR_VIDEO_ID"
 ```
+
+Cookies are optional for public videos. Cookie format validation does not prove
+that YouTube accepts the login. The check uses the same source capture pipeline
+as exports, cleans up its temporary media, and does not print proxy credentials
+or signed media URLs. Add a start time in seconds after the URL to test another
+moment. This does download media and may consume proxy bandwidth.
+
+A successful local check only verifies your computer's connection. Run the same
+command inside the Railway container to verify server access. If Railway gets
+HTTP 429 / bot challenges while local capture works, another cookie export or
+more retries may not repair the server's network reputation. Configure a tested
+server-only `YT_DLP_PROXY` endpoint (never `NEXT_PUBLIC_*`), using a stable IP for
+both extraction and media requests. Verify an actual HD sample before committing
+to ongoing proxy charges. Then test source preparation and one full export;
+`/api/health` alone does not verify YouTube CDN access. Do not lower the export
+quality floor to hide capture failures.
 
 To create the Railway value without printing the cookie contents, run:
 
