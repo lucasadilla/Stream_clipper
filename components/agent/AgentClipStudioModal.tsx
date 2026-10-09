@@ -1556,6 +1556,26 @@ export function AgentClipStudioModal({
     }
   };
 
+  useEffect(() => {
+    if (tab !== "preview" || !previewPlaying) return;
+    let frame = 0;
+    let lastUpdate = 0;
+    const update = (now: number) => {
+      const video = platformVideoRef.current;
+      // timeupdate alone is too infrequent for spoken-word highlighting.
+      if (video && !video.paused && now - lastUpdate >= 40) {
+        lastUpdate = now;
+        setPreviewTime(Math.min(clip.endTimeSeconds, Math.max(
+          clip.startTimeSeconds,
+          timelineTimeForMedia(video.currentTime, playbackTimelineOffsetSeconds)
+        )));
+      }
+      frame = requestAnimationFrame(update);
+    };
+    frame = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(frame);
+  }, [tab, previewPlaying, clip.startTimeSeconds, clip.endTimeSeconds, playbackTimelineOffsetSeconds]);
+
   const onPlatformPreviewTimeUpdate = (
     event: SyntheticEvent<HTMLVideoElement>
   ) => {

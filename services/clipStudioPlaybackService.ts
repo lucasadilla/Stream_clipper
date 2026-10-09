@@ -69,7 +69,8 @@ async function buildClipStudioPlayback(
   if (duration < requestedDuration - 0.5) {
     throw new ClipStudioPlaybackNotReadyError();
   }
-  const fileName = `studio-preview-${clip.id}-${rangeToken(
+  // Invalidate previews previously encoded from keyframe-offset DASH muxes.
+  const fileName = `studio-preview-av2-${clip.id}-${rangeToken(
     clip.startTimeSeconds
   )}-${rangeToken(clip.endTimeSeconds)}.mp4`;
   const outputPath = path.join(getUploadDir(clip.streamSessionId), fileName);

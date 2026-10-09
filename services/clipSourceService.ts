@@ -3,11 +3,11 @@ import { existsSync } from "fs";
 import { prisma } from "@/lib/db";
 import {
   canDecodeVideoFrame,
-  getFfmpegPath,
   hasAudioStream,
   hasVideoStream,
+  hasAlignedClipStreams,
+  muxAccurateClipSegment,
   probeMedia,
-  runCommand,
 } from "@/lib/ffmpeg";
 import { toJsonValue } from "@/lib/utils";
 import { MIN_CLIP_SECONDS } from "@/lib/clipConstants";
@@ -74,7 +74,7 @@ async function createMuxedLiveSegment(
   // Prefer filename heuristics so we don't ffprobe multi-hour files first.
   for (const candidate of candidates) {
     const name = path.basename(candidate).toLowerCase();
-    if (isSegmentFile(name)) continue;
+    if (isSegmentFile(name) || name.startsWith("studio-preview-")) continue;
     // Common yt-dlp audio-only format ids.
     if (/\.f(139|140|249|250|251)\./.test(name)) {
       if (!audioPath) audioPath = candidate;
@@ -90,7 +90,7 @@ async function createMuxedLiveSegment(
   for (const candidate of candidates) {
     if (videoPath && audioPath) break;
     if (candidate === videoPath || candidate === audioPath) continue;
-    if (isSegmentFile(path.basename(candidate))) continue;
+    if (isSegmentFile(path.basename(candidate)) || path.basename(candidate).startsWith("studio-preview-")) continue;
     try {
       const media = await probeMedia(candidate);
       if (!videoPath && media.videoCodec) videoPath = candidate;
@@ -119,6 +119,7 @@ async function createMuxedLiveSegment(
       if (
         probe.videoCodec &&
         probe.audioCodec &&
+        hasAlignedClipStreams(probe) &&
         probe.durationSeconds >= MIN_CLIP_SECONDS
       ) {
         return { path: outputPath, duration: probe.durationSeconds };
@@ -131,38 +132,13 @@ async function createMuxedLiveSegment(
   const tempPath = `${outputPath}.${process.pid}-${Date.now()}.tmp.mp4`;
   const fs = await import("fs/promises");
   try {
-    await runCommand(getFfmpegPath(), [
-      "-y",
-      "-nostdin",
-      "-loglevel",
-      "error",
-      "-ss",
-      String(segmentStart),
-      "-i",
-      videoPath,
-      "-ss",
-      String(segmentStart),
-      "-i",
-      audioPath,
-      "-t",
-      String(duration),
-      "-map",
-      "0:v:0",
-      "-map",
-      "1:a:0",
-      "-c",
-      "copy",
-      "-avoid_negative_ts",
-      "make_zero",
-      "-movflags",
-      "+faststart",
-      tempPath,
-    ]);
+    await muxAccurateClipSegment(videoPath, audioPath, tempPath, segmentStart, duration);
 
     const probe = await probeMedia(tempPath);
     if (
       !probe.videoCodec ||
       !probe.audioCodec ||
+      !hasAlignedClipStreams(probe) ||
       probe.durationSeconds < MIN_CLIP_SECONDS
     ) {
       throw new Error("Captured video range is not readable yet");
@@ -251,7 +227,12 @@ async function preferAudibleClipSource(
   renderStart: number;
   renderEnd: number;
 }> {
-  if (await hasAudioStream(absolutePath)) return local;
+  if (await hasAudioStream(absolutePath)) {
+    // Older companion-track caches have audio several seconds after video.
+    // Rebuild these before either preview or export can reuse their timestamps.
+    if (!/^segment-\d+-\d+\.mp4$/i.test(path.basename(absolutePath)) ||
+      hasAlignedClipStreams(await probeMedia(absolutePath))) return local;
+  }
 
   const muxed = await muxedClipSourceForRange(
     streamSessionId,

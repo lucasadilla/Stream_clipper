@@ -422,6 +422,42 @@ export async function probeMedia(filePath: string): Promise<MediaProbeResult> {
   };
 }
 
+/** Clip intermediates must share a zero-based clock before captions are applied. */
+export function hasAlignedClipStreams(probe: MediaProbeResult): boolean {
+  const streams = probe.raw.streams as Array<{
+    codec_type?: string;
+    start_time?: string;
+  }> | undefined;
+  const videoStart = Number(streams?.find((s) => s.codec_type === "video")?.start_time);
+  const audioStart = Number(streams?.find((s) => s.codec_type === "audio")?.start_time);
+  return Number.isFinite(videoStart) && Number.isFinite(audioStart) &&
+    Math.abs(videoStart) <= 0.1 && Math.abs(audioStart) <= 0.1;
+}
+
+/** Stream-copy seeks retain earlier GOPs and delay separately sought audio. */
+export async function muxAccurateClipSegment(
+  videoPath: string,
+  audioPath: string,
+  outputPath: string,
+  startSeconds: number,
+  durationSeconds: number
+): Promise<void> {
+  await runCommand(getFfmpegPath(), [
+    "-y", "-nostdin", "-loglevel", "error",
+    "-ss", String(startSeconds), "-accurate_seek", "-i", videoPath,
+    "-ss", String(startSeconds), "-accurate_seek", "-i", audioPath,
+    "-t", String(durationSeconds),
+    "-map", "0:v:0", "-map", "1:a:0",
+    "-vf", "setpts=PTS-STARTPTS", "-af", "asetpts=PTS-STARTPTS",
+    // Preserve source pixels with a near-transparent encode; only the clip
+    // range is decoded, with a fast preset to keep live previews responsive.
+    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "10",
+    "-pix_fmt", "yuv420p", "-threads", String(getFfmpegThreadCount()),
+    "-c:a", "aac", "-b:a", "320k",
+    "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", outputPath,
+  ], { timeoutMs: ffmpegRenderTimeoutMs(durationSeconds) });
+}
+
 /** A container probe can succeed even when every video packet is corrupt. */
 const videoDecodeCache = new Map<
   string,
