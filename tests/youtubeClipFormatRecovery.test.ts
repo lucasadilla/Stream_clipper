@@ -13,7 +13,7 @@ vi.mock("@/lib/ffmpeg", () => ({
   getFfmpegPath: () => "ffmpeg",
 }));
 
-import { downloadClipSegmentFromStream } from "@/services/youtubeDownloadService";
+import { downloadClipSegmentFromStream, formatYtDlpUserError } from "@/services/youtubeDownloadService";
 
 function downloads(): string[][] {
   return mocks.command.mock.calls
@@ -23,7 +23,7 @@ function downloads(): string[][] {
 
 const capture = () => downloadClipSegmentFromStream(
   "https://www.youtube.com/watch?v=Y6WCsT8mc_A", "08:04", "08:46",
-  "format-recovery-test.mp4", { timeoutMs: 120_000, minVideoHeight: 720 }
+  "format-recovery-test.mp4", { timeoutMs: 120_000, minVideoHeight: 720, requiredDurationSeconds: 40 }
 );
 
 describe("clip source format recovery", () => {
@@ -34,7 +34,8 @@ describe("clip source format recovery", () => {
     vi.stubEnv("YT_DLP_YOUTUBE_CLIENT", "mweb");
     mocks.command.mockResolvedValue({ stdout: "", stderr: "" });
     mocks.decode.mockResolvedValue(true);
-    mocks.probe.mockResolvedValue({ width: 1920, height: 1080 });
+    mocks.probe.mockResolvedValue({ width: 1920, height: 1080,
+      videoCodec: "h264", audioCodec: "aac", durationSeconds: 42 });
   });
   afterEach(() => vi.unstubAllEnvs());
 
@@ -54,6 +55,50 @@ describe("clip source format recovery", () => {
     const attempts = downloads();
     expect(attempts).toHaveLength(2);
     expect(attempts[1]![attempts[1]!.indexOf("-f") + 1]).toContain("vcodec^=avc1");
+  });
+
+  it("retries HD video without audio instead of accepting it and failing the export later", async () => {
+    mocks.probe.mockResolvedValueOnce({ width: 1920, height: 1080,
+      videoCodec: "h264", audioCodec: null, durationSeconds: 42 });
+    await capture();
+    expect(downloads()).toHaveLength(2);
+    expect(downloads()[1]![downloads()[1]!.indexOf("-f") + 1]).toContain("vcodec^=avc1");
+  });
+
+  it("retries a truncated cut even when its first frame decodes", async () => {
+    mocks.probe.mockResolvedValueOnce({ width: 1920, height: 1080,
+      videoCodec: "h264", audioCodec: "aac", durationSeconds: 12 });
+    await capture();
+    expect(downloads()).toHaveLength(2);
+  });
+
+  it("retries a cut whose metadata covers the range but whose video ends early", async () => {
+    mocks.decode.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    await capture();
+    expect(downloads()).toHaveLength(2);
+    expect(mocks.decode).toHaveBeenCalledWith("format-recovery-test.mp4", 39.9);
+  });
+
+  it("does not require optional tail padding when the selected clip is complete", async () => {
+    mocks.probe.mockResolvedValueOnce({ width: 1920, height: 1080,
+      videoCodec: "h264", audioCodec: "aac", durationSeconds: 40 });
+    await capture();
+    expect(downloads()).toHaveLength(1);
+  });
+
+  it("filters out low resolution formats before spending time downloading them", async () => {
+    await capture();
+    const format = downloads()[0]![downloads()[0]!.indexOf("-f") + 1];
+    expect(format).toContain("[height>=720]");
+  });
+
+  it("reports incomplete footage safely after exhausting format recovery", async () => {
+    mocks.probe.mockResolvedValue({ width: 1920, height: 1080,
+      videoCodec: "h264", audioCodec: null, durationSeconds: 42 });
+    const error = await capture().then(() => null, (error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(formatYtDlpUserError(error)).toContain("entire selected clip");
+    expect(downloads().length).toBeGreaterThan(1);
   });
 
   it("reaches non-HLS HD formats when this client offers no HLS video", async () => {

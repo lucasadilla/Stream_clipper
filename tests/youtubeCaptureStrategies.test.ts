@@ -48,6 +48,15 @@ afterEach(() => {
 });
 
 describe("YouTube capture strategies", () => {
+  it("explains source timeouts and missing downloaders without exposing raw diagnostics", () => {
+    const timeout = new Error("yt-dlp source download timed out: https://cdn.invalid/video?token=secret");
+    expect(classifyYtDlpError(timeout)).toBe("download_timeout");
+    expect(formatYtDlpUserError(timeout)).toContain("timed out");
+    expect(formatYtDlpUserError(timeout)).not.toContain("secret");
+    const missing = new Error("yt-dlp is not installed. Set YT_DLP_PATH on the server.");
+    expect(classifyYtDlpError(missing)).toBe("ytdlp_missing");
+    expect(formatYtDlpUserError(missing)).toContain("redeploy");
+  });
   it("keeps every full-VOD analysis fallback within the configured resolution", () => {
     const formats = sourceFormatChains(480);
     expect(formats.every((format) => format.includes("height<=480"))).toBe(true);

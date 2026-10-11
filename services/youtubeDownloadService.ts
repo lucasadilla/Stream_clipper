@@ -771,10 +771,15 @@ export type YtDlpErrorKind =
   | "ffmpeg_missing"
   | "youtube_cookies_invalid"
   | "youtube_forbidden"
+  | "source_incomplete"
+  | "download_timeout"
+  | "ytdlp_missing"
   | "unknown";
 
 export function classifyYtDlpError(error: unknown): YtDlpErrorKind {
   const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof UnusableDownloadedVideoError) return "source_incomplete";
+  if (/yt-dlp is not installed/i.test(message)) return "ytdlp_missing";
   if (/proxy connect aborted|proxyerror|proxy authentication|connect tunnel failed|tunnel connection failed/i.test(message)) {
     return "proxy_unavailable";
   }
@@ -814,12 +819,19 @@ export function classifyYtDlpError(error: unknown): YtDlpErrorKind {
   if (isYoutubeStreamForbiddenError(message)) {
     return "youtube_forbidden";
   }
+  if (/timed out|ETIMEDOUT/i.test(message)) return "download_timeout";
   return "unknown";
 }
 
 export function formatYtDlpUserError(error: unknown): string {
   if (error instanceof YoutubeCapturePausedError) return error.message;
   switch (classifyYtDlpError(error)) {
+    case "source_incomplete":
+      return "The source download did not contain usable HD video and audio for the entire selected clip. Retry when the replay is fully available, or upload the original video.";
+    case "download_timeout":
+      return "The source download timed out before the selected clip could be retrieved. Retry the render or upload the original video.";
+    case "ytdlp_missing":
+      return "The server's video downloader is unavailable. Install yt-dlp or redeploy the server, then retry the render.";
     case "proxy_unavailable":
       return "The capture proxy cannot connect. Check its traffic allowance, subscription status, and connection settings, then retry or upload the video file.";
     case "po_token_unavailable":
@@ -1000,6 +1012,8 @@ async function runYtDlpWithFormatFallback(
     retriesPerFormat?: number;
     preferPublicClients?: boolean;
     minVideoHeight?: number;
+    requiredDurationSeconds?: number;
+    requireAudio?: boolean;
     onProgress?: (progress: number) => void;
     onAttempt?: (attempt: number) => void;
   }
@@ -1087,13 +1101,28 @@ async function runYtDlpWithFormatFallback(
           `yt-dlp produced video that FFmpeg could not decode for format ${format}`
         );
       }
-      if (outputPath && options?.minVideoHeight) {
-        const probe = await probeMedia(outputPath);
-        if ((probe.height ?? 0) < options.minVideoHeight) {
-          await fs.unlink(outputPath).catch(() => {});
+      if (outputPath && (options?.minVideoHeight || options?.requireAudio || options?.requiredDurationSeconds)) {
+        // Validate the complete render input before accepting this attempt.
+        // A valid first frame alone can hide missing audio or a truncated cut;
+        // rejecting it here keeps the remaining codec/client fallbacks alive.
+        const probe = await probeMedia(outputPath).catch(() => {
+          throw new UnusableDownloadedVideoError("yt-dlp produced an unreadable video container");
+        });
+        if (options.minVideoHeight && (probe.height ?? 0) < options.minVideoHeight) {
           throw new UnusableDownloadedVideoError(
             `yt-dlp returned ${probe.width}x${probe.height} for format ${format}; need at least ${options.minVideoHeight}p`
           );
+        }
+        if (!probe.videoCodec || (options.requireAudio && !probe.audioCodec)) {
+          throw new UnusableDownloadedVideoError("yt-dlp produced a clip with missing video or audio");
+        }
+        const requiredDuration = options.requiredDurationSeconds;
+        if (requiredDuration && (
+          !Number.isFinite(probe.durationSeconds) ||
+          probe.durationSeconds < requiredDuration - 0.25 ||
+          !(await canDecodeVideoFrame(outputPath, Math.max(0, requiredDuration - 0.1)))
+        )) {
+          throw new UnusableDownloadedVideoError("yt-dlp did not retrieve video through the end of the selected clip");
         }
       }
       clearYoutubeCaptureChallenge(url);
@@ -1103,6 +1132,9 @@ async function runYtDlpWithFormatFallback(
       // Retrying formats cannot repair a full disk and would mask the real
       // failure with the overall source-download deadline.
       if (isNoSpaceError(lastError)) throw noSpaceLeftError();
+      if (lastError instanceof UnusableDownloadedVideoError && outputPath) {
+        await fs.unlink(outputPath).catch(() => {});
+      }
       // Format swaps cannot repair extractor/auth failures. Move to the next
       // player client immediately so stale cookies do not consume the whole
       // source-preparation deadline before public fallbacks are attempted.
@@ -1186,7 +1218,8 @@ export function parseYtDlpProgress(line: string): number | null {
 }
 
 export function renderSourceFormatChains(
-  renderHeight = renderSourceMaxHeight()
+  renderHeight = renderSourceMaxHeight(),
+  minHeight = minFinalSourceHeight()
 ): string[] {
   // Short-range exports need seekable HLS first. YouTube's DASH URLs may make
   // FFmpeg read most of a long VOD before reaching --download-sections, while
@@ -1197,13 +1230,14 @@ export function renderSourceFormatChains(
   // while the studio preview still uses the live/original track.
   const audio = preferredBestAudio();
   const hlsAudio = preferredBestAudio("[protocol^=m3u8]");
+  const height = `[height>=${minHeight}][height<=${renderHeight}]`;
   return [
-    `bestvideo[protocol^=m3u8][height<=${renderHeight}][fps>50]+${hlsAudio}/bestvideo[protocol^=m3u8][height<=${renderHeight}]+${hlsAudio}`,
-    `bestvideo[protocol^=m3u8][vcodec^=avc1][height<=${renderHeight}]+${hlsAudio}`,
-    `bestvideo[protocol^=m3u8][height<=${renderHeight}]+${audio}`,
-    `bestvideo[height<=${renderHeight}][fps>50]+${audio}/bestvideo[height<=${renderHeight}]+${audio}`,
-    `bestvideo[height<=${renderHeight}]+${audio}`,
-    `best[height<=${renderHeight}]`,
+    `bestvideo[protocol^=m3u8]${height}[fps>50]+${hlsAudio}/bestvideo[protocol^=m3u8]${height}+${hlsAudio}`,
+    `bestvideo[protocol^=m3u8][vcodec^=avc1]${height}+${hlsAudio}`,
+    `bestvideo[protocol^=m3u8]${height}+${audio}`,
+    `bestvideo${height}[fps>50]+${audio}/bestvideo${height}+${audio}`,
+    `bestvideo${height}+${audio}`,
+    `best${height}`,
   ];
 }
 
@@ -1399,6 +1433,8 @@ export async function downloadClipSegmentFromStream(
     timeoutMs?: number;
     attemptTimeoutMs?: number;
     minVideoHeight?: number;
+    /** Required footage from the cut's start, excluding optional tail padding. */
+    requiredDurationSeconds?: number;
     onProgress?: (progress: number) => void;
     onAttempt?: (attempt: number) => void;
   }
@@ -1412,8 +1448,8 @@ export async function downloadClipSegmentFromStream(
   const platform = detectDownloadPlatform(streamUrl);
   // Analysis copies stay deliberately small, but a final render downloads only
   // its selected range and should use every pixel the source can provide.
-  const formatFallbacks = renderSourceFormatChains();
   const minVideoHeight = options?.minVideoHeight ?? minFinalSourceHeight();
+  const formatFallbacks = renderSourceFormatChains(renderSourceMaxHeight(), minVideoHeight);
 
   const deadline = options?.timeoutMs
     ? Date.now() + Math.max(1_000, options.timeoutMs)
@@ -1450,6 +1486,8 @@ export async function downloadClipSegmentFromStream(
         retriesPerFormat: options?.timeoutMs ? 1 : undefined,
         preferPublicClients: true,
         minVideoHeight,
+        requireAudio: true,
+        requiredDurationSeconds: options?.requiredDurationSeconds,
         onProgress: options?.onProgress,
         onAttempt: options?.onAttempt,
       }

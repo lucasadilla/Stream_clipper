@@ -100,6 +100,16 @@ describe("incomplete companion-track recovery", () => {
     expect(mocks.decode).toHaveBeenCalled();
   });
 
+  it("validates the full selected export range without requiring trailing padding", async () => {
+    await expect(ensureClipSourceForRender("session", 3436.43, 3458.22, undefined, { purpose: "final" }))
+      .resolves.toEqual({ sourceMediaId: "recovered",
+        renderStart: expect.closeTo(2.43, 2), renderEnd: expect.closeTo(24.22, 2) });
+    expect(mocks.download).toHaveBeenCalledWith(
+      "https://www.youtube.com/watch?v=video", "57:14", "57:41", expect.any(String),
+      expect.objectContaining({ minVideoHeight: 720, requiredDurationSeconds: expect.closeTo(24.22, 2) })
+    );
+  });
+
   it("reports failed recovery without claiming storage is full", async () => {
     mocks.download.mockRejectedValueOnce(new Error("capture failed"));
     await expect(ensureClipSourceForRender("session", 3436.43, 3458.22, undefined, { purpose: "preview" }))

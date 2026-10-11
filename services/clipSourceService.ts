@@ -457,7 +457,9 @@ async function highQualityRemoteClipSource(options: {
   renderStart: number;
   renderEnd: number;
 } | null> {
-  if (!(await isYtDlpAvailable())) return null;
+  if (!(await isYtDlpAvailable())) {
+    throw new Error("yt-dlp is not installed. Set YT_DLP_PATH on the server.");
+  }
 
   const leadIn = 2;
   const trailOut = 2;
@@ -514,6 +516,7 @@ async function highQualityRemoteClipSource(options: {
           timeoutMs,
           attemptTimeoutMs: renderSourceAttemptTimeoutMs(timeoutMs),
           minVideoHeight: minHeight,
+          requiredDurationSeconds: requiredDuration,
           onProgress: (progress) => {
             void options.onProgress?.(progress);
           },
@@ -845,6 +848,7 @@ export async function ensureClipSourceForRender(
       } catch (error) {
         sourceRetrievalFailure = error;
         await sourceProgressQueue.catch(() => {});
+        if (isNoSpaceError(error)) throw noSpaceLeftError();
         const message =
           error instanceof Error ? error.message : String(error);
         if (resolvedLocalFinal) {
