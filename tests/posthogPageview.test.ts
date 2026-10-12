@@ -1,8 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildPosthogPageviewUrl,
   capturePosthogPageview,
+  resetPosthogPageviewCaptureForTests,
 } from "@/lib/posthogPageview";
+
+beforeEach(() => {
+  resetPosthogPageviewCaptureForTests();
+});
 
 describe("buildPosthogPageviewUrl", () => {
   it("builds an absolute URL for the landing path", () => {
@@ -57,5 +62,17 @@ describe("capturePosthogPageview", () => {
       { $current_url: "https://streamclipper.stream/login?next=/sessions" },
       { send_instantly: true }
     );
+  });
+
+  it("does not send a second $pageview for the same URL", () => {
+    const capture = vi.fn();
+    const client = { __loaded: true, capture };
+    const args = {
+      origin: "https://streamclipper.stream",
+      pathname: "/",
+    };
+    expect(capturePosthogPageview(client, args)).toBe(true);
+    expect(capturePosthogPageview(client, args)).toBe(true);
+    expect(capture).toHaveBeenCalledTimes(1);
   });
 });
