@@ -1,6 +1,11 @@
+import { socialExportTarget, needsSeparateSocialFormat } from "@/lib/social/exportTarget";
 import type { Prisma } from "@prisma/client";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { existsSync } from "fs";
+import { stat } from "fs/promises";
+import { probeMedia } from "@/lib/ffmpeg";
+import { decryptSecret, encryptSecret } from "@/lib/social/tokenCrypto";
+import { ACTIVE_PUBLISH_STATUSES, EDITABLE_PUBLISH_STATUSES, assertTikTokPostConsent, requiresPostReview, safePublishError, socialGroupStatus } from "@/lib/social/publishingPolicy";
 import { prisma } from "@/lib/db";
 import { isPreviewRenderJobParams } from "@/lib/renderJobSelection";
 import { canPublishPlatform, forcesPrivateUploads } from "@/lib/social/capabilities";
@@ -20,15 +25,26 @@ import { validateSocialPost } from "@/services/social/socialPublishValidationSer
 import { getPublishingPreferences } from "@/services/social/socialPublishingPreferenceService";
 import { getPostHogClient } from "@/lib/posthog-server";
 
+function unsealUploadId(value: string | null): string | null {
+  return value?.startsWith("enc:") ? decryptSecret(value.slice(4)) : value;
+}
+
 function asJson(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }
 
 function asContent(value: unknown, platform: SocialPlatform): SocialGeneratedContent {
-  if (value && typeof value === "object") {
-    return { ...emptySocialContent(platform), ...(value as SocialGeneratedContent), platform };
+  const content = emptySocialContent(platform);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return content;
+  const raw = value as Record<string, unknown>;
+  for (const key of ["title", "caption", "description", "postText", "thumbnailText", "pinnedComment", "redditTitle", "redditBody", "reasoningSummary"] as const) {
+    if (typeof raw[key] === "string") content[key] = raw[key].slice(0, 20_000);
   }
-  return emptySocialContent(platform);
+  for (const key of ["hashtags", "tags"] as const) {
+    if (Array.isArray(raw[key])) content[key] = raw[key].filter((item): item is string => typeof item === "string").slice(0, 100);
+  }
+  content.contentWarning = raw.contentWarning === true;
+  return content;
 }
 
 function asSettings(value: unknown): SocialPublishSettings {
@@ -130,42 +146,25 @@ export async function resolvePublishMedia(options: {
   platform: SocialPlatform;
   youtubeFormat?: "shorts" | "standard";
   instagramFormat?: "reel" | "feed";
+  facebookFormat?: "reel" | "page_video";
+  platformExportId?: string | null;
 }): Promise<PreparedMedia> {
   const clip = await loadClipContext(options.clipSuggestionId);
-  const preferredExportKey =
-    options.platform === "youtube"
-      ? options.youtubeFormat === "standard"
-        ? "youtube_landscape"
-        : "youtube_shorts"
-      : options.platform === "tiktok"
-        ? "tiktok"
-        : options.platform === "instagram"
-          ? options.instagramFormat === "feed"
-            ? "instagram_feed"
-            : "instagram_reels"
-          : options.platform === "facebook"
-            ? "facebook_reels"
-            : options.platform === "x"
-              ? "x"
-              : null;
+  const preferredExportKey = socialExportTarget(options.platform, options);
 
-  const match = preferredExportKey
+  const match = options.platformExportId
+    ? clip.platformExports.find((item) => item.id === options.platformExportId && item.platform === preferredExportKey && item.outputPath)
+    : preferredExportKey
     ? clip.platformExports.find((item) => item.platform === preferredExportKey && item.outputPath)
     : null;
 
+  if (options.platformExportId && !match) throw new Error("The selected platform export is not ready for this clip.");
   if (match?.outputPath) {
     const filePath = resolveStoragePath(match.outputPath);
-    return {
-      filePath,
-      mimeType: "video/mp4",
-      fileSizeBytes: Number(match.fileSizeBytes ?? 0),
-      width: match.width,
-      height: match.height,
-      durationSeconds: match.durationSeconds,
-      platformExportId: match.id,
-    };
+    return inspectPublishMedia(filePath, match.id);
   }
 
+  if (needsSeparateSocialFormat(preferredExportKey)) throw new Error("Prepare the selected platform format before posting this clip.");
   const render = clip.renderJobs.find(
     (job) => job.outputPath && !isPreviewRenderJobParams(job.params)
   );
@@ -176,12 +175,16 @@ export async function resolvePublishMedia(options: {
   if (!existsSync(filePath)) {
     throw new Error("Rendered clip file is missing on disk");
   }
-  return {
-    filePath,
-    mimeType: "video/mp4",
-    fileSizeBytes: 0,
-    platformExportId: null,
-  };
+  return inspectPublishMedia(filePath, null);
+}
+
+export async function inspectPublishMedia(filePath: string, platformExportId: string | null): Promise<PreparedMedia> {
+  const [file, probe] = await Promise.all([stat(filePath), probeMedia(filePath)]);
+  if (!file.isFile() || file.size <= 0 || !probe.videoCodec || probe.durationSeconds <= 0) {
+    throw new Error("The selected export is not a playable video. Render this clip again.");
+  }
+  return { filePath, platformExportId, mimeType: "video/mp4", fileSizeBytes: file.size,
+    width: probe.width, height: probe.height, durationSeconds: probe.durationSeconds };
 }
 
 async function gatherTranscript(streamSessionId: string, start: number, end: number) {
@@ -198,13 +201,26 @@ async function gatherTranscript(streamSessionId: string, start: number, end: num
   return chunks.map((c) => c.text).join(" ").trim();
 }
 
-export async function createPublishGroup(options: {
+const creatingGroups = new Map<string, Promise<Awaited<ReturnType<typeof createPublishGroupInternal>>>>();
+export async function createPublishGroup(options: Parameters<typeof createPublishGroupInternal>[0]) {
+  if (!options.requestKey) return createPublishGroupInternal(options);
+  const key = JSON.stringify([options.userId, options.clipSuggestionId, options.requestKey]);
+  const existing = creatingGroups.get(key);
+  if (existing) return existing;
+  const work = createPublishGroupInternal(options);
+  creatingGroups.set(key, work);
+  try { return await work; } finally { if (creatingGroups.get(key) === work) creatingGroups.delete(key); }
+}
+
+async function createPublishGroupInternal(options: {
   userId: string;
   clipSuggestionId: string;
+  requestKey?: string;
   destinations: Array<{
     connectedSocialAccountId: string;
     platform: SocialPlatform;
     destinationId?: string | null;
+    platformExportId?: string | null;
     settings?: SocialPublishSettings;
     content?: SocialGeneratedContent;
   }>;
@@ -213,6 +229,12 @@ export async function createPublishGroup(options: {
     throw new Error("Select at least one destination");
   }
 
+  if (options.destinations.length > 20 || new Set(options.destinations.map((d) => d.connectedSocialAccountId)).size !== options.destinations.length) {
+    throw new Error("Select each destination account only once (maximum 20).");
+  }
+  const groupId = `pub_${createHash("sha256").update(JSON.stringify([options.userId, options.clipSuggestionId, options.requestKey || randomUUID()])).digest("hex").slice(0, 40)}`;
+  const existing = await getPublishGroup(groupId, options.userId);
+  if (existing) return existing;
   const clip = await loadClipContext(options.clipSuggestionId);
   const transcript = await gatherTranscript(
     clip.streamSessionId,
@@ -221,15 +243,8 @@ export async function createPublishGroup(options: {
   );
   const prefs = await getPublishingPreferences(options.userId);
 
-  const group = await prisma.socialPublishGroup.create({
-    data: {
-      userId: options.userId,
-      clipSuggestionId: options.clipSuggestionId,
-      status: "awaiting_review",
-    },
-  });
-
   const jobs = [];
+  const generatedByPlatform = new Map<string, SocialGeneratedContent>();
   for (const dest of options.destinations) {
     if (!isSocialPlatform(dest.platform)) {
       throw new Error(`Unsupported platform: ${dest.platform}`);
@@ -248,6 +263,7 @@ export async function createPublishGroup(options: {
     });
     if (!account) throw new Error("Connected account not found");
 
+    if (dest.destinationId && dest.destinationId !== account.platformAccountId) throw new Error("Destination does not belong to the connected account.");
     const settings: SocialPublishSettings = {
       privacy: forcesPrivateUploads(dest.platform)
         ? "private"
@@ -261,18 +277,23 @@ export async function createPublishGroup(options: {
         dest.settings?.facebookFormat || prefs.facebookFormat || "reel",
       tiktokMode: dest.settings?.tiktokMode || prefs.tiktokMode || "direct",
       ...dest.settings,
+      postConsent: false,
     };
+    if (forcesPrivateUploads(dest.platform)) settings.privacy = "private";
 
     const media = await resolvePublishMedia({
       clipSuggestionId: clip.id,
       platform: dest.platform,
       youtubeFormat: settings.youtubeFormat,
       instagramFormat: settings.instagramFormat,
+      facebookFormat: settings.facebookFormat,
+      platformExportId: dest.platformExportId,
     });
 
+    const copyKey = `${dest.platform}:${settings.youtubeFormat}:${settings.instagramFormat}`;
     let content = dest.content
       ? asContent(dest.content, dest.platform)
-      : await generateSocialContent({
+      : generatedByPlatform.get(copyKey) ?? await generateSocialContent({
           platform: dest.platform,
           clipTitle: clip.title,
           clipReason: clip.reason,
@@ -289,6 +310,7 @@ export async function createPublishGroup(options: {
           useTranscriptQuotes: prefs.useTranscriptQuotes,
         });
 
+    if (!dest.content) generatedByPlatform.set(copyKey, content);
     if (!dest.content && prefs.defaultHashtags.length) {
       const merged = Array.from(
         new Set([...prefs.defaultHashtags, ...content.hashtags])
@@ -303,27 +325,28 @@ export async function createPublishGroup(options: {
       media,
     });
 
-    const job = await prisma.socialPublishJob.create({
-      data: {
-        publishGroupId: group.id,
-        connectedSocialAccountId: account.id,
-        platform: dest.platform,
-        destinationId: dest.destinationId || account.platformAccountId,
-        status: "draft",
-        idempotencyKey: `pub_${group.id}_${account.id}_${randomUUID().slice(0, 8)}`,
-        platformExportId: media.platformExportId,
-        videoPath: media.filePath,
-        generatedContent: asJson(content),
-        editedContent: asJson(content),
-        publishSettings: asJson(settings),
-        validationWarnings: asJson(validation.warnings),
-      },
+    jobs.push({
+      connectedSocialAccountId: account.id, platform: dest.platform,
+      destinationId: account.platformAccountId,
+      status: requiresPostReview(dest.platform) ? "awaiting_consent" : "draft",
+      idempotencyKey: `pub_${groupId}_${account.id}`,
+      platformExportId: media.platformExportId, videoPath: media.filePath,
+      generatedContent: asJson(content), editedContent: asJson(content),
+      publishSettings: asJson(settings), validationWarnings: asJson(validation.warnings),
+      events: { create: { type: "created", message: "Publish draft prepared" } },
     });
-    await appendEvent(job.id, "created", "Draft publish job created");
-    jobs.push(job);
   }
-
-  return getPublishGroup(group.id, options.userId);
+  try {
+    await prisma.socialPublishGroup.create({ data: {
+      id: groupId, userId: options.userId, clipSuggestionId: options.clipSuggestionId,
+      status: "awaiting_review", jobs: { create: jobs },
+    } });
+  } catch (error) {
+    if (!(error && typeof error === "object" && "code" in error && error.code === "P2002")) throw error;
+    // Another worker/request already created this exact operation.
+    if (!await getPublishGroup(groupId, options.userId)) throw error;
+  }
+  return getPublishGroup(groupId, options.userId);
 }
 
 export async function getPublishGroup(groupId: string, userId: string) {
@@ -395,7 +418,7 @@ export async function updatePublishJob(
     where: { id: jobId, publishGroup: { userId } },
   });
   if (!job) throw new Error("Publish job not found");
-  if (["queued", "uploading", "processing", "publishing", "completed"].includes(job.status)) {
+  if (!EDITABLE_PUBLISH_STATUSES.includes(job.status)) {
     throw new Error("Cannot edit a job that is already publishing or completed");
   }
 
@@ -410,14 +433,8 @@ export async function updatePublishJob(
     settings.privacy = "private";
   }
 
-  const media = job.videoPath
-    ? {
-        filePath: job.videoPath,
-        mimeType: "video/mp4",
-        fileSizeBytes: 0,
-        platformExportId: job.platformExportId,
-      }
-    : null;
+  settings.postConsent = false;
+  const media = job.videoPath ? await inspectPublishMedia(job.videoPath, job.platformExportId) : null;
 
   const validation = validateSocialPost({
     platform: job.platform as SocialPlatform,
@@ -426,8 +443,8 @@ export async function updatePublishJob(
     media,
   });
 
-  await prisma.socialPublishJob.update({
-    where: { id: jobId },
+  const updated = await prisma.socialPublishJob.updateMany({
+    where: { id: jobId, status: { in: EDITABLE_PUBLISH_STATUSES }, updatedAt: job.updatedAt },
     data: {
       editedContent: asJson(content),
       publishSettings: asJson(settings),
@@ -435,6 +452,7 @@ export async function updatePublishJob(
     },
   });
 
+  if (updated.count !== 1) throw new Error("The post changed while saving. Reload it before editing.");
   return getPublishGroup(job.publishGroupId, userId);
 }
 
@@ -445,6 +463,7 @@ export async function regeneratePublishJobContent(userId: string, jobId: string)
   });
   if (!job) throw new Error("Publish job not found");
 
+  if (!EDITABLE_PUBLISH_STATUSES.includes(job.status)) throw new Error("This post can no longer be edited.");
   const clip = await loadClipContext(job.publishGroup.clipSuggestionId);
   const transcript = await gatherTranscript(
     clip.streamSessionId,
@@ -475,14 +494,8 @@ export async function validatePublishGroup(userId: string, groupId: string) {
   if (!group) throw new Error("Publish group not found");
 
   for (const job of group.jobs) {
-    const media = job.videoPath
-      ? {
-          filePath: job.videoPath,
-          mimeType: "video/mp4",
-          fileSizeBytes: 0,
-          platformExportId: job.platformExportId,
-        }
-      : null;
+    if (![...EDITABLE_PUBLISH_STATUSES, "scheduled"].includes(job.status)) continue;
+    const media = job.videoPath ? await inspectPublishMedia(job.videoPath, job.platformExportId) : null;
     const validation = validateSocialPost({
       platform: job.platform as SocialPlatform,
       content: asContent(job.editedContent, job.platform as SocialPlatform),
@@ -503,6 +516,8 @@ export async function enqueuePublishGroup(options: {
   groupId: string;
   mode: "now" | "schedule";
   scheduledFor?: Date | null;
+  source?: "manual" | "autopilot";
+  consentJobIds?: string[];
 }) {
   const group = await prisma.socialPublishGroup.findFirst({
     where: { id: options.groupId, userId: options.userId },
@@ -510,8 +525,25 @@ export async function enqueuePublishGroup(options: {
   });
   if (!group) throw new Error("Publish group not found");
 
+  if (options.mode === "schedule" && (!options.scheduledFor || !Number.isFinite(options.scheduledFor.getTime()) || options.scheduledFor.getTime() <= Date.now())) throw new Error("scheduledFor must be a future time");
+  const reviewable = group.jobs.filter((job) => [...EDITABLE_PUBLISH_STATUSES, "scheduled"].includes(job.status));
+  const eligible = reviewable.filter((job) => options.source !== "autopilot" || !requiresPostReview(job.platform as SocialPlatform));
+  for (const job of eligible) {
+    if (requiresPostReview(job.platform as SocialPlatform)) {
+      if (!options.consentJobIds?.includes(job.id)) throw new Error("Review and confirm each TikTok post before publishing.");
+      assertTikTokPostConsent({ ...asSettings(job.publishSettings), postConsent: true });
+      await prisma.socialPublishJob.update({ where: { id: job.id }, data: {
+        publishSettings: asJson({ ...asSettings(job.publishSettings), postConsent: true }),
+      } });
+    }
+  }
+  if (!eligible.length) {
+    await refreshGroupStatus(group.id);
+    return getPublishGroup(group.id, options.userId);
+  }
+  const eligibleIds = eligible.map((job) => job.id);
   const validated = await validatePublishGroup(options.userId, options.groupId);
-  const blocking = (validated?.jobs || []).flatMap((job) => {
+  const blocking = (validated?.jobs || []).filter((job) => eligibleIds.includes(job.id)).flatMap((job) => {
     const warnings = Array.isArray(job.validationWarnings)
       ? (job.validationWarnings as unknown as SocialValidationWarning[])
       : [];
@@ -522,7 +554,7 @@ export async function enqueuePublishGroup(options: {
   }
 
   if (options.mode === "schedule") {
-    if (!options.scheduledFor || options.scheduledFor.getTime() <= Date.now()) {
+    if (!options.scheduledFor || !Number.isFinite(options.scheduledFor.getTime()) || options.scheduledFor.getTime() <= Date.now()) {
       throw new Error("scheduledFor must be a future time");
     }
     await prisma.socialPublishGroup.update({
@@ -532,7 +564,8 @@ export async function enqueuePublishGroup(options: {
     await prisma.socialPublishJob.updateMany({
       where: {
         publishGroupId: group.id,
-        status: { in: ["draft", "awaiting_consent", "failed"] },
+        id: { in: eligibleIds },
+        status: { in: EDITABLE_PUBLISH_STATUSES },
       },
       data: {
         status: "scheduled",
@@ -549,7 +582,8 @@ export async function enqueuePublishGroup(options: {
     await prisma.socialPublishJob.updateMany({
       where: {
         publishGroupId: group.id,
-        status: { in: ["draft", "awaiting_consent", "scheduled", "failed"] },
+        id: { in: eligibleIds },
+        status: { in: [...EDITABLE_PUBLISH_STATUSES, "scheduled"] },
       },
       data: {
         status: "queued",
@@ -560,7 +594,7 @@ export async function enqueuePublishGroup(options: {
     });
   }
 
-  for (const job of group.jobs) {
+  for (const job of eligible) {
     await appendEvent(
       job.id,
       options.mode === "schedule" ? "scheduled" : "queued",
@@ -587,10 +621,7 @@ export async function cancelPublishGroup(userId: string, groupId: string) {
     },
     data: { status: "cancelled", scheduledFor: null },
   });
-  await prisma.socialPublishGroup.update({
-    where: { id: groupId },
-    data: { status: "cancelled", scheduledFor: null },
-  });
+  await refreshGroupStatus(groupId);
   for (const job of group.jobs) {
     if (
       ["draft", "queued", "scheduled", "awaiting_consent"].includes(job.status)
@@ -689,13 +720,17 @@ export async function retryPublishJob(userId: string, jobId: string) {
     where: { id: jobId, publishGroup: { userId } },
   });
   if (!job) throw new Error("Publish job not found");
-  if (job.status === "completed") throw new Error("Job already completed");
+  if (job.status !== "failed") throw new Error("Only a failed post can be retried.");
+  if (job.errorCode === "outcome_unknown") throw new Error("Check the platform before creating a new post; its previous result is uncertain.");
+  if (job.platformPostId) throw new Error("The platform could not publish this upload. Start a new review draft after correcting the problem.");
+  if (job.attemptCount >= job.maxAttempts) throw new Error("Maximum attempts reached. Review this post before starting a new one.");
   if (job.errorCode === "needs_reauth") {
-    throw new Error("Reconnect the account before retrying");
+    const account = await prisma.connectedSocialAccount.findUnique({ where: { id: job.connectedSocialAccountId }, select: { isActive: true, connectionError: true } });
+    if (!account?.isActive || account.connectionError) throw new Error("Reconnect the account before retrying");
   }
 
-  await prisma.socialPublishJob.update({
-    where: { id: jobId },
+  const updated = await prisma.socialPublishJob.updateMany({
+    where: { id: jobId, status: "failed", lockedBy: null },
     data: {
       status: "queued",
       errorCode: null,
@@ -705,6 +740,7 @@ export async function retryPublishJob(userId: string, jobId: string) {
       lockedBy: null,
     },
   });
+  if (updated.count !== 1) throw new Error("This post is already being retried.");
   await prisma.socialPublishGroup.update({
     where: { id: job.publishGroupId },
     data: { status: "publishing" },
@@ -718,291 +754,152 @@ async function refreshGroupStatus(groupId: string) {
     where: { publishGroupId: groupId },
     select: { status: true },
   });
-  const statuses = jobs.map((j) => j.status);
-  let status = "publishing";
-  if (statuses.every((s) => s === "completed")) status = "completed";
-  else if (statuses.every((s) => s === "failed" || s === "cancelled")) status = "failed";
-  else if (
-    statuses.some((s) => s === "completed") &&
-    statuses.some((s) => s === "failed")
-  ) {
-    status = "partially_completed";
-  } else if (statuses.every((s) => s === "cancelled")) status = "cancelled";
-  else if (statuses.some((s) => s === "scheduled") && statuses.every((s) => ["scheduled", "cancelled", "completed", "failed"].includes(s))) {
-    status = "scheduled";
-  }
+  const status = socialGroupStatus(jobs.map((j) => j.status));
 
   await prisma.socialPublishGroup.update({
     where: { id: groupId },
     data: { status },
   });
+  if (status === "completed") {
+    await prisma.streamAutomationClip.updateMany({ where: { publishGroupId: groupId, status: "awaiting_review" }, data: { status: "completed", errorMessage: null } });
+  }
 }
 
 const SOCIAL_WORKER_ID = `social-${process.pid}-${randomUUID().slice(0, 8)}`;
 
 export async function reclaimStaleSocialPublishJobs(): Promise<number> {
-  const cutoff = new Date(Date.now() - 15 * 60 * 1000);
-  const stale = await prisma.socialPublishJob.findMany({
-    where: {
-      status: { in: ["preparing_media", "uploading", "processing", "publishing"] },
-      OR: [{ lockedAt: { lt: cutoff } }, { lockedAt: null, updatedAt: { lt: cutoff } }],
-    },
-    take: 20,
-  });
-
+  const cutoff = new Date(Date.now() - 5 * 60 * 1000);
+  const stale = await prisma.socialPublishJob.findMany({ where: {
+    status: { in: ACTIVE_PUBLISH_STATUSES }, lockedBy: { not: null },
+    OR: [{ lockedAt: { lt: cutoff } }, { lockedAt: null, updatedAt: { lt: cutoff } }],
+  }, take: 20 });
   let reclaimed = 0;
   for (const job of stale) {
-    const nextStatus = job.attemptCount >= job.maxAttempts ? "failed" : "queued";
-    await prisma.socialPublishJob.update({
-      where: { id: job.id },
-      data: {
-        status: nextStatus,
-        lockedAt: null,
-        lockedBy: null,
-        errorMessage:
-          nextStatus === "failed"
-            ? "Publishing timed out or worker restarted too many times"
-            : null,
-        failedAt: nextStatus === "failed" ? new Date() : null,
-      },
-    });
-    await appendEvent(
-      job.id,
-      "reclaimed",
-      nextStatus === "failed" ? "Gave up after stale lock" : "Re-queued after stale lock"
-    );
-    await refreshGroupStatus(job.publishGroupId);
-    reclaimed += 1;
+    const uncertain = job.errorCode === "commit_in_flight" && !job.platformPostId;
+    const result = await prisma.socialPublishJob.updateMany({ where: { id: job.id, lockedBy: job.lockedBy, lockedAt: job.lockedAt }, data: {
+      status: uncertain ? "outcome_unknown" : "queued", lockedBy: null, lockedAt: null,
+      errorCode: uncertain ? "outcome_unknown" : null,
+      errorMessage: uncertain ? "The platform may have received this post. Check your account before creating another." : null,
+    } });
+    if (result.count) { await refreshGroupStatus(job.publishGroupId); reclaimed++; }
   }
   return reclaimed;
 }
 
 export async function claimNextSocialPublishJob(): Promise<string | null> {
   const now = new Date();
-  const candidates = await prisma.socialPublishJob.findMany({
-    where: {
-      OR: [
-        { status: "queued" },
-        { status: "scheduled", scheduledFor: { lte: now } },
-      ],
-    },
-    orderBy: { createdAt: "asc" },
-    take: 8,
-    select: { id: true, attemptCount: true, maxAttempts: true },
-  });
-
+  const candidates = await prisma.socialPublishJob.findMany({ where: { lockedBy: null, OR: [
+    { status: "queued" }, { status: "scheduled", scheduledFor: { lte: now } },
+    { status: "processing", scheduledFor: { lte: now } },
+  ] }, orderBy: { createdAt: "asc" }, take: 8 });
   for (const candidate of candidates) {
-    if (candidate.attemptCount >= candidate.maxAttempts) {
-      await prisma.socialPublishJob.update({
-        where: { id: candidate.id },
-        data: {
-          status: "failed",
-          errorCode: "max_attempts",
-          errorMessage: "Exceeded maximum publish attempts",
-          failedAt: new Date(),
-        },
-      });
+    const polling = candidate.status === "processing";
+    if (!polling && candidate.attemptCount >= candidate.maxAttempts) {
+      await failSocialPublishJob(candidate.id, "Exceeded maximum publish attempts");
       continue;
     }
-
-    const claimed = await prisma.socialPublishJob.updateMany({
-      where: {
-        id: candidate.id,
-        status: { in: ["queued", "scheduled"] },
-      },
-      data: {
-        status: "preparing_media",
-        lockedAt: new Date(),
-        lockedBy: SOCIAL_WORKER_ID,
-        startedAt: new Date(),
-        attemptCount: { increment: 1 },
-      },
-    });
+    const claimed = await prisma.socialPublishJob.updateMany({ where: {
+      id: candidate.id, status: candidate.status, lockedBy: null,
+      ...(candidate.status === "queued" ? {} : { scheduledFor: { lte: now } }),
+    }, data: { status: "preparing_media", lockedAt: now, lockedBy: SOCIAL_WORKER_ID,
+      startedAt: candidate.startedAt || now, ...(polling ? {} : { attemptCount: { increment: 1 } }),
+    } });
     if (claimed.count === 1) return candidate.id;
   }
   return null;
 }
 
 export async function executeSocialPublishJob(jobId: string): Promise<void> {
-  const job = await prisma.socialPublishJob.findUnique({
-    where: { id: jobId },
-  });
-  if (!job) return;
-
+  const job = await prisma.socialPublishJob.findUnique({ where: { id: jobId } });
+  if (!job || job.lockedBy !== SOCIAL_WORKER_ID || job.status !== "preparing_media") return;
+  let committing = job.errorCode === "commit_in_flight";
+  let postId = job.platformPostId;
+  const ownedUpdate = async (data: Prisma.SocialPublishJobUncheckedUpdateManyInput) => {
+    const updated = await prisma.socialPublishJob.updateMany({ where: { id: jobId, lockedBy: SOCIAL_WORKER_ID }, data });
+    if (updated.count !== 1) throw new Error("Publishing lease lost");
+  };
+  const heartbeat = setInterval(() => { void ownedUpdate({ lockedAt: new Date() }).catch(() => undefined); }, 30_000);
+  heartbeat.unref?.();
   try {
-    await appendEvent(jobId, "preparing_media", "Preparing media for upload");
+    if (!canPublishPlatform(job.platform as SocialPlatform)) throw new Error("Publishing is unavailable for this platform. Check the connected account.");
     const settings = asSettings(job.publishSettings);
-    const content = asContent(job.editedContent ?? job.generatedContent, job.platform as SocialPlatform);
-
-    let media: PreparedMedia;
-    if (job.videoPath && existsSync(job.videoPath)) {
-      media = {
-        filePath: job.videoPath,
-        mimeType: "video/mp4",
-        fileSizeBytes: 0,
-        platformExportId: job.platformExportId,
-      };
-    } else {
-      media = await resolvePublishMedia({
-        clipSuggestionId: (
-          await prisma.socialPublishGroup.findUniqueOrThrow({
-            where: { id: job.publishGroupId },
-            select: { clipSuggestionId: true },
-          })
-        ).clipSuggestionId,
-        platform: job.platform as SocialPlatform,
-        youtubeFormat: settings.youtubeFormat,
-        instagramFormat: settings.instagramFormat,
-      });
-      await prisma.socialPublishJob.update({
-        where: { id: jobId },
-        data: {
-          videoPath: media.filePath,
-          platformExportId: media.platformExportId,
-        },
-      });
-    }
-
-    const validation = validateSocialPost({
-      platform: job.platform as SocialPlatform,
-      content,
-      settings,
-      media,
-    });
-    if (!validation.ok) {
-      throw new Error(
-        validation.warnings.find((w) => w.severity === "error")?.message ||
-          "Validation failed"
-      );
-    }
-
-    await prisma.socialPublishJob.update({
-      where: { id: jobId },
-      data: { status: "uploading", validationWarnings: asJson(validation.warnings) },
-    });
-    await appendEvent(jobId, "uploading", "Uploading media to platform");
-
-    const ctx = await getPublisherContext(job.connectedSocialAccountId);
+    if (requiresPostReview(job.platform as SocialPlatform)) assertTikTokPostConsent(settings);
+    if (forcesPrivateUploads(job.platform as SocialPlatform)) settings.privacy = "private";
+    const ctx = { ...await getPublisherContext(job.connectedSocialAccountId), destinationId: job.destinationId };
     const publisher = getSocialPublisher(job.platform as SocialPlatform);
-
-    // Idempotency: if we already have a post id, verify instead of re-uploading
-    if (job.platformPostId) {
-      const status = await publisher.getPublishStatus(ctx, job.platformPostId);
-      if (status.state === "published") {
-        await prisma.socialPublishJob.update({
-          where: { id: jobId },
-          data: {
-            status: "completed",
-            platformPostUrl: status.platformPostUrl || job.platformPostUrl,
-            completedAt: new Date(),
-            lockedAt: null,
-            lockedBy: null,
-            errorCode: null,
-            errorMessage: null,
-          },
-        });
-        await appendEvent(jobId, "completed", "Existing platform post confirmed");
-        await refreshGroupStatus(job.publishGroupId);
-        await capturePublishCompleted(jobId);
-        return;
-      }
-    }
-
-    const result = await publisher.publish(ctx, {
-      media,
-      content,
-      settings,
-      idempotencyKey: job.idempotencyKey,
-      existingUploadId: job.platformUploadId,
-      existingPostId: job.platformPostId,
-    });
-
-    if (!result.success) {
-      await prisma.socialPublishJob.update({
-        where: { id: jobId },
-        data: {
-          status: "failed",
-          errorCode: result.errorCode || "publish_failed",
-          errorMessage: result.errorMessage || "Publish failed",
-          platformUploadId: result.platformUploadId || job.platformUploadId,
-          platformPostId: result.platformPostId || job.platformPostId,
-          failedAt: new Date(),
-          lockedAt: null,
-          lockedBy: null,
-          rawPlatformResponse: result.rawSafeResponse
-            ? asJson(result.rawSafeResponse)
-            : undefined,
+    let result: import("@/lib/social/types").PublishResult;
+    // Once the remote post exists, all subsequent work is status polling, never upload.
+    if (postId) {
+      const status = await publisher.getPublishStatus(ctx, job.platform === "tiktok" ? unsealUploadId(job.platformUploadId) || postId : postId);
+      result = { success: status.state !== "failed", state: status.state === "published" ? "published" : status.state === "awaiting_user" ? "awaiting_user" : "processing",
+        platformPostId: status.platformPostId || postId, platformPostUrl: status.platformPostUrl,
+        errorMessage: status.errorMessage, errorCode: status.state === "failed" ? "processing_failed" : undefined };
+    } else {
+      const media = job.videoPath
+        ? await inspectPublishMedia(job.videoPath, job.platformExportId)
+        : await resolvePublishMedia({ clipSuggestionId: (await prisma.socialPublishGroup.findUniqueOrThrow({ where: { id: job.publishGroupId }, select: { clipSuggestionId: true } })).clipSuggestionId,
+            platform: job.platform as SocialPlatform, youtubeFormat: settings.youtubeFormat, instagramFormat: settings.instagramFormat, facebookFormat: settings.facebookFormat });
+      const content = asContent(job.editedContent ?? job.generatedContent, job.platform as SocialPlatform);
+      const request: import("@/lib/social/SocialPublisher").PublishRequest = {
+        media, content, settings, idempotencyKey: job.idempotencyKey,
+        existingUploadId: unsealUploadId(job.platformUploadId),
+        existingPostId: postId, existingMediaId: job.platformMediaId,
+        checkpoint: async (checkpoint) => {
+          if (checkpoint.committing != null) committing = checkpoint.committing;
+          if (checkpoint.platformPostId) postId = checkpoint.platformPostId;
+          await ownedUpdate({
+            ...(checkpoint.platformUploadId ? { platformUploadId: `enc:${encryptSecret(checkpoint.platformUploadId)}` } : {}),
+            ...(checkpoint.platformMediaId ? { platformMediaId: checkpoint.platformMediaId } : {}),
+            ...(checkpoint.platformPostId ? { platformPostId: checkpoint.platformPostId } : {}),
+            errorCode: committing && !postId ? "commit_in_flight" : null, lockedAt: new Date(),
+          });
         },
-      });
-      await appendEvent(jobId, "failed", result.errorMessage || "Publish failed", {
-        errorCode: result.errorCode,
-        needsReauth: result.needsReauth,
-      });
-      await refreshGroupStatus(job.publishGroupId);
-      return;
+      };
+      const validation = validateSocialPost({ platform: job.platform as SocialPlatform, content, settings, media });
+      const remote = await publisher.validatePost(ctx, request);
+      const warnings = [...validation.warnings, ...remote.warnings];
+      if (!validation.ok || !remote.ok) throw new Error(warnings.find((w) => w.severity === "error")?.message || "Post validation failed");
+      await ownedUpdate({ status: "uploading", videoPath: media.filePath, platformExportId: media.platformExportId, validationWarnings: asJson(warnings) });
+      result = await publisher.publish(ctx, request);
     }
-
-    await prisma.socialPublishJob.update({
-      where: { id: jobId },
-      data: {
-        status: "completed",
-        platformUploadId: result.platformUploadId || job.platformUploadId,
-        platformMediaId: result.platformMediaId || job.platformMediaId,
-        platformPostId: result.platformPostId,
-        platformPostUrl: result.platformPostUrl,
-        completedAt: new Date(),
-        lockedAt: null,
-        lockedBy: null,
-        errorCode: null,
-        errorMessage: null,
-        rawPlatformResponse: result.rawSafeResponse
-          ? asJson(result.rawSafeResponse)
-          : undefined,
-      },
+    if (result.needsReauth) await prisma.connectedSocialAccount.update({ where: { id: job.connectedSocialAccountId }, data: { connectionError: "Reconnect this account to resume publishing." } });
+    const uncertain = !result.success && committing && !postId && !result.platformPostId;
+    const state = !result.success ? (uncertain ? "outcome_unknown" : "failed") : result.state === "processing" ? "processing" : result.state === "awaiting_user" ? "awaiting_user" : "completed";
+    // Provider processing can take minutes. Release the worker and poll later.
+    const processingExpired = state === "processing" && job.startedAt && Date.now() - job.startedAt.getTime() > 24 * 60 * 60 * 1000;
+    await ownedUpdate({ status: processingExpired ? "outcome_unknown" : state,
+      ...(result.platformUploadId ? { platformUploadId: `enc:${encryptSecret(result.platformUploadId)}` } : {}),
+      ...(result.platformMediaId ? { platformMediaId: result.platformMediaId } : {}),
+      ...(result.platformPostId ? { platformPostId: result.platformPostId } : {}),
+      ...(result.platformPostUrl ? { platformPostUrl: result.platformPostUrl } : {}),
+      completedAt: state === "completed" ? new Date() : null, failedAt: state === "failed" ? new Date() : null,
+      scheduledFor: state === "processing" && !processingExpired ? new Date(Date.now() + 30_000) : null,
+      lockedAt: null, lockedBy: null,
+      errorCode: uncertain || processingExpired ? "outcome_unknown" : result.success ? null : result.needsReauth ? "needs_reauth" : result.errorCode || "publish_failed",
+      errorMessage: uncertain || processingExpired ? "Check the platform before creating another post; its result could not be confirmed." : result.errorMessage ? safePublishError(result.errorMessage) : null,
+      rawPlatformResponse: result.rawSafeResponse ? asJson(result.rawSafeResponse) : undefined,
     });
-    await appendEvent(jobId, "completed", "Published successfully", {
-      platformPostId: result.platformPostId,
-      privacyStatus: result.privacyStatus,
-    });
+    if (state !== "processing") await appendEvent(jobId, state, state === "completed" ? "Platform confirmed the post" : state === "awaiting_user" ? "Delivered to TikTok inbox. Finish posting in TikTok." : "Publishing needs attention");
     await refreshGroupStatus(job.publishGroupId);
-    await capturePublishCompleted(jobId);
+    if (state === "completed") await capturePublishCompleted(jobId);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Publish failed";
-    const code =
-      error && typeof error === "object" && "code" in error
-        ? String((error as { code: string }).code)
-        : "publish_failed";
-    await prisma.socialPublishJob.update({
-      where: { id: jobId },
-      data: {
-        status: "failed",
-        errorCode: code,
-        errorMessage: message,
-        failedAt: new Date(),
-        lockedAt: null,
-        lockedBy: null,
-      },
-    });
-    await appendEvent(jobId, "failed", message, { errorCode: code });
-    const jobRow = await prisma.socialPublishJob.findUnique({
-      where: { id: jobId },
-      select: { publishGroupId: true },
-    });
-    if (jobRow) await refreshGroupStatus(jobRow.publishGroupId);
-  }
+    const uncertain = committing && !postId;
+    const expired = Boolean(postId && job.startedAt && Date.now() - job.startedAt.getTime() > 24 * 60 * 60 * 1000);
+    const message = safePublishError(error instanceof Error ? error.message : "Publish failed");
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "publish_failed";
+    await ownedUpdate({ status: uncertain || expired ? "outcome_unknown" : postId ? "processing" : "failed",
+      errorCode: uncertain || expired ? "outcome_unknown" : code, errorMessage: message,
+      scheduledFor: postId && !expired ? new Date(Date.now() + 60_000) : null,
+      failedAt: !postId && !uncertain ? new Date() : null, lockedAt: null, lockedBy: null,
+    }).catch(() => undefined);
+    await refreshGroupStatus(job.publishGroupId);
+  } finally { clearInterval(heartbeat); }
 }
 
 export async function failSocialPublishJob(jobId: string, message: string) {
-  const job = await prisma.socialPublishJob.update({
-    where: { id: jobId },
-    data: {
-      status: "failed",
-      errorMessage: message,
-      failedAt: new Date(),
-      lockedAt: null,
-      lockedBy: null,
-    },
-  });
-  await appendEvent(jobId, "failed", message);
+  const job = await prisma.socialPublishJob.update({ where: { id: jobId }, data: {
+    status: "failed", errorMessage: safePublishError(message), failedAt: new Date(), lockedAt: null, lockedBy: null,
+  } });
+  await appendEvent(jobId, "failed", safePublishError(message));
   await refreshGroupStatus(job.publishGroupId);
 }

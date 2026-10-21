@@ -1,6 +1,7 @@
+import { socialFetch } from "@/lib/social/http";
 import { createHash, randomBytes } from "crypto";
 import { existsSync } from "fs";
-import { readFile, stat } from "fs/promises";
+import { open, stat } from "fs/promises";
 import {
   canConnectPlatform,
   forcesPrivateUploads,
@@ -85,7 +86,7 @@ export async function exchangeYouTubeCode(options: {
     redirect_uri: getYouTubeRedirectUri(),
   });
 
-  const response = await fetch(YT_TOKEN, {
+  const response = await socialFetch(YT_TOKEN, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
@@ -122,7 +123,7 @@ export async function refreshYouTubeAccessToken(refreshToken: string): Promise<{
     refresh_token: refreshToken,
     grant_type: "refresh_token",
   });
-  const response = await fetch(YT_TOKEN, {
+  const response = await socialFetch(YT_TOKEN, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
@@ -154,7 +155,7 @@ export async function fetchYouTubeChannel(accessToken: string): Promise<{
   metadata: Record<string, unknown>;
 }> {
   const url = `${YT_API}/channels?part=snippet,contentDetails,status&mine=true`;
-  const response = await fetch(url, {
+  const response = await socialFetch(url, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   const json = (await response.json()) as {
@@ -186,7 +187,7 @@ async function ytFetch(
   url: string,
   init?: RequestInit
 ): Promise<Response> {
-  return fetch(url, {
+  return socialFetch(url, {
     ...init,
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -239,9 +240,7 @@ async function initResumableUpload(
     status.publishAt = new Date(request.settings.scheduledFor).toISOString();
     status.privacyStatus = "private";
   }
-  if (request.settings.notifySubscribers === false) {
-    status.license = "youtube";
-  }
+  status.containsSyntheticMedia = Boolean(request.settings.containsSyntheticMedia);
 
   const meta = {
     snippet,
@@ -250,7 +249,7 @@ async function initResumableUpload(
 
   const response = await ytFetch(
     accessToken,
-    `${YT_UPLOAD}?uploadType=resumable&part=snippet,status`,
+    `${YT_UPLOAD}?uploadType=resumable&part=snippet,status&notifySubscribers=${request.settings.notifySubscribers !== false}`,
     {
       method: "POST",
       headers: {
@@ -272,36 +271,53 @@ async function initResumableUpload(
 }
 
 async function uploadVideoBytes(
-  uploadUrl: string,
-  accessToken: string,
-  filePath: string,
-  fileSize: number
+  uploadUrl: string, accessToken: string, filePath: string, fileSize: number
 ): Promise<{ id: string; status?: { privacyStatus?: string; uploadStatus?: string } }> {
-  const bytes = await readFile(filePath);
-  const response = await fetch(uploadUrl, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "video/mp4",
-      "Content-Length": String(fileSize),
-    },
-    body: bytes,
-  });
-  const json = (await response.json()) as {
-    id?: string;
-    status?: { privacyStatus?: string; uploadStatus?: string };
-    error?: { message?: string };
-  };
-  if (!response.ok || !json.id) {
-    throw new Error(json.error?.message || `YouTube upload failed (${response.status})`);
+  const url = new URL(uploadUrl);
+  if (url.protocol !== "https:" || !["www.googleapis.com", "youtube.googleapis.com"].includes(url.hostname)) {
+    throw new Error("Invalid YouTube upload session");
   }
-  return { id: json.id, status: json.status };
+  const headers = { Authorization: `Bearer ${accessToken}` };
+  // Query acknowledged bytes first, including after a worker restart or lost response.
+  const current = await socialFetch(uploadUrl, { method: "PUT", headers: {
+    ...headers, "Content-Length": "0", "Content-Range": `bytes */${fileSize}`,
+  } });
+  if (current.ok) {
+    const done = await current.json() as { id?: string };
+    if (done.id) return { id: done.id };
+    throw new Error("YouTube returned an incomplete upload acknowledgement");
+  }
+  if (current.status !== 308) throw new Error(`YouTube upload session could not resume (${current.status})`);
+  let offset = Number(current.headers.get("range")?.match(/-(\d+)$/)?.[1] ?? -1) + 1;
+  const handle = await open(filePath, "r");
+  try {
+    const chunkSize = 8 * 1024 * 1024; // A multiple of Google's 256 KiB requirement.
+    while (offset < fileSize) {
+      const buffer = Buffer.alloc(Math.min(chunkSize, fileSize - offset));
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
+      if (!bytesRead) throw new Error("Export file ended during upload");
+      const response = await socialFetch(uploadUrl, { method: "PUT", headers: {
+        ...headers, "Content-Type": "video/mp4", "Content-Length": String(bytesRead),
+        "Content-Range": `bytes ${offset}-${offset + bytesRead - 1}/${fileSize}`,
+      }, body: buffer.subarray(0, bytesRead) });
+      if (response.status === 308) {
+        const next = Number(response.headers.get("range")?.match(/-(\d+)$/)?.[1] ?? -1) + 1;
+        if (next <= offset || next > fileSize) throw new Error("YouTube did not acknowledge the uploaded chunk");
+        offset = next;
+        continue;
+      }
+      const json = await response.json() as { id?: string; status?: { privacyStatus?: string; uploadStatus?: string }; error?: { message?: string } };
+      if (!response.ok || !json.id) throw new Error(json.error?.message || `YouTube upload failed (${response.status})`);
+      return { id: json.id, status: json.status };
+    }
+    throw new Error("YouTube has not confirmed the completed upload");
+  } finally { await handle.close(); }
 }
 
 async function pollProcessing(
   accessToken: string,
   videoId: string,
-  maxAttempts = 40
+  maxAttempts = 1
 ): Promise<PublishStatus> {
   for (let i = 0; i < maxAttempts; i++) {
     const response = await ytFetch(
@@ -314,7 +330,8 @@ async function pollProcessing(
         processingDetails?: { processingStatus?: string };
       }>;
     };
-    const item = json.items?.[0];
+    if (!response.ok || !json.items?.[0]) return { state: "unknown", platformPostId: videoId };
+    const item = json.items[0];
     const uploadStatus = item?.status?.uploadStatus;
     const processingStatus = item?.processingDetails?.processingStatus;
     if (uploadStatus === "rejected") {
@@ -339,11 +356,11 @@ async function pollProcessing(
         errorMessage: "YouTube processing failed",
       };
     }
-    await new Promise((r) => setTimeout(r, 3000));
+    if (i + 1 < maxAttempts) await new Promise((r) => setTimeout(r, 3000));
   }
   // Upload accepted; processing may continue — treat as published with URL
   return {
-    state: "published",
+    state: "processing",
     platformPostId: videoId,
     platformPostUrl: `https://youtu.be/${videoId}`,
   };
@@ -452,6 +469,7 @@ export const youtubePublisher: SocialPublisher = {
         );
       }
 
+      await request.checkpoint?.({ platformUploadId: uploadUrl });
       const uploaded = await uploadVideoBytes(
         uploadUrl,
         ctx.accessToken,
@@ -459,6 +477,7 @@ export const youtubePublisher: SocialPublisher = {
         fileStat.size
       );
 
+      await request.checkpoint?.({ platformPostId: uploaded.id });
       const status = await pollProcessing(ctx.accessToken, uploaded.id);
       if (status.state === "failed") {
         return {
@@ -474,6 +493,7 @@ export const youtubePublisher: SocialPublisher = {
       const privacy = resolvePrivacy(request.settings);
       return {
         success: true,
+        state: status.state === "published" ? "published" : "processing",
         platformPostId: uploaded.id,
         platformUploadId: uploadUrl,
         platformPostUrl: status.platformPostUrl || `https://youtu.be/${uploaded.id}`,

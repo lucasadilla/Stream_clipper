@@ -1,5 +1,6 @@
+import { socialFetch } from "@/lib/social/http";
 import { existsSync } from "fs";
-import { open, readFile, stat } from "fs/promises";
+import { open, stat } from "fs/promises";
 import {
   canConnectPlatform,
   forcesPrivateUploads,
@@ -8,7 +9,6 @@ import {
 import { createPkcePair, publicOrigin } from "@/lib/social/oauth";
 import type {
   PublishRequest,
-  PublisherContext,
   SocialPublisher,
 } from "@/lib/social/SocialPublisher";
 import type {
@@ -84,7 +84,7 @@ export async function exchangeXCode(options: {
     redirect_uri: getXRedirectUri(),
     code_verifier: options.codeVerifier,
   });
-  const response = await fetch(TOKEN, {
+  const response = await socialFetch(TOKEN, {
     method: "POST",
     headers: {
       Authorization: basicAuthHeader(),
@@ -123,7 +123,7 @@ export async function refreshXAccessToken(refreshToken: string): Promise<{
     grant_type: "refresh_token",
     refresh_token: refreshToken,
   });
-  const response = await fetch(TOKEN, {
+  const response = await socialFetch(TOKEN, {
     method: "POST",
     headers: {
       Authorization: basicAuthHeader(),
@@ -159,7 +159,7 @@ export async function fetchXUser(accessToken: string): Promise<{
   avatarUrl: string | null;
   metadata: Record<string, unknown>;
 }> {
-  const response = await fetch(`${API}/users/me?user.fields=profile_image_url,name,username`, {
+  const response = await socialFetch(`${API}/users/me?user.fields=profile_image_url,name,username`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   const json = (await response.json()) as {
@@ -188,19 +188,9 @@ async function initMedia(
   accessToken: string,
   totalBytes: number
 ): Promise<string> {
-  const body = new URLSearchParams({
-    command: "INIT",
-    media_type: "video/mp4",
-    total_bytes: String(totalBytes),
-    media_category: "tweet_video",
-  });
-  const response = await fetch(MEDIA, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body,
+  const response = await socialFetch(`${MEDIA}/initialize`, {
+    method: "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ media_type: "video/mp4", total_bytes: totalBytes, media_category: "tweet_video" }),
   });
   const json = (await response.json()) as {
     media_id_string?: string;
@@ -221,11 +211,9 @@ async function appendChunk(
   chunk: Buffer
 ) {
   const form = new FormData();
-  form.set("command", "APPEND");
-  form.set("media_id", mediaId);
   form.set("segment_index", String(segmentIndex));
-      form.set("media", new Blob([new Uint8Array(chunk)]), `chunk_${segmentIndex}.bin`);
-  const response = await fetch(MEDIA, {
+  form.set("media", new Blob([new Uint8Array(chunk)]), `chunk_${segmentIndex}.bin`);
+  const response = await socialFetch(`${MEDIA}/${encodeURIComponent(mediaId)}/append`, {
     method: "POST",
     headers: { Authorization: `Bearer ${accessToken}` },
     body: form,
@@ -237,53 +225,28 @@ async function appendChunk(
 }
 
 async function finalizeMedia(accessToken: string, mediaId: string) {
-  const body = new URLSearchParams({
-    command: "FINALIZE",
-    media_id: mediaId,
-  });
-  const response = await fetch(MEDIA, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body,
+  const response = await socialFetch(`${MEDIA}/${encodeURIComponent(mediaId)}/finalize`, {
+    method: "POST", headers: { Authorization: `Bearer ${accessToken}` },
   });
   const json = (await response.json()) as {
-    processing_info?: { state?: string; check_after_secs?: number; error?: { message?: string } };
+    data?: { processing_info?: { state?: string; check_after_secs?: number; error?: { message?: string } } };
     detail?: string;
   };
   if (!response.ok) {
     throw new Error(json.detail || "X media FINALIZE failed");
   }
-  return json.processing_info;
+  return json.data?.processing_info;
 }
 
-async function waitForMedia(accessToken: string, mediaId: string) {
-  for (let i = 0; i < 60; i++) {
-    const response = await fetch(
-      `${MEDIA}?command=STATUS&media_id=${encodeURIComponent(mediaId)}`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    const json = (await response.json()) as {
-      processing_info?: {
-        state?: string;
-        check_after_secs?: number;
-        error?: { message?: string };
-      };
-    };
-    const state = json.processing_info?.state;
-    if (!state || state === "succeeded") return;
-    if (state === "failed") {
-      throw new Error(
-        json.processing_info?.error?.message || "X media processing failed"
-      );
-    }
-    await new Promise((r) =>
-      setTimeout(r, (json.processing_info?.check_after_secs || 3) * 1000)
-    );
-  }
-  throw new Error("Timed out waiting for X media processing");
+async function mediaReady(accessToken: string, mediaId: string): Promise<boolean> {
+  const response = await socialFetch(`${MEDIA}?media_id=${encodeURIComponent(mediaId)}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const json = await response.json() as { data?: { processing_info?: { state?: string; error?: { message?: string } } }; detail?: string };
+  if (!response.ok || !json.data) throw new Error(json.detail || "Could not check X media processing");
+  const processing = json.data.processing_info;
+  if (processing?.state === "failed") throw new Error(processing.error?.message || "X media processing failed");
+  return !processing || processing.state === "succeeded";
 }
 
 async function uploadVideo(accessToken: string, filePath: string): Promise<string> {
@@ -301,6 +264,7 @@ async function uploadVideo(accessToken: string, filePath: string): Promise<strin
         Math.min(CHUNK, fileStat.size - offset),
         offset
       );
+      if (!bytesRead) throw new Error("Video file ended during X upload");
       await appendChunk(accessToken, mediaId, segment, buffer.subarray(0, bytesRead));
       offset += bytesRead;
       segment += 1;
@@ -308,10 +272,7 @@ async function uploadVideo(accessToken: string, filePath: string): Promise<strin
   } finally {
     await handle.close();
   }
-  const processing = await finalizeMedia(accessToken, mediaId);
-  if (processing?.state && processing.state !== "succeeded") {
-    await waitForMedia(accessToken, mediaId);
-  }
+  await finalizeMedia(accessToken, mediaId);
   return mediaId;
 }
 
@@ -322,7 +283,7 @@ function postText(request: PublishRequest): string {
     content.caption.trim() ||
     content.title.trim() ||
     "Clip";
-  return text.slice(0, 280);
+  return text;
 }
 
 export const xPublisher: SocialPublisher = {
@@ -408,8 +369,11 @@ export const xPublisher: SocialPublisher = {
       const mediaId =
         request.existingMediaId ||
         (await uploadVideo(ctx.accessToken, request.media.filePath));
+      await request.checkpoint?.({ platformMediaId: mediaId });
+      if (!await mediaReady(ctx.accessToken, mediaId)) return { success: true, state: "processing", platformMediaId: mediaId };
       const text = postText(request);
-      const response = await fetch(`${API}/tweets`, {
+      await request.checkpoint?.({ committing: true });
+      const response = await socialFetch(`${API}/tweets`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${ctx.accessToken}`,
@@ -426,6 +390,7 @@ export const xPublisher: SocialPublisher = {
         title?: string;
       };
       if (!response.ok || !json.data?.id) {
+        if (response.status >= 400 && response.status < 500) await request.checkpoint?.({ committing: false });
         return {
           success: false,
           platformMediaId: mediaId,
@@ -434,6 +399,7 @@ export const xPublisher: SocialPublisher = {
           needsReauth: response.status === 401,
         };
       }
+      await request.checkpoint?.({ platformPostId: json.data.id, committing: false });
       const username =
         typeof ctx.accountMetadata?.username === "string"
           ? String(ctx.accountMetadata.username).replace(/^@/, "")
@@ -460,7 +426,10 @@ export const xPublisher: SocialPublisher = {
     }
   },
 
-  async getPublishStatus(_ctx, platformPostId): Promise<PublishStatus> {
+  async getPublishStatus(ctx, platformPostId): Promise<PublishStatus> {
+    const response = await socialFetch(`${API}/tweets/${encodeURIComponent(platformPostId)}`, { headers: { Authorization: `Bearer ${ctx.accessToken}` } });
+    const json = await response.json() as { data?: { id?: string } };
+    if (!response.ok || !json.data?.id) return { state: "unknown", platformPostId };
     return {
       state: "published",
       platformPostId,

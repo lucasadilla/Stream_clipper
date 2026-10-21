@@ -1,3 +1,5 @@
+import { socialCaption } from "@/lib/social/postText";
+import { socialFetch } from "@/lib/social/http";
 import { existsSync } from "fs";
 import {
   canConnectPlatform,
@@ -33,104 +35,41 @@ function wantsReel(request: PublishRequest): boolean {
   return Boolean(w && h && h > w);
 }
 
-async function publishReel(
-  page: string,
-  token: string,
-  request: PublishRequest
-): Promise<PublishResult> {
-  const videoUrl = buildPublicVideoUrl(request.media.filePath);
-  const description =
-    request.content.caption ||
-    request.content.description ||
-    request.content.title ||
-    "";
-
-  const start = await fetch(`${GRAPH}/${page}/video_reels`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      upload_phase: "start",
-      access_token: token,
-    }),
-  });
-  const startJson = (await start.json()) as {
-    video_id?: string;
-    upload_url?: string;
-    error?: { message?: string };
-  };
-
-  // Prefer hosted URL finish when start/upload_url is awkward from our host.
-  if (!start.ok || !startJson.video_id || !startJson.upload_url) {
-    const create = await fetch(`${GRAPH}/${page}/video_reels`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        upload_phase: "finish",
-        video_url: videoUrl,
-        description,
-        access_token: token,
-        video_state: "PUBLISHED",
-      }),
-    });
-    const createJson = (await create.json()) as {
-      id?: string;
-      video_id?: string;
-      error?: { message?: string };
-    };
-    if (!create.ok || !(createJson.id || createJson.video_id)) {
-      throw new Error(
-        createJson.error?.message ||
-          startJson.error?.message ||
-          "Facebook Reel publish failed"
-      );
-    }
-    const id = String(createJson.id || createJson.video_id);
-    return {
-      success: true,
-      platformPostId: id,
-      platformMediaId: id,
-      platformPostUrl: `https://www.facebook.com/reel/${id}`,
-    };
+async function publishReel(page: string, token: string, request: PublishRequest): Promise<PublishResult> {
+  const description = socialCaption(request.content);
+  let session: { videoId: string; uploadUrl: string; uploaded?: boolean } | null = null;
+  if (request.existingUploadId) {
+    try { session = JSON.parse(request.existingUploadId); } catch { throw new Error("The previous Facebook upload needs review before retrying."); }
   }
-
-  // Tell Meta to pull from our short-lived public grant URL.
-  const upload = await fetch(startJson.upload_url, {
-    method: "POST",
-    headers: {
-      Authorization: `OAuth ${token}`,
-      file_url: videoUrl,
-    },
-  });
-  if (!upload.ok) {
-    const text = await upload.text();
-    throw new Error(`Facebook Reel upload failed: ${text.slice(0, 300)}`);
+  if (!session) {
+    const response = await socialFetch(`${GRAPH}/${page}/video_reels`, { method: "POST", body: new URLSearchParams({ upload_phase: "start", access_token: token }) });
+    const json = await response.json() as { video_id?: string; upload_url?: string; error?: { message?: string } };
+    if (!response.ok || !json.video_id || !json.upload_url) throw new Error(json.error?.message || "Facebook could not initialize the Reel");
+    session = { videoId: json.video_id, uploadUrl: json.upload_url };
+    await request.checkpoint?.({ platformUploadId: JSON.stringify(session) });
   }
-
-  const finish = await fetch(`${GRAPH}/${page}/video_reels`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      upload_phase: "finish",
-      video_id: startJson.video_id,
-      video_state: "PUBLISHED",
-      description,
-      access_token: token,
-    }),
-  });
-  const finishJson = (await finish.json()) as {
-    success?: boolean;
-    error?: { message?: string };
-  };
-  if (!finish.ok) {
-    throw new Error(finishJson.error?.message || "Facebook Reel finish failed");
+  const uploadUrl = new URL(session.uploadUrl);
+  if (uploadUrl.protocol !== "https:" || uploadUrl.hostname !== "rupload.facebook.com") throw new Error("Invalid Facebook upload destination");
+  if (!session.uploaded) {
+    const upload = await socialFetch(uploadUrl, { method: "POST", headers: {
+      Authorization: `OAuth ${token}`, file_url: buildPublicVideoUrl(request.media.filePath),
+    } });
+    const json = await upload.json() as { success?: boolean; error?: { message?: string } };
+    if (!upload.ok || json.success !== true) throw new Error(json.error?.message || "Facebook Reel transfer failed");
+    session.uploaded = true;
+    await request.checkpoint?.({ platformUploadId: JSON.stringify(session) });
   }
-  return {
-    success: true,
-    platformPostId: startJson.video_id,
-    platformMediaId: startJson.video_id,
-    platformUploadId: startJson.video_id,
-    platformPostUrl: `https://www.facebook.com/reel/${startJson.video_id}`,
-  };
+  await request.checkpoint?.({ committing: true });
+  const finish = await socialFetch(`${GRAPH}/${page}/video_reels`, { method: "POST", body: new URLSearchParams({
+    upload_phase: "finish", video_id: session.videoId, video_state: "PUBLISHED", description, access_token: token,
+  }) });
+  const json = await finish.json() as { success?: boolean; error?: { message?: string } };
+  if (!finish.ok || json.success !== true) {
+    if (finish.status >= 400 && finish.status < 500 || json.success === false) await request.checkpoint?.({ committing: false });
+    throw new Error(json.error?.message || "Facebook did not accept Reel publication");
+  }
+  await request.checkpoint?.({ platformPostId: session.videoId, platformMediaId: session.videoId, committing: false });
+  return { success: true, state: "processing", platformPostId: session.videoId, platformMediaId: session.videoId };
 }
 
 async function publishPageVideo(
@@ -139,11 +78,7 @@ async function publishPageVideo(
   request: PublishRequest
 ): Promise<PublishResult> {
   const videoUrl = buildPublicVideoUrl(request.media.filePath);
-  const description =
-    request.content.caption ||
-    request.content.description ||
-    request.content.title ||
-    "";
+  const description = socialCaption(request.content);
   const params = new URLSearchParams({
     file_url: videoUrl,
     description,
@@ -152,7 +87,8 @@ async function publishPageVideo(
   });
   if (request.content.title) params.set("title", request.content.title);
 
-  const response = await fetch(`${GRAPH}/${page}/videos`, {
+  await request.checkpoint?.({ committing: true });
+  const response = await socialFetch(`${GRAPH}/${page}/videos`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: params,
@@ -162,10 +98,13 @@ async function publishPageVideo(
     error?: { message?: string };
   };
   if (!response.ok || !json.id) {
+    if (response.status >= 400 && response.status < 500) await request.checkpoint?.({ committing: false });
     throw new Error(json.error?.message || "Facebook Page video publish failed");
   }
+  await request.checkpoint?.({ platformPostId: json.id, platformMediaId: json.id, committing: false });
   return {
     success: true,
+    state: "processing",
     platformPostId: json.id,
     platformMediaId: json.id,
     platformPostUrl: `https://www.facebook.com/watch/?v=${json.id}`,
@@ -184,7 +123,7 @@ export const facebookPublisher: SocialPublisher = {
       return { ok: false, error: "Facebook Page required", needsReauth: true };
     }
     try {
-      const response = await fetch(
+      const response = await socialFetch(
         `${GRAPH}/${id}?fields=id,name&access_token=${encodeURIComponent(ctx.accessToken)}`
       );
       const json = (await response.json()) as {
@@ -274,11 +213,18 @@ export const facebookPublisher: SocialPublisher = {
     }
   },
 
-  async getPublishStatus(_ctx, platformPostId): Promise<PublishStatus> {
-    return {
-      state: "published",
-      platformPostId,
-      platformPostUrl: `https://www.facebook.com/watch/?v=${platformPostId}`,
-    };
+  async getPublishStatus(ctx, platformPostId): Promise<PublishStatus> {
+    const response = await socialFetch(`${GRAPH}/${encodeURIComponent(platformPostId)}?fields=status,permalink_url`, {
+      headers: { Authorization: `Bearer ${ctx.accessToken}` },
+    });
+    const json = await response.json() as { status?: { video_status?: string; publishing_phase?: { status?: string; publish_status?: string } }; permalink_url?: string };
+    if (!response.ok || !json.status) return { state: "unknown", platformPostId };
+    const status = json.status;
+    if (["error", "upload_failed", "expired"].includes(status.video_status || "") || status.publishing_phase?.status === "error") {
+      return { state: "failed", platformPostId, errorMessage: "Facebook could not process this video" };
+    }
+    const published = status.publishing_phase?.status === "complete" || status.publishing_phase?.publish_status === "published";
+    return { state: published ? "published" : "processing", platformPostId,
+      platformPostUrl: published && json.permalink_url ? new URL(json.permalink_url, "https://www.facebook.com").toString() : undefined };
   },
 };

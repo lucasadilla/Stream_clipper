@@ -1,17 +1,18 @@
+import { socialFetch } from "@/lib/social/http";
 import { createMediaGrant, createPkcePair, publicOrigin } from "@/lib/social/oauth";
 
-const GRAPH = "https://graph.facebook.com/v21.0";
-const AUTH = "https://www.facebook.com/v21.0/dialog/oauth";
-const TOKEN = "https://graph.facebook.com/v21.0/oauth/access_token";
+const configuredVersion = process.env.META_GRAPH_API_VERSION?.trim() || "v21.0";
+const VERSION = /^v\d+\.\d+$/.test(configuredVersion) ? configuredVersion : "v21.0";
+const GRAPH = `https://graph.facebook.com/${VERSION}`;
+const AUTH = `https://www.facebook.com/${VERSION}/dialog/oauth`;
+const TOKEN = `${GRAPH}/oauth/access_token`;
 
 const META_SCOPES = [
   "pages_show_list",
   "pages_read_engagement",
   "pages_manage_posts",
-  "pages_manage_engagement",
   "instagram_basic",
   "instagram_content_publish",
-  "business_management",
 ].join(",");
 
 export function metaOAuthConfigured(): boolean {
@@ -45,6 +46,8 @@ export function buildMetaAuthUrl(options: {
     response_type: "code",
     scope: META_SCOPES,
   });
+  const configId = process.env.META_LOGIN_CONFIG_ID?.trim();
+  if (configId) { params.set("config_id", configId); params.delete("scope"); }
   return `${AUTH}?${params.toString()}`;
 }
 
@@ -61,7 +64,7 @@ export async function exchangeMetaCode(options: {
     redirect_uri: getMetaRedirectUri(options.platform),
     code: options.code,
   });
-  const response = await fetch(`${TOKEN}?${params.toString()}`);
+  const response = await socialFetch(`${TOKEN}?${params.toString()}`);
   const json = (await response.json()) as {
     access_token?: string;
     expires_in?: number;
@@ -78,7 +81,7 @@ export async function exchangeMetaCode(options: {
     client_secret: process.env.META_APP_SECRET!.trim(),
     fb_exchange_token: json.access_token,
   });
-  const longRes = await fetch(`${TOKEN}?${longParams.toString()}`);
+  const longRes = await socialFetch(`${TOKEN}?${longParams.toString()}`);
   const longJson = (await longRes.json()) as {
     access_token?: string;
     expires_in?: number;
@@ -100,7 +103,7 @@ export interface MetaPage {
 
 export async function fetchMetaPages(userAccessToken: string): Promise<MetaPage[]> {
   const url = `${GRAPH}/me/accounts?fields=id,name,access_token,instagram_business_account&limit=100&access_token=${encodeURIComponent(userAccessToken)}`;
-  const response = await fetch(url);
+  const response = await socialFetch(url);
   const json = (await response.json()) as {
     data?: MetaPage[];
     error?: { message?: string };
@@ -121,7 +124,7 @@ export async function fetchInstagramProfile(
   profilePictureUrl: string | null;
 }> {
   const url = `${GRAPH}/${igUserId}?fields=id,username,name,profile_picture_url&access_token=${encodeURIComponent(pageAccessToken)}`;
-  const response = await fetch(url);
+  const response = await socialFetch(url);
   const json = (await response.json()) as {
     id?: string;
     username?: string;
@@ -144,7 +147,7 @@ export async function fetchFacebookUser(accessToken: string): Promise<{
   id: string;
   name: string;
 }> {
-  const response = await fetch(
+  const response = await socialFetch(
     `${GRAPH}/me?fields=id,name&access_token=${encodeURIComponent(accessToken)}`
   );
   const json = (await response.json()) as {

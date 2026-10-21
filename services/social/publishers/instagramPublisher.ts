@@ -1,5 +1,6 @@
+import { socialCaption } from "@/lib/social/postText";
+import { socialFetch } from "@/lib/social/http";
 import { existsSync } from "fs";
-import { readFile, stat } from "fs/promises";
 import {
   canConnectPlatform,
   getPlatformCapability,
@@ -33,140 +34,37 @@ function igUserId(ctx: PublisherContext): string {
   return String(ctx.destinationId || ctx.accountMetadata?.igUserId || "");
 }
 
-async function createVideoContainer(
-  igId: string,
-  accessToken: string,
-  request: PublishRequest
-): Promise<{ containerId: string; usedResumable: boolean }> {
-  const isFeedPost = request.settings.instagramFormat === "feed";
-  const mediaType = isFeedPost ? "VIDEO" : "REELS";
-  const caption =
-    request.content.caption ||
-    request.content.postText ||
-    request.content.title ||
-    "";
-
-  // Prefer resumable upload (no public URL required).
-  const resumableParams = new URLSearchParams({
-    media_type: mediaType,
-    upload_type: "resumable",
-    caption,
-    access_token: accessToken,
+async function createVideoContainer(igId: string, accessToken: string, request: PublishRequest): Promise<string> {
+  const params = new URLSearchParams({
+    media_type: "REELS", video_url: buildPublicVideoUrl(request.media.filePath),
+    caption: socialCaption(request.content),
+    share_to_feed: String(request.settings.shareToFeed !== false), access_token: accessToken,
   });
-  if (!isFeedPost && request.settings.shareToFeed === false) {
-    resumableParams.set("share_to_feed", "false");
-  }
-
-  let response = await fetch(`${GRAPH}/${igId}/media`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: resumableParams,
-  });
-  let json = (await response.json()) as {
-    id?: string;
-    uri?: string;
-    error?: { message?: string; code?: number };
-  };
-
-  if (response.ok && json.id) {
-    return { containerId: json.id, usedResumable: true };
-  }
-
-  // Fallback: public video_url grant
-  const videoUrl = buildPublicVideoUrl(request.media.filePath);
-  const urlParams = new URLSearchParams({
-    media_type: mediaType,
-    video_url: videoUrl,
-    caption,
-    access_token: accessToken,
-  });
-  response = await fetch(`${GRAPH}/${igId}/media`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: urlParams,
-  });
-  json = (await response.json()) as {
-    id?: string;
-    error?: { message?: string };
-  };
-  if (!response.ok || !json.id) {
-    throw new Error(
-      json.error?.message ||
-        `Instagram could not create a ${isFeedPost ? "feed video" : "Reel"} media container`
-    );
-  }
-  return { containerId: json.id, usedResumable: false };
+  const response = await socialFetch(`${GRAPH}/${igId}/media`, { method: "POST", body: params });
+  const json = await response.json() as { id?: string; error?: { message?: string } };
+  if (!response.ok || !json.id) throw new Error(json.error?.message || "Instagram could not prepare this video");
+  return json.id;
 }
 
-async function uploadResumableVideo(
-  containerId: string,
-  accessToken: string,
-  filePath: string
-) {
-  const fileStat = await stat(filePath);
-  const bytes = await readFile(filePath);
-  const response = await fetch(
-    `https://rupload.facebook.com/ig-api-upload/v21.0/${containerId}`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `OAuth ${accessToken}`,
-        offset: "0",
-        file_size: String(fileStat.size),
-        "Content-Type": "application/octet-stream",
-      },
-      body: bytes,
-    }
-  );
-  const json = (await response.json().catch(() => ({}))) as {
-    success?: boolean;
-    message?: string;
-    debug_info?: { message?: string };
-  };
-  if (!response.ok || json.success === false) {
-    throw new Error(
-      json.debug_info?.message ||
-        json.message ||
-        "Instagram resumable video upload failed"
-    );
-  }
-}
-
-async function waitForContainer(
-  containerId: string,
-  accessToken: string
-): Promise<void> {
-  for (let i = 0; i < 40; i++) {
-    const response = await fetch(
-      `${GRAPH}/${containerId}?fields=status_code,status&access_token=${encodeURIComponent(accessToken)}`
-    );
-    const json = (await response.json()) as {
-      status_code?: string;
-      status?: string;
-      error?: { message?: string };
-    };
-    const code = json.status_code;
-    if (code === "FINISHED") return;
-    if (code === "ERROR" || code === "EXPIRED") {
-      throw new Error(
-        json.status || json.error?.message || "Instagram container processing failed"
-      );
-    }
-    await new Promise((r) => setTimeout(r, 5000));
-  }
-  throw new Error("Timed out waiting for Instagram media processing");
+async function containerStatus(containerId: string, token: string): Promise<string> {
+  const response = await socialFetch(`${GRAPH}/${containerId}?fields=status_code,status`, { headers: { Authorization: `Bearer ${token}` } });
+  const json = await response.json() as { status_code?: string; status?: string; error?: { message?: string } };
+  if (!response.ok) throw new Error(json.error?.message || "Could not check Instagram processing");
+  if (["ERROR", "EXPIRED"].includes(json.status_code || "")) throw new Error(json.status || "Instagram video processing failed");
+  return json.status_code || "IN_PROGRESS";
 }
 
 async function publishContainer(
   igId: string,
   containerId: string,
-  accessToken: string
+  accessToken: string,
+  checkpoint: PublishRequest["checkpoint"]
 ): Promise<string> {
   const params = new URLSearchParams({
     creation_id: containerId,
     access_token: accessToken,
   });
-  const response = await fetch(`${GRAPH}/${igId}/media_publish`, {
+  const response = await socialFetch(`${GRAPH}/${igId}/media_publish`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: params,
@@ -176,6 +74,7 @@ async function publishContainer(
     error?: { message?: string };
   };
   if (!response.ok || !json.id) {
+    if (response.status >= 400 && response.status < 500 || json.error) await checkpoint?.({ committing: false });
     throw new Error(json.error?.message || "Instagram publish failed");
   }
   return json.id;
@@ -185,11 +84,11 @@ async function fetchPermalink(
   mediaId: string,
   accessToken: string
 ): Promise<string | null> {
-  const response = await fetch(
+  const response = await socialFetch(
     `${GRAPH}/${mediaId}?fields=permalink&access_token=${encodeURIComponent(accessToken)}`
   );
   const json = (await response.json()) as { permalink?: string };
-  return json.permalink || null;
+  return response.ok ? json.permalink || null : null;
 }
 
 export const instagramPublisher: SocialPublisher = {
@@ -209,7 +108,7 @@ export const instagramPublisher: SocialPublisher = {
     }
     try {
       const token = pageToken(ctx);
-      const response = await fetch(
+      const response = await socialFetch(
         `${GRAPH}/${igId}?fields=id,username,name&access_token=${encodeURIComponent(token)}`
       );
       const json = (await response.json()) as {
@@ -300,33 +199,22 @@ export const instagramPublisher: SocialPublisher = {
         };
       }
 
-      let containerId = request.existingUploadId || null;
-      let usedResumable = true;
-      if (!containerId) {
-        const created = await createVideoContainer(igId, token, request);
-        containerId = created.containerId;
-        usedResumable = created.usedResumable;
-        if (usedResumable) {
-          await uploadResumableVideo(containerId, token, request.media.filePath);
-        }
+      const containerId = request.existingUploadId || await createVideoContainer(igId, token, request);
+      await request.checkpoint?.({ platformUploadId: containerId });
+      const code = await containerStatus(containerId, token);
+      if (code === "PUBLISHED") {
+        await request.checkpoint?.({ committing: true });
+        return { success: false, errorCode: "outcome_unknown", errorMessage: "Instagram already published this container. Check the account before posting again." };
       }
-
-      await waitForContainer(containerId, token);
-      const mediaId = await publishContainer(igId, containerId, token);
+      if (code !== "FINISHED") return { success: true, state: "processing", platformUploadId: containerId };
+      await request.checkpoint?.({ committing: true });
+      const mediaId = await publishContainer(igId, containerId, token, request.checkpoint);
+      await request.checkpoint?.({ platformPostId: mediaId, platformMediaId: mediaId, committing: false });
       const permalink = await fetchPermalink(mediaId, token);
+      return { success: true, state: permalink ? "published" : "processing",
+        platformUploadId: containerId, platformMediaId: mediaId, platformPostId: mediaId,
+        platformPostUrl: permalink || undefined, rawSafeResponse: { containerId, mediaId } };
 
-      return {
-        success: true,
-        platformUploadId: containerId,
-        platformMediaId: mediaId,
-        platformPostId: mediaId,
-        platformPostUrl:
-          permalink ||
-          `https://www.instagram.com/${
-            request.settings.instagramFormat === "feed" ? "p" : "reel"
-          }/${mediaId}/`,
-        rawSafeResponse: { containerId, mediaId, usedResumable },
-      };
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Instagram publish failed";
@@ -345,7 +233,7 @@ export const instagramPublisher: SocialPublisher = {
     const token = pageToken(ctx);
     const permalink = await fetchPermalink(platformPostId, token);
     return {
-      state: "published",
+      state: permalink ? "published" : "unknown",
       platformPostId,
       platformPostUrl: permalink || undefined,
     };

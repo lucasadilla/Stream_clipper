@@ -20,21 +20,26 @@ export async function POST(
     const { clipId } = await context.params;
     const { userId } = await requireClipAccessForUser(request, clipId);
     const body = (await request.json()) as {
+      requestKey?: string;
       destinations?: Array<{
         connectedSocialAccountId: string;
         platform: string;
         destinationId?: string | null;
+        platformExportId?: string | null;
         settings?: SocialPublishSettings;
         content?: SocialGeneratedContent;
       }>;
     };
 
+    if (body.requestKey && (typeof body.requestKey !== "string" || body.requestKey.length > 200)) return jsonResponse({ error: "Invalid request key" }, 400);
+    if (!Array.isArray(body.destinations) || body.destinations.some((d) => !d || !isSocialPlatform(d.platform))) return jsonResponse({ error: "Choose supported destination accounts" }, 400);
     const destinations = (body.destinations || [])
       .filter((d) => isSocialPlatform(d.platform))
       .map((d) => ({
         connectedSocialAccountId: d.connectedSocialAccountId,
         platform: d.platform as SocialPlatform,
         destinationId: d.destinationId,
+        platformExportId: d.platformExportId,
         settings: d.settings,
         content: d.content,
       }));
@@ -43,6 +48,7 @@ export async function POST(
       userId,
       clipSuggestionId: clipId,
       destinations,
+      requestKey: body.requestKey,
     });
     return jsonResponse({ group }, 201);
   } catch (error) {

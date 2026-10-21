@@ -1,4 +1,7 @@
 import { NextRequest } from "next/server";
+import { publicOrigin } from "@/lib/social/oauth";
+import { safeSocialRedirect } from "@/lib/social/publishingPolicy";
+import { requireAuthUserId } from "@/services/social/socialAccessService";
 import { jsonResponse } from "@/lib/utils";
 import {
   completeMetaOAuth,
@@ -16,7 +19,7 @@ export async function GET(
   const state = request.nextUrl.searchParams.get("state");
   const oauthError = request.nextUrl.searchParams.get("error");
 
-  const dest = new URL("/settings/connected-accounts", request.nextUrl.origin);
+  const dest = new URL("/settings/connected-accounts", publicOrigin());
 
   if (oauthError) {
     dest.searchParams.set("error", oauthError);
@@ -28,21 +31,22 @@ export async function GET(
   }
 
   try {
+    const userId = await requireAuthUserId(request);
     if (platform === "youtube") {
-      const result = await completeYouTubeOAuth({ code, state });
-      const redirect = new URL(result.redirectAfter, request.nextUrl.origin);
+      const result = await completeYouTubeOAuth({ code, state, userId });
+      const redirect = new URL(safeSocialRedirect(result.redirectAfter), publicOrigin());
       redirect.searchParams.set("connected", "youtube");
       return Response.redirect(redirect, 302);
     }
     if (platform === "x") {
-      const result = await completeXOauth({ code, state });
-      const redirect = new URL(result.redirectAfter, request.nextUrl.origin);
+      const result = await completeXOauth({ code, state, userId });
+      const redirect = new URL(safeSocialRedirect(result.redirectAfter), publicOrigin());
       redirect.searchParams.set("connected", "x");
       return Response.redirect(redirect, 302);
     }
     if (platform === "tiktok") {
-      const result = await completeTikTokOAuth({ code, state });
-      const redirect = new URL(result.redirectAfter, request.nextUrl.origin);
+      const result = await completeTikTokOAuth({ code, state, userId });
+      const redirect = new URL(safeSocialRedirect(result.redirectAfter), publicOrigin());
       redirect.searchParams.set("connected", "tiktok");
       return Response.redirect(redirect, 302);
     }
@@ -51,8 +55,9 @@ export async function GET(
         code,
         state,
         platform,
+        userId,
       });
-      const redirect = new URL(result.redirectAfter, request.nextUrl.origin);
+      const redirect = new URL(safeSocialRedirect(result.redirectAfter), publicOrigin());
       redirect.searchParams.set("connected", platform);
       redirect.searchParams.set("count", String(result.accountIds.length));
       return Response.redirect(redirect, 302);

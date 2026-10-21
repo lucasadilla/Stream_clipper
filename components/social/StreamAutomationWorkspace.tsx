@@ -56,7 +56,10 @@ interface YouTubeSource {
   sourceUrl: string;
 }
 
+interface ReviewClip { id: string; clipSuggestionId: string; publishGroupId: string | null; }
+
 interface AutomationResponse {
+  reviewClips?: ReviewClip[];
   automation: AutomationView | null;
   destinations: Destination[];
   youtubeSources: YouTubeSource[];
@@ -139,6 +142,7 @@ function formatCheckedAt(value: string | null) {
 }
 
 export function StreamAutomationWorkspace() {
+  const [reviewClips, setReviewClips] = useState<ReviewClip[]>([]);
   const [automation, setAutomation] = useState<AutomationView | null>(null);
   const [destinations, setDestinations] = useState<Destination[]>([]);
   const [youtubeSources, setYoutubeSources] = useState<YouTubeSource[]>([]);
@@ -160,6 +164,7 @@ export function StreamAutomationWorkspace() {
         fetch("/api/onboarding/intent", { cache: "no-store" }),
       ]);
       const body = (await response.json()) as AutomationResponse;
+      setReviewClips(body.reviewClips || []);
       const intentBody = (await intentResponse.json().catch(() => ({}))) as {
         intent?: OnboardingIntent | null;
       };
@@ -399,7 +404,7 @@ export function StreamAutomationWorkspace() {
                             {destination.displayName || PLATFORM_LABEL[destination.platform]}
                           </span>
                           <span className="block truncate text-xs text-white/40">
-                            {PLATFORM_LABEL[destination.platform]}
+                            {PLATFORM_LABEL[destination.platform]}{destination.platform === "tiktok" ? " · Review each post" : ""}
                             {destination.username ? ` · ${destination.username}` : ""}
                           </span>
                         </span>
@@ -464,8 +469,12 @@ export function StreamAutomationWorkspace() {
               </div>
             </div>
 
+            {reviewClips.length > 0 && <div className="mt-4 space-y-2 border border-[#765a24] p-4">
+              <p className="text-sm font-semibold">Ready for your review</p>
+              {reviewClips.map((clip, index) => <Link key={clip.id} href={`/clips/${clip.clipSuggestionId}/publish${clip.publishGroupId ? `?groupId=${encodeURIComponent(clip.publishGroupId)}` : ""}`} className="block text-sm text-[var(--color-accent)] hover:underline">Review clip {index + 1} and finish posting</Link>)}
+            </div>}
             <p className="mt-5 text-xs leading-5 text-white/38">
-              By enabling publish without review, you authorize Clipper to upload qualifying clips to the selected accounts using your saved publishing settings. Disable either switch at any time to stop future automatic work.
+              By enabling publish without review, you authorize Clipper to upload qualifying clips to the selected accounts using your saved publishing settings. TikTok clips are prepared for your review and explicit confirmation. Disable either switch at any time to stop future automatic work.
             </p>
 
             <button

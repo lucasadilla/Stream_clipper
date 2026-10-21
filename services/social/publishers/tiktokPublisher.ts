@@ -1,14 +1,16 @@
+import { socialCaption } from "@/lib/social/postText";
+import { socialFetch } from "@/lib/social/http";
 import { existsSync } from "fs";
-import { open, stat } from "fs/promises";
 import {
   canConnectPlatform,
   forcesPrivateUploads,
   getPlatformCapability,
 } from "@/lib/social/capabilities";
+import { assertTikTokPostConsent } from "@/lib/social/publishingPolicy";
+import { buildPublicVideoUrl } from "./metaOAuth";
 import { createPkcePair, publicOrigin } from "@/lib/social/oauth";
 import type {
   PublishRequest,
-  PublisherContext,
   SocialPublisher,
 } from "@/lib/social/SocialPublisher";
 import type {
@@ -21,8 +23,6 @@ import type {
 const AUTH = "https://www.tiktok.com/v2/auth/authorize/";
 const TOKEN = "https://open.tiktokapis.com/v2/oauth/token/";
 const API = "https://open.tiktokapis.com/v2";
-/** TikTok recommends ~10MB chunks; last chunk may be smaller. */
-const CHUNK = 10 * 1024 * 1024;
 
 const SCOPES = [
   "user.info.basic",
@@ -36,7 +36,7 @@ type TikTokPrivacy =
   | "FOLLOWER_OF_CREATOR"
   | "SELF_ONLY";
 
-type CreatorInfo = {
+export type CreatorInfo = {
   creator_avatar_url?: string;
   creator_username?: string;
   creator_nickname?: string;
@@ -102,7 +102,7 @@ export async function exchangeTikTokCode(options: {
     redirect_uri: getTikTokRedirectUri(),
     code_verifier: options.codeVerifier,
   });
-  const response = await fetch(TOKEN, {
+  const response = await socialFetch(TOKEN, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
@@ -148,7 +148,7 @@ export async function refreshTikTokAccessToken(refreshToken: string): Promise<{
     grant_type: "refresh_token",
     refresh_token: refreshToken,
   });
-  const response = await fetch(TOKEN, {
+  const response = await socialFetch(TOKEN, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
@@ -190,12 +190,10 @@ export async function fetchTikTokUser(accessToken: string): Promise<{
 }> {
   const fields = [
     "open_id",
-    "union_id",
     "avatar_url",
     "display_name",
-    "username",
   ].join(",");
-  const response = await fetch(`${API}/user/info/?fields=${fields}`, {
+  const response = await socialFetch(`${API}/user/info/?fields=${fields}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   const json = (await response.json()) as TikTokErrorBody & {
@@ -228,8 +226,8 @@ export async function fetchTikTokUser(accessToken: string): Promise<{
   };
 }
 
-async function queryCreatorInfo(accessToken: string): Promise<CreatorInfo> {
-  const response = await fetch(`${API}/post/publish/creator_info/query/`, {
+export async function queryCreatorInfo(accessToken: string): Promise<CreatorInfo> {
+  const response = await socialFetch(`${API}/post/publish/creator_info/query/`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -248,165 +246,43 @@ async function queryCreatorInfo(accessToken: string): Promise<CreatorInfo> {
   return json.data;
 }
 
-function caption(request: PublishRequest): string {
-  const content = request.content;
-  const text =
-    content.caption.trim() ||
-    content.postText.trim() ||
-    content.title.trim() ||
-    "Clip";
-  // TikTok title/caption limit is typically 2200 chars; keep conservative.
-  return text.slice(0, 2200);
+function caption(request: PublishRequest): string { return socialCaption(request.content); }
+
+function resolvePrivacy(request: PublishRequest, options: TikTokPrivacy[] | undefined): TikTokPrivacy {
+  const selected = request.settings.tiktokPrivacyLevel as TikTokPrivacy | undefined;
+  if (!selected || !options?.includes(selected)) throw new Error("Choose an available TikTok privacy option.");
+  if (request.settings.brandedContent === true && selected === "SELF_ONLY") throw new Error("Paid partnership posts cannot use Only me visibility on TikTok.");
+  if (forcesPrivateUploads("tiktok") && selected !== "SELF_ONLY") throw new Error("This app currently supports Only me on TikTok. Select that option before posting.");
+  return selected;
 }
 
-function resolvePrivacy(
-  request: PublishRequest,
-  options: TikTokPrivacy[] | undefined
-): TikTokPrivacy {
-  if (forcesPrivateUploads("tiktok")) {
-    return "SELF_ONLY";
-  }
-  const requested = request.settings.privacy;
-  let level: TikTokPrivacy = "PUBLIC_TO_EVERYONE";
-  if (requested === "private") level = "SELF_ONLY";
-  else if (requested === "unlisted") level = "MUTUAL_FOLLOW_FRIENDS";
-  const allowed = options?.length ? options : (["SELF_ONLY"] as TikTokPrivacy[]);
-  if (allowed.includes(level)) return level;
-  if (allowed.includes("SELF_ONLY")) return "SELF_ONLY";
-  return allowed[0]!;
-}
+function publishesToInbox(request: PublishRequest): boolean { return request.settings.tiktokMode === "inbox"; }
 
-function publishesToInbox(request: PublishRequest): boolean {
-  return request.settings.tiktokMode === "inbox";
-}
-
-async function initDirectUpload(
-  accessToken: string,
-  options: {
-    title: string;
-    privacy: TikTokPrivacy;
-    videoSize: number;
-    chunkSize: number;
-    totalChunkCount: number;
-    allowComments: boolean;
-    allowDuet: boolean;
-    allowStitch: boolean;
-  }
-): Promise<{ publishId: string; uploadUrl: string }> {
-  const response = await fetch(`${API}/post/publish/video/init/`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json; charset=UTF-8",
-    },
-    body: JSON.stringify({
-      post_info: {
-        title: options.title,
-        privacy_level: options.privacy,
-        disable_duet: !options.allowDuet,
-        disable_comment: !options.allowComments,
-        disable_stitch: !options.allowStitch,
-        video_cover_timestamp_ms: 1000,
-      },
-      source_info: {
-        source: "FILE_UPLOAD",
-        video_size: options.videoSize,
-        chunk_size: options.chunkSize,
-        total_chunk_count: options.totalChunkCount,
-      },
-    }),
+async function initiateTikTokPost(accessToken: string, request: PublishRequest, creator?: CreatorInfo): Promise<string> {
+  const inbox = publishesToInbox(request);
+  const body = { source_info: { source: "PULL_FROM_URL", video_url: buildPublicVideoUrl(request.media.filePath) },
+    ...(!inbox ? { post_info: {
+      title: caption(request), privacy_level: resolvePrivacy(request, creator?.privacy_level_options),
+      disable_comment: request.settings.allowComments !== true || creator?.comment_disabled === true,
+      disable_duet: request.settings.allowDuet !== true || creator?.duet_disabled === true,
+      disable_stitch: request.settings.allowStitch !== true || creator?.stitch_disabled === true,
+      brand_content_toggle: request.settings.brandedContent === true,
+      brand_organic_toggle: request.settings.brandOrganic === true,
+      is_aigc: request.settings.containsSyntheticMedia === true,
+    } } : {}),
+  };
+  await request.checkpoint?.({ committing: true });
+  const response = await socialFetch(`${API}/post/publish/${inbox ? "inbox/video" : "video"}/init/`, {
+    method: "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json; charset=UTF-8" }, body: JSON.stringify(body),
   });
-  const json = (await response.json()) as TikTokErrorBody & {
-    data?: { publish_id?: string; upload_url?: string };
-  };
-  if (
-    !response.ok ||
-    json.error?.code !== "ok" ||
-    !json.data?.publish_id ||
-    !json.data.upload_url
-  ) {
-    throw new Error(json.error?.message || "TikTok direct upload init failed");
+  const json = await response.json() as TikTokErrorBody & { data?: { publish_id?: string } };
+  if (!response.ok || json.error?.code !== "ok" || !json.data?.publish_id) {
+    if (response.status >= 400 && response.status < 500 || json.error?.code && json.error.code !== "ok") await request.checkpoint?.({ committing: false });
+    throw new Error(json.error?.message || "TikTok could not accept this video");
   }
-  return {
-    publishId: json.data.publish_id,
-    uploadUrl: json.data.upload_url,
-  };
-}
-
-async function initInboxUpload(
-  accessToken: string,
-  options: {
-    videoSize: number;
-    chunkSize: number;
-    totalChunkCount: number;
-  }
-): Promise<{ publishId: string; uploadUrl: string }> {
-  const response = await fetch(`${API}/post/publish/inbox/video/init/`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json; charset=UTF-8",
-    },
-    body: JSON.stringify({
-      source_info: {
-        source: "FILE_UPLOAD",
-        video_size: options.videoSize,
-        chunk_size: options.chunkSize,
-        total_chunk_count: options.totalChunkCount,
-      },
-    }),
-  });
-  const json = (await response.json()) as TikTokErrorBody & {
-    data?: { publish_id?: string; upload_url?: string };
-  };
-  if (
-    !response.ok ||
-    json.error?.code !== "ok" ||
-    !json.data?.publish_id ||
-    !json.data.upload_url
-  ) {
-    throw new Error(json.error?.message || "TikTok inbox upload init failed");
-  }
-  return {
-    publishId: json.data.publish_id,
-    uploadUrl: json.data.upload_url,
-  };
-}
-
-async function putChunks(
-  uploadUrl: string,
-  filePath: string,
-  videoSize: number,
-  chunkSize: number
-) {
-  const handle = await open(filePath, "r");
-  try {
-    let offset = 0;
-    while (offset < videoSize) {
-      const end = Math.min(offset + chunkSize, videoSize) - 1;
-      const length = end - offset + 1;
-      const buffer = Buffer.alloc(length);
-      const { bytesRead } = await handle.read(buffer, 0, length, offset);
-      const response = await fetch(uploadUrl, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "video/mp4",
-          "Content-Length": String(bytesRead),
-          "Content-Range": `bytes ${offset}-${offset + bytesRead - 1}/${videoSize}`,
-        },
-        body: buffer.subarray(0, bytesRead),
-      });
-      if (!response.ok) {
-        const text = await response.text().catch(() => "");
-        throw new Error(
-          `TikTok chunk upload failed (${response.status}): ${text.slice(0, 200)}`
-        );
-      }
-      offset += bytesRead;
-    }
-  } finally {
-    await handle.close();
-  }
+  const id = json.data.publish_id;
+  await request.checkpoint?.({ platformUploadId: id, platformPostId: id, committing: false });
+  return id;
 }
 
 async function fetchPublishStatus(
@@ -417,7 +293,7 @@ async function fetchPublishStatus(
   failReason?: string;
   publicalyAvailablePostId?: string[];
 }> {
-  const response = await fetch(`${API}/post/publish/status/fetch/`, {
+  const response = await socialFetch(`${API}/post/publish/status/fetch/`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -442,26 +318,6 @@ async function fetchPublishStatus(
   };
 }
 
-async function waitForPublish(
-  accessToken: string,
-  publishId: string
-): Promise<{
-  status: string;
-  failReason?: string;
-  publicalyAvailablePostId?: string[];
-}> {
-  const terminal = new Set([
-    "PUBLISH_COMPLETE",
-    "FAILED",
-    "SEND_TO_USER_INBOX",
-  ]);
-  let last = await fetchPublishStatus(accessToken, publishId);
-  for (let i = 0; i < 60 && !terminal.has(last.status); i++) {
-    await new Promise((r) => setTimeout(r, 2000));
-    last = await fetchPublishStatus(accessToken, publishId);
-  }
-  return last;
-}
 
 export const tiktokPublisher: SocialPublisher = {
   platform: "tiktok",
@@ -535,6 +391,7 @@ export const tiktokPublisher: SocialPublisher = {
     }
     try {
       const info = await queryCreatorInfo(ctx.accessToken);
+      if (!publishesToInbox(request)) resolvePrivacy(request, info.privacy_level_options);
       const duration = request.media.durationSeconds;
       if (
         duration != null &&
@@ -554,7 +411,7 @@ export const tiktokPublisher: SocialPublisher = {
           error instanceof Error
             ? error.message
             : "Could not verify TikTok creator settings.",
-        severity: "warning",
+        severity: "error",
       });
     }
     return { ok: !warnings.some((w) => w.severity === "error"), warnings };
@@ -562,97 +419,17 @@ export const tiktokPublisher: SocialPublisher = {
 
   async publish(ctx, request): Promise<PublishResult> {
     try {
-      const fileStat = await stat(request.media.filePath);
-      const videoSize = fileStat.size;
-      const chunkSize = Math.min(CHUNK, videoSize);
-      const totalChunkCount = Math.max(1, Math.ceil(videoSize / chunkSize));
-      const inbox = publishesToInbox(request);
-
-      let publishId: string;
-      let uploadUrl: string;
-
-      if (inbox) {
-        const init = await initInboxUpload(ctx.accessToken, {
-          videoSize,
-          chunkSize,
-          totalChunkCount,
-        });
-        publishId = init.publishId;
-        uploadUrl = init.uploadUrl;
-      } else {
-        const creator = await queryCreatorInfo(ctx.accessToken);
-        const privacy = resolvePrivacy(
-          request,
-          creator.privacy_level_options
-        );
-        const init = await initDirectUpload(ctx.accessToken, {
-          title: caption(request),
-          privacy,
-          videoSize,
-          chunkSize,
-          totalChunkCount,
-          allowComments: request.settings.allowComments !== false,
-          allowDuet:
-            request.settings.allowDuet !== false && !creator.duet_disabled,
-          allowStitch:
-            request.settings.allowStitch !== false && !creator.stitch_disabled,
-        });
-        publishId = init.publishId;
-        uploadUrl = init.uploadUrl;
-      }
-
-      await putChunks(uploadUrl, request.media.filePath, videoSize, chunkSize);
-      const status = await waitForPublish(ctx.accessToken, publishId);
-
-      if (status.status === "FAILED") {
-        return {
-          success: false,
-          platformUploadId: publishId,
-          errorCode: "publish_failed",
-          errorMessage: status.failReason || "TikTok publish failed",
-        };
-      }
-
-      const postId = status.publicalyAvailablePostId?.[0];
-      const username =
-        typeof ctx.accountMetadata?.username === "string"
-          ? String(ctx.accountMetadata.username).replace(/^@/, "")
-          : null;
-
-      if (status.status === "SEND_TO_USER_INBOX") {
-        return {
-          success: true,
-          platformUploadId: publishId,
-          platformPostId: publishId,
-          privacyStatus: "inbox",
-          rawSafeResponse: { status: status.status, publishId },
-        };
-      }
-
-      return {
-        success: true,
-        platformUploadId: publishId,
-        platformPostId: postId || publishId,
-        platformPostUrl:
-          postId && username
-            ? `https://www.tiktok.com/@${username}/video/${postId}`
-            : undefined,
-        privacyStatus: forcesPrivateUploads("tiktok")
-          ? "SELF_ONLY"
-          : undefined,
-        rawSafeResponse: { status: status.status, publishId, postId },
-      };
+      assertTikTokPostConsent(request.settings);
+      const creator = publishesToInbox(request) ? undefined : await queryCreatorInfo(ctx.accessToken);
+      const publishId = request.existingUploadId || await initiateTikTokPost(ctx.accessToken, request, creator);
+      const status = await tiktokPublisher.getPublishStatus(ctx, publishId);
+      return { success: status.state !== "failed", state: status.state === "published" ? "published" : status.state === "awaiting_user" ? "awaiting_user" : "processing",
+        platformUploadId: publishId, platformPostId: status.platformPostId || publishId,
+        platformPostUrl: status.platformPostUrl, errorMessage: status.errorMessage,
+        privacyStatus: publishesToInbox(request) ? "inbox" : request.settings.tiktokPrivacyLevel,
+        errorCode: status.state === "failed" ? "processing_failed" : undefined };
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "TikTok publish failed";
-      return {
-        success: false,
-        errorCode: /unauthorized|401|expired|scope/i.test(message)
-          ? "needs_reauth"
-          : "publish_failed",
-        errorMessage: message,
-        needsReauth: /unauthorized|401|expired|scope/i.test(message),
-      };
+      return { success: false, errorCode: "publish_failed", errorMessage: error instanceof Error ? error.message : "TikTok posting failed" };
     }
   },
 
@@ -660,10 +437,12 @@ export const tiktokPublisher: SocialPublisher = {
     try {
       const status = await fetchPublishStatus(ctx.accessToken, platformPostId);
       if (status.status === "PUBLISH_COMPLETE") {
-        return { state: "published", platformPostId };
+        const id = status.publicalyAvailablePostId?.[0];
+        const username = typeof ctx.accountMetadata?.username === "string" ? ctx.accountMetadata.username.replace(/^@/, "") : null;
+        return { state: "published", platformPostId: id || platformPostId, platformPostUrl: id && username ? `https://www.tiktok.com/@${username}/video/${id}` : undefined };
       }
       if (status.status === "SEND_TO_USER_INBOX") {
-        return { state: "published", platformPostId };
+        return { state: "awaiting_user", platformPostId };
       }
       if (status.status === "FAILED") {
         return {

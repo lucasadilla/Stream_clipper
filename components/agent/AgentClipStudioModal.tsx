@@ -1,5 +1,7 @@
 "use client";
 
+import { socialDraftKey } from "@/lib/social/draftKey";
+
 import {
   useCallback,
   useEffect,
@@ -1972,7 +1974,9 @@ export function AgentClipStudioModal({
     setActionError(null);
     setActionOk(null);
     try {
-      await preparePlatformDownload(previewPlatform);
+      const exportUrl = await preparePlatformDownload(previewPlatform);
+      const platformExportId = /^\/api\/platform-exports\/([^/]+)\/download/.exec(exportUrl)?.[1];
+      if (!platformExportId) throw new Error("The platform export could not be identified.");
       const settings = {
         ...(activeSocialPlatform === "youtube"
           ? {
@@ -1994,21 +1998,22 @@ export function AgentClipStudioModal({
             }
           : {}),
       };
+      const content = socialContentFromCopy(activeSocialPlatform, platformCopies[previewPlatform]);
+      const requestKey = await socialDraftKey({ clipId: clip.id, platformExportId, accountId: activePlatformAccount.id, settings, content });
       const response = await fetch(
         `/api/social/clips/${clip.id}/publish-groups`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            requestKey,
             destinations: [
               {
+                platformExportId,
                 connectedSocialAccountId: activePlatformAccount.id,
                 platform: activeSocialPlatform,
                 settings,
-                content: socialContentFromCopy(
-                  activeSocialPlatform,
-                  platformCopies[previewPlatform]
-                ),
+                content,
               },
             ],
           }),
@@ -2021,6 +2026,11 @@ export function AgentClipStudioModal({
       if (!response.ok) throw new Error(body.error ?? "Publish failed.");
       if (!body.group?.id) throw new Error("Publish draft was not created.");
 
+      if (activeSocialPlatform === "tiktok") {
+        window.open(`/clips/${clip.id}/publish?groupId=${encodeURIComponent(body.group.id)}`, "_blank");
+        setActionOk("TikTok draft ready. Review the video and choose visibility to post.");
+        return;
+      }
       const publishResponse = await fetch(
         `/api/social/publish-groups/${body.group.id}`,
         {
@@ -2040,7 +2050,7 @@ export function AgentClipStudioModal({
           "your connected account"
         }.`
       );
-      window.open(`/clips/${clip.id}/publish`, "_blank");
+      window.open(`/clips/${clip.id}/publish?groupId=${encodeURIComponent(body.group.id)}`, "_blank");
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Publish failed.");
     } finally {
@@ -2099,27 +2109,16 @@ export function AgentClipStudioModal({
       const ready = await ensureRendered();
       if (!ready) return;
 
-      // Ensure platform packs exist for selected destinations when possible.
-      const neededExports = selectedPlatforms.filter((p) =>
-        selectedAccountIds.some((id) => {
-          const acc = accounts.find((a) => a.id === id);
-          return acc && EXPORT_TO_SOCIAL[p] === acc.platform;
-        })
-      );
-      if (neededExports.length > 0) {
-        await fetch(`/api/clips/${clip.id}/platform-exports`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            selected: neededExports,
-            platforms: neededExports,
-            includeCaptions,
-            burnSubtitles: includeCaptions,
-            captionOptions: platformCaptions,
-            generateCopy: true,
-            copyOverrides: platformCopies,
-          }),
-        }).catch(() => null);
+      // Wait for the exact platform/caption exports before preparing the review.
+      const exportIds: Partial<Record<PlatformKey, string>> = {};
+      for (const accountId of selectedAccountIds) {
+        const account = accounts.find((item) => item.id === accountId);
+        if (!account) continue;
+        const key = selectedPlatforms.find((candidate) => EXPORT_TO_SOCIAL[candidate] === account.platform) ?? PREVIEW_PLATFORMS.find((candidate) => EXPORT_TO_SOCIAL[candidate] === account.platform);
+        if (!key || exportIds[key]) continue;
+        const url = await preparePlatformDownload(key);
+        exportIds[key] = /^\/api\/platform-exports\/([^/]+)\/download/.exec(url)?.[1];
+        if (!exportIds[key]) throw new Error("The platform export could not be identified.");
       }
 
       const destinations = selectedAccountIds
@@ -2137,6 +2136,7 @@ export function AgentClipStudioModal({
           return {
             connectedSocialAccountId: accountId,
             platform: account.platform,
+            platformExportId: platformKey ? exportIds[platformKey] : undefined,
             settings: {
               ...(account.platform === "youtube"
                 ? {
@@ -2162,15 +2162,16 @@ export function AgentClipStudioModal({
         })
         .filter(Boolean);
 
+      const requestKey = await socialDraftKey({ clipId: clip.id, destinations: destinations.slice().sort((a, b) => String(a?.connectedSocialAccountId).localeCompare(String(b?.connectedSocialAccountId))) });
       const res = await fetch(`/api/social/clips/${clip.id}/publish-groups`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ destinations }),
+        body: JSON.stringify({ destinations, requestKey }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? "Publish failed");
       setActionOk("Publish jobs created — tracking on the publish page.");
-      window.open(`/clips/${clip.id}/publish`, "_blank");
+      window.open(`/clips/${clip.id}/publish?groupId=${encodeURIComponent(body.group.id)}`, "_blank");
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Publish failed");
     } finally {
