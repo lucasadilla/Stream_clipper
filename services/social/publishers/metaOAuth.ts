@@ -86,8 +86,12 @@ export async function exchangeMetaCode(options: {
     access_token?: string;
     expires_in?: number;
   };
-  const accessToken = longJson.access_token || json.access_token;
-  const expiresIn = longJson.expires_in || json.expires_in;
+  // A rejected extension must not lend its expiry to the original short token.
+  // Conversely, a successful extension without an expiry must not inherit the
+  // short token's expiry and incorrectly ask the creator to reconnect early.
+  const extended = longRes.ok && Boolean(longJson.access_token);
+  const accessToken = extended ? longJson.access_token! : json.access_token;
+  const expiresIn = extended ? longJson.expires_in : json.expires_in;
   return {
     accessToken,
     expiresAt: expiresIn ? new Date(Date.now() + expiresIn * 1000) : null,
@@ -102,16 +106,33 @@ export interface MetaPage {
 }
 
 export async function fetchMetaPages(userAccessToken: string): Promise<MetaPage[]> {
-  const url = `${GRAPH}/me/accounts?fields=id,name,access_token,instagram_business_account&limit=100&access_token=${encodeURIComponent(userAccessToken)}`;
-  const response = await socialFetch(url);
-  const json = (await response.json()) as {
-    data?: MetaPage[];
-    error?: { message?: string };
-  };
-  if (!response.ok) {
-    throw new Error(json.error?.message || "Could not load Facebook Pages");
+  const pages = new Map<string, MetaPage>();
+  const cursors = new Set<string>();
+  const url = new URL(`${GRAPH}/me/accounts`);
+  url.searchParams.set("fields", "id,name,access_token,instagram_business_account");
+  url.searchParams.set("limit", "100");
+  // Keep credentials out of paging URLs and never follow arbitrary next URLs.
+  const headers = { Authorization: `Bearer ${userAccessToken}` };
+  for (let page = 0; page < 100; page += 1) {
+    const response = await socialFetch(url.toString(), { headers });
+    const json = (await response.json()) as {
+      data?: MetaPage[];
+      paging?: { next?: string; cursors?: { after?: string } };
+      error?: { message?: string };
+    };
+    if (!response.ok || json.error || !Array.isArray(json.data)) {
+      throw new Error(json.error?.message || "Could not load Facebook Pages");
+    }
+    for (const account of json.data) pages.set(account.id, account);
+    if (!json.paging?.next) return [...pages.values()];
+    const after = json.paging.cursors?.after;
+    if (!after || cursors.has(after)) {
+      throw new Error("Facebook returned incomplete Page results. Reconnect and try again.");
+    }
+    cursors.add(after);
+    url.searchParams.set("after", after);
   }
-  return json.data || [];
+  throw new Error("Facebook Page discovery is taking too long. Reconnect and try again.");
 }
 
 export async function fetchInstagramProfile(

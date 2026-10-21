@@ -39,6 +39,10 @@ Do not place client secrets, cookies, refresh tokens, or signed upload URLs in c
 
 ## Delivery behavior and verification
 
+Meta's Basic settings can use `https://streamclipper.stream/data-deletion` as the user data deletion instructions URL after that page is deployed. This page explains disconnection and the existing email deletion-request process; it is not an automated Meta signed-request callback. Do not enter it in the separate data deletion callback field.
+
+Facebook Page discovery follows all response cursors, including empty intermediate pages, and fails rather than saving an incomplete list when paging breaks. Credentials stay in the Authorization header and paging never follows a response-provided host. Token-extension failures retain the original token's expiry; successful extensions use their own expiry.
+
 - Studio's platform Post action binds the selected account and exact export ID, preserving that variant's framing and burned-caption choice. TikTok opens per-post review. Other supported platforms queue the job and open its existing tracking group.
 - The publishing page restores its group from `?groupId=...`. Edits are saved in order; publish is disabled while saves are pending. Its video player serves the exact file attached to the job.
 - Autopilot creates a deterministic publish group per automated clip, generates copy once per platform/format, prepares separate landscape/feed exports when needed, queues supported destinations, and leaves TikTok for review. The Autopilot settings page links to clips awaiting review.

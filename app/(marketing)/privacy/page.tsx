@@ -113,7 +113,8 @@ export default function PrivacyPage() {
         <li>Delete sessions and related local/media data from the product UI</li>
         <li>
           Request access, correction, or deletion of personal data by emailing
-          us
+          us. See our <Link href="/data-deletion">data deletion instructions</Link>
+          {" "}for the steps to follow.
         </li>
       </ul>
 
