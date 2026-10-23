@@ -47,12 +47,13 @@ export function getYouTubeRedirectUri(): string {
 export function buildYouTubeAuthUrl(options: {
   state: string;
   codeChallenge: string;
+  performanceAccess?: boolean;
 }): string {
   const params = new URLSearchParams({
     client_id: process.env.YOUTUBE_CLIENT_ID!.trim(),
     redirect_uri: getYouTubeRedirectUri(),
     response_type: "code",
-    scope: SCOPES,
+    scope: options.performanceAccess ? `${SCOPES} https://www.googleapis.com/auth/yt-analytics.readonly` : SCOPES,
     access_type: "offline",
     prompt: "consent",
     state: options.state,

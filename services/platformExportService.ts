@@ -33,6 +33,8 @@ import { parseRenderJobParams } from "@/services/renderService";
 import { assertDeliverableVideo } from "@/services/deliverableVideoService";
 import { readSpeakerContext } from "@/services/speakerContextService";
 import { MAX_CLIP_SECONDS } from "@/lib/clipConstants";
+import { renderSpecHash } from "@/lib/renderSpec";
+import { getContentLookPreset } from "@/lib/contentLookPresets";
 
 const PLATFORM_WORKER_ID = `platform-${process.pid}-${randomUUID().slice(0, 8)}`;
 const STALE_EXPORT_MS = 15 * 60 * 1000;
@@ -223,7 +225,8 @@ export async function createPlatformExportPack(
     const exports = [];
     for (const platform of platforms) {
       const copyOverride = input.copyOverrides?.[platform];
-      const captions = input.captionOptions?.[platform];
+      const style = input.channelPreset?.preset;
+      const captions = input.captionOptions?.[platform] ?? style?.captionsEnabled;
       const settings = platformSettings(platform, {
         outputId: input.outputOptions?.[platform],
         includeCaptions: captions ?? input.includeCaptions,
@@ -235,11 +238,15 @@ export async function createPlatformExportPack(
       });
       const targetParams = {
         ...sourceParams,
+        ...(style ? { captionAppearance: style.captionAppearance, branding: style.branding,
+          verticalLayout: { ...sourceParams.verticalLayout, layout: getContentLookPreset(style.look).layout, faceSelection: { mode: "auto" },
+            ...(style.look === "gaming" ? { stacked: { facecamPosition: "top", facecamHeightRatio: 0.34, dividerSize: 0, dividerColor: "#000000", hideOriginalFacecam: "crop_out" } } : {}),
+            captions: { enabled: settings.burnSubtitles, position: "lower" } } } : {}),
         preview: false,
         format: "vertical",
         includeCaptions: settings.burnSubtitles,
         platformTarget: { platform, outputId: settings.outputId },
-        ...(sourceParams.verticalLayout ? { verticalLayout: {
+        ...(!style && sourceParams.verticalLayout ? { verticalLayout: {
           ...sourceParams.verticalLayout,
           captions: { ...sourceParams.verticalLayout.captions, enabled: settings.burnSubtitles },
         } } : {}),
@@ -260,7 +267,7 @@ export async function createPlatformExportPack(
         platform,
         presetName: PLATFORM_PRESETS[platform].name,
         ...(copyOverride ? copyData(copyOverride) : {}),
-        exportSettings: toJsonValue(settings),
+        exportSettings: toJsonValue({ ...settings, ...(input.channelPreset ? { channelPresetAccountId: input.channelPreset.accountId, channelPresetHash: renderSpecHash(input.channelPreset.preset) } : {}) }),
       });
     }
     return tx.platformExportPack.create({

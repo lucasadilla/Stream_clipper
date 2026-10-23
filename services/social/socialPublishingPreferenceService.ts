@@ -2,6 +2,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import type { SocialPlatform } from "@/lib/social/types";
 import { isSocialPlatform } from "@/lib/social/types";
+import { publishingIsPaused } from "./publishingControlService";
 import {
   defaultPublishingPreferences,
   type PublishingPreferencesView,
@@ -29,6 +30,7 @@ function asStringArray(value: unknown): string[] {
 }
 
 function parsePlatformSettings(value: unknown): {
+  publishingPaused: boolean;
   defaultAccountIds: string[];
   youtubeFormat: "shorts" | "standard";
   facebookFormat: "reel" | "page_video";
@@ -44,6 +46,7 @@ function parsePlatformSettings(value: unknown): {
     obj.facebookFormat === "page_video" ? "page_video" : "reel";
   const tiktokMode = obj.tiktokMode === "inbox" ? "inbox" : "direct";
   return {
+    publishingPaused: obj.publishingPaused === true,
     defaultAccountIds: asStringArray(obj.defaultAccountIds),
     youtubeFormat,
     facebookFormat,
@@ -97,8 +100,7 @@ export async function getPublishingPreferences(
     where: { userId, platform: null },
     orderBy: { updatedAt: "desc" },
   });
-  if (!row) return defaultPublishingPreferences();
-  return serializePreference(row);
+  return { ...(row ? serializePreference(row) : defaultPublishingPreferences()), publishingPaused: await publishingIsPaused(userId) };
 }
 
 export async function upsertPublishingPreferences(
@@ -151,6 +153,7 @@ export async function upsertPublishingPreferences(
   }
 
   const platformSettings = {
+    publishingPaused: next.publishingPaused === true,
     defaultAccountIds: next.defaultAccountIds,
     youtubeFormat: next.youtubeFormat,
     facebookFormat: next.facebookFormat,

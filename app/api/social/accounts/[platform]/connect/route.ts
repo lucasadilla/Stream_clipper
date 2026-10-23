@@ -24,6 +24,7 @@ export async function GET(
       userId,
       platform,
       redirectAfter,
+      performanceAccess: request.nextUrl.searchParams.get("performance") === "1",
     });
     return Response.redirect(url, 302);
   } catch (error) {

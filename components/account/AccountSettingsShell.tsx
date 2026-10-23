@@ -8,6 +8,7 @@ export const ACCOUNT_SETTINGS_TABS = [
   { href: "/settings/connected-accounts", label: "Connected accounts" },
   { href: "/settings/autopilot", label: "Autopilot" },
   { href: "/settings/publishing", label: "Publishing" },
+  { href: "/settings/channel-presets", label: "Channel presets" },
   { href: "/profile", label: "Profile" },
 ] as const;
 
@@ -20,7 +21,7 @@ export function AccountSettingsNav() {
       className="mt-5 flex flex-wrap gap-2"
     >
       {ACCOUNT_SETTINGS_TABS.map((tab) => {
-        const active = pathname === tab.href;
+        const active = pathname === tab.href || pathname.startsWith(`${tab.href}/`);
         return (
           <Link
             key={tab.href}
@@ -46,7 +47,9 @@ export function AccountSettingsShell({
   message,
   error,
   children,
+  wide = false,
 }: {
+  wide?: boolean;
   title: string;
   description: string;
   message?: string | null;
@@ -57,7 +60,7 @@ export function AccountSettingsShell({
     <section className="relative isolate min-h-[calc(100svh-var(--site-header-height,7.5rem))] overflow-hidden border-b border-[var(--color-card-border)] bg-[#020302]">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(149,255,0,0.08),transparent_42%),radial-gradient(circle_at_bottom_right,rgba(149,255,0,0.05),transparent_36%)]" />
 
-      <div className="relative mx-auto max-w-[900px] px-4 py-14 sm:px-6 lg:px-8 lg:py-20">
+      <div className={cn("relative mx-auto px-4 py-14 sm:px-6 lg:px-8 lg:py-20", wide ? "max-w-[1280px]" : "max-w-[900px]")}>
         <p className="text-xs font-semibold uppercase text-[var(--color-accent)] sm:text-sm">
           Clipper / account
         </p>

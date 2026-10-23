@@ -22,6 +22,7 @@ vi.mock("@/services/renderService", () => ({ parseRenderJobParams: (value: unkno
 vi.mock("@/lib/storage", () => ({ fileExists: () => true }));
 
 import { createPlatformExportPack, claimNextPlatformExport } from "@/services/platformExportService";
+import { defaultChannelPreset } from "@/lib/social/channelPreset";
 
 describe("independent platform captions", () => {
   beforeEach(() => {
@@ -56,5 +57,16 @@ describe("independent platform captions", () => {
     expect(mocks.candidates.mock.calls[0][0].where.OR).toContainEqual({
       renderJob: { status: { in: ["completed", "failed"] } },
     });
+  });
+  it("pins a channel's styling and branding to its own original-source export", async () => {
+    const preset = { ...defaultChannelPreset("Gaming account"), look: "gaming" as const, captionsEnabled: false,
+      branding: { text: "@creator", position: "top-left" as const, color: "#FFFFFF" } };
+    await createPlatformExportPack("clip-1", { platforms: ["tiktok"], includeCaptions: true, burnSubtitles: true, generateCopy: false, xQuoteCard: false,
+      channelPreset: { accountId: "creator-account", preset } });
+    const render = mocks.renderCreate.mock.calls[0][0].data;
+    expect(render.params).toMatchObject({ includeCaptions: false, branding: { text: "@creator" }, verticalLayout: { layout: "facecam_top_gameplay_bottom", captions: { enabled: false } } });
+    expect(render.sourceMediaId).toBe("source-1");
+    expect(mocks.packCreate.mock.calls[0][0].data.exports.create[0].exportSettings).toMatchObject({ channelPresetAccountId: "creator-account", channelPresetHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(mocks.sourceParams.verticalLayout.layout).toBe("center_crop");
   });
 });

@@ -71,11 +71,12 @@ export { createPkcePair };
 export function buildTikTokAuthUrl(options: {
   state: string;
   codeChallenge: string;
+  performanceAccess?: boolean;
 }): string {
   const params = new URLSearchParams({
     client_key: process.env.TIKTOK_CLIENT_KEY!.trim(),
     response_type: "code",
-    scope: SCOPES,
+    scope: options.performanceAccess ? `${SCOPES},video.list` : SCOPES,
     redirect_uri: getTikTokRedirectUri(),
     state: options.state,
     code_challenge: options.codeChallenge,

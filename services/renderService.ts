@@ -1,3 +1,5 @@
+import { brandingSchema, brandingVideoFilter, type ChannelBranding } from "@/lib/social/channelPreset";
+import { brandingFontFile } from "@/services/social/brandingFontService";
 import path from "path";
 import fs from "fs/promises";
 import type { Prisma } from "@prisma/client";
@@ -123,6 +125,7 @@ export interface RenderShortParams {
   layout?: "center_crop" | "facecam_overlay" | "facecam_top_gameplay_bottom" | "gameplay_full";
   includeCaptions?: boolean;
   captionAppearance?: CaptionAppearance;
+  branding?: ChannelBranding;
   captionCues?: CaptionCue[];
   editorState?: EditorState;
   /** Facecam-aware vertical layout selection (validated client request). */
@@ -145,6 +148,7 @@ export function parseRenderJobParams(value: unknown): RenderShortParams | null {
   }
   return {
     streamSessionId: raw.streamSessionId,
+    branding: brandingSchema.safeParse(raw.branding).success ? brandingSchema.parse(raw.branding) : undefined,
     platformTarget: parsePlatformRenderTarget(raw.platformTarget),
     sourceMediaId:
       typeof raw.sourceMediaId === "string" ? raw.sourceMediaId : undefined,
@@ -732,6 +736,7 @@ export async function executeRenderJob(
     !platformOutput &&
     !includeCaptions &&
     textOverlays.length === 0 &&
+    !params.branding?.text &&
     !hasMediaOverlays &&
     !editorState.settings.normalizeAudio &&
     !editorState.settings.denoiseAudio &&
@@ -998,6 +1003,13 @@ export async function executeRenderJob(
         })
       : null;
 
+  const branding = brandingSchema.safeParse(params.branding);
+  const brandFile = branding.success && branding.data.text ? path.join(path.dirname(outputPath), `${jobId}.brand.txt`) : null;
+  let brandingFilter: string | undefined;
+  if (brandFile && branding.success) {
+    await fs.writeFile(brandFile, branding.data.text, "utf8");
+    brandingFilter = brandingVideoFilter(brandFile, branding.data, outputHeight, brandingFontFile());
+  }
   await appendRenderJobLog(jobId, "encoding", "Encoding clip");
   await updateJobProgress(jobId, 55, undefined, { log: false });
   const encodingProgress = createEncodingProgressReporter(jobId);
@@ -1050,6 +1062,7 @@ export async function executeRenderJob(
       height: outputHeight,
       srtPath: subtitlePath,
       captionAppearance: appearance,
+      brandingFilter,
       normalizeAudio: editorState.settings.normalizeAudio,
       denoiseAudio: editorState.settings.denoiseAudio,
       verticalBackground: editorState.settings.verticalBackground,
@@ -1073,6 +1086,7 @@ export async function executeRenderJob(
       subtitleFormat: format,
       outputHeight,
       captionAppearance: appearance,
+      brandingFilter,
       verticalLayout: resolvedVerticalLayout?.resolved,
       previewQuality: preview,
       preserveFullFrame,
@@ -1088,6 +1102,7 @@ export async function executeRenderJob(
     });
   }
   await encodingProgress.flush();
+  if (brandFile) await fs.unlink(brandFile).catch(() => undefined);
 
   if (subtitlePath) {
     await appendRenderJobLog(

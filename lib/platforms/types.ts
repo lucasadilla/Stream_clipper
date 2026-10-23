@@ -60,6 +60,8 @@ export interface PlatformExportSettings {
 }
 
 export interface CreatePlatformExportPackInput {
+  /** Server-selected channel style, pinned to this export pack. */
+  channelPreset?: { accountId: string; preset: import("@/lib/social/channelPreset").ChannelPreset };
   captionOptions?: Partial<Record<PlatformKey, boolean>>;
   platforms: PlatformKey[];
   includeCaptions: boolean;

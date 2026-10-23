@@ -141,6 +141,7 @@ export async function beginOAuthConnect(options: {
   userId: string;
   platform: SocialPlatform;
   redirectAfter?: string | null;
+  performanceAccess?: boolean;
 }): Promise<{ url: string }> {
   if (!isSocialPlatform(options.platform)) {
     throw new Error("Unsupported platform");
@@ -183,13 +184,13 @@ export async function beginOAuthConnect(options: {
   });
 
   if (options.platform === "youtube") {
-    return { url: buildYouTubeAuthUrl({ state, codeChallenge: challenge }) };
+    return { url: buildYouTubeAuthUrl({ state, codeChallenge: challenge, performanceAccess: options.performanceAccess }) };
   }
   if (options.platform === "x") {
     return { url: buildXAuthUrl({ state, codeChallenge: challenge }) };
   }
   if (options.platform === "tiktok") {
-    return { url: buildTikTokAuthUrl({ state, codeChallenge: challenge }) };
+    return { url: buildTikTokAuthUrl({ state, codeChallenge: challenge, performanceAccess: options.performanceAccess }) };
   }
   if (directInstagram) return { url: buildInstagramAuthUrl(state) };
   return {

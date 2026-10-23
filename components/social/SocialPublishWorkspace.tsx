@@ -167,6 +167,7 @@ export function SocialPublishWorkspace({ clipId, initialGroupId }: { clipId: str
   const [publishing, setPublishing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [prefs, setPrefs] = useState<PublishingPreferencesView | null>(null);
+  const [useChannelDefaults, setUseChannelDefaults] = useState(true);
   const [ready, setReady] = useState(false);
   const autoDraftAttempted = useRef(false);
   const draftRequestKey = useRef<string | null>(null);
@@ -330,18 +331,19 @@ export function SocialPublishWorkspace({ clipId, initialGroupId }: { clipId: str
     setCreating(true);
     setError(null);
     try {
+      const stylesResponse = useChannelDefaults ? await fetch("/api/social/channel-presets") : null;
+      if (stylesResponse && !stylesResponse.ok) throw new Error("Could not load saved channel defaults");
+      const styles = stylesResponse ? (await stylesResponse.json()).channels as Array<{ account: { id: string }; preset: import("@/lib/social/channelPreset").ChannelPreset | null }> : [];
       const destinations = selectedAccountIds.map((accountId) => {
         const account = accounts.find((a) => a.id === accountId)!;
+        const preset = styles.find((row) => row.account.id === accountId)?.preset;
         return {
           connectedSocialAccountId: accountId,
           platform: account.platform,
-          settings: settingsForAccount(account.platform, {
-            privacy,
-            madeForKids,
-            youtubeFormat,
-            facebookFormat,
-            tiktokMode,
-          }),
+          settings: { ...settingsForAccount(account.platform, {
+            privacy: preset?.privacy || privacy, madeForKids, youtubeFormat: preset?.youtubeFormat || youtubeFormat,
+            facebookFormat: preset?.facebookFormat || facebookFormat, tiktokMode: preset?.tiktokMode || tiktokMode,
+          }), ...(preset ? { instagramFormat: preset.instagramFormat, shareToFeed: preset.shareToFeed } : {}) },
         };
       });
       const formats = Array.from(new Set(destinations.map((destination) => socialExportTarget(destination.platform, destination.settings)).filter((target) => needsSeparateSocialFormat(target))));
@@ -398,6 +400,7 @@ export function SocialPublishWorkspace({ clipId, initialGroupId }: { clipId: str
     selectedAccountIds,
     tiktokMode,
     youtubeFormat,
+    useChannelDefaults,
   ]);
 
   useEffect(() => {
@@ -713,6 +716,7 @@ export function SocialPublishWorkspace({ clipId, initialGroupId }: { clipId: str
               )}
             </div>
 
+            {!group && <label className="mt-4 flex gap-2 text-xs text-white/70"><input type="checkbox" checked={useChannelDefaults} disabled={creating} onChange={(event) => setUseChannelDefaults(event.target.checked)} />Use each channel’s saved posting defaults. Uncheck to use the settings above.</label>}
             {preparingFormat && <p className="border border-[var(--color-card-border)] p-4 text-sm text-white/60">{preparingFormat}</p>}
           {!group && (
               <button

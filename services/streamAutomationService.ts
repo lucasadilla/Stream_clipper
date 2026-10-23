@@ -1,3 +1,5 @@
+import { getChannelPreset } from "@/services/social/channelPresetService";
+import { renderSpecHash } from "@/lib/renderSpec";
 import type { PlatformKey } from "@/lib/platforms/types";
 import { socialExportTarget, needsSeparateSocialFormat } from "@/lib/social/exportTarget";
 import { getPublishingPreferences } from "@/services/social/socialPublishingPreferenceService";
@@ -387,7 +389,7 @@ async function destinationRows(automation: {
 
 async function progressAutomationClip(): Promise<boolean> {
   const row = await prisma.streamAutomationClip.findFirst({
-    where: { status: { in: ["preparing", "rendering", "publishing"] } },
+    where: { automation: { enabled: true }, status: { in: ["preparing", "rendering", "publishing"] } },
     orderBy: { updatedAt: "asc" },
     include: { automation: true },
   });
@@ -475,21 +477,13 @@ async function progressAutomationClip(): Promise<boolean> {
       }
       if (render.status !== "completed") return false;
 
-      if (!row.automation.autoPublishEnabled) {
-        await prisma.streamAutomationClip.update({
-          where: { id: row.id },
-          data: { status: "completed", errorMessage: null },
-        });
-        return true;
-      }
-
       const qualityReview = parsePostRenderQualityReview(render.qualityReview);
-      if (!qualityReview) {
+      if (row.automation.autoPublishEnabled && !qualityReview) {
         throw new Error(
           "Automatic posting paused because the export quality review was unavailable."
         );
       }
-      if (qualityReview.verdict === "fail") {
+      if (row.automation.autoPublishEnabled && qualityReview?.verdict === "fail") {
         const problem =
           qualityReview.issues.find((issue) => issue.severity === "critical")
             ?.title ?? qualityReview.summary;
@@ -498,14 +492,39 @@ async function progressAutomationClip(): Promise<boolean> {
 
       const destinations = await destinationRows(row.automation);
       if (!destinations.length) {
-        throw new Error("No active publishing destination is selected.");
+        if (row.automation.autoPublishEnabled) throw new Error("No active publishing destination is selected.");
+        await prisma.streamAutomationClip.update({ where: { id: row.id }, data: { status: "completed", errorMessage: null } });
+        return true;
       }
       const preferences = await getPublishingPreferences(row.automation.userId);
-      const formats = Array.from(new Set(destinations.map((destination) => socialExportTarget(destination.platform, preferences)).filter((target) => needsSeparateSocialFormat(target))));
+      const preparedDestinations = [];
+      let pendingPreset = false;
+      for (const destination of destinations) {
+        const preset = await getChannelPreset(row.automation.userId, destination.connectedSocialAccountId);
+        if (!preset) { preparedDestinations.push(destination); continue; }
+        const target = socialExportTarget(destination.platform, preset);
+        if (!target) throw new Error("Unsupported channel export format");
+        const hash = renderSpecHash(preset);
+        const existing = await prisma.platformExport.findFirst({ where: { clipSuggestionId: row.clipSuggestionId, platform: target,
+          AND: [{ exportSettings: { path: ["channelPresetAccountId"], equals: destination.connectedSocialAccountId } }, { exportSettings: { path: ["channelPresetHash"], equals: hash } }] },
+          orderBy: { createdAt: "desc" }, select: { id: true, status: true, errorMessage: true } });
+        if (!existing) {
+          await createPlatformExportPack(row.clipSuggestionId, { platforms: [target], includeCaptions: preset.captionsEnabled, burnSubtitles: preset.captionsEnabled,
+            generateCopy: false, xQuoteCard: false, channelPreset: { accountId: destination.connectedSocialAccountId, preset } });
+          pendingPreset = true;
+        } else if (existing.status === "failed") throw new Error(existing.errorMessage || "Channel export failed");
+        else if (existing.status !== "completed") pendingPreset = true;
+        else preparedDestinations.push({ ...destination, platformExportId: existing.id, settings: {
+          youtubeFormat: preset.youtubeFormat, instagramFormat: preset.instagramFormat, facebookFormat: preset.facebookFormat, tiktokMode: preset.tiktokMode,
+        } });
+      }
+      if (pendingPreset) return true;
+      const formats = Array.from(new Set(preparedDestinations.filter((destination) => !("platformExportId" in destination)).map((destination) => socialExportTarget(destination.platform, preferences)).filter((target) => needsSeparateSocialFormat(target))));
       const missing: PlatformKey[] = [];
       for (const target of formats) {
         if (!target) continue;
-        const existing = await prisma.platformExport.findFirst({ where: { clipSuggestionId: row.clipSuggestionId, platform: target }, orderBy: { createdAt: "desc" }, select: { status: true, errorMessage: true } });
+        const variants = await prisma.platformExport.findMany({ where: { clipSuggestionId: row.clipSuggestionId, platform: target }, orderBy: { createdAt: "desc" }, take: 100, select: { status: true, errorMessage: true, exportSettings: true } });
+        const existing = variants.find((variant) => !((variant.exportSettings || {}) as Record<string, unknown>).channelPresetAccountId);
         if (!existing) missing.push(target);
         else if (existing.status === "failed") throw new Error(existing.errorMessage || "Automatic platform export failed.");
         else if (existing.status !== "completed") return false;
@@ -517,11 +536,11 @@ async function progressAutomationClip(): Promise<boolean> {
       const group = await createPublishGroup({
         userId: row.automation.userId,
         clipSuggestionId: row.clipSuggestionId,
-        destinations,
+        destinations: preparedDestinations,
         requestKey: `autopilot:${row.id}`,
       });
       if (!group) throw new Error("Could not create an automatic publish group.");
-      await enqueuePublishGroup({
+      if (row.automation.autoPublishEnabled) await enqueuePublishGroup({
         userId: row.automation.userId,
         groupId: group.id,
         mode: "now",
@@ -530,7 +549,7 @@ async function progressAutomationClip(): Promise<boolean> {
       await prisma.streamAutomationClip.update({
         where: { id: row.id },
         data: {
-          status: "publishing",
+          status: row.automation.autoPublishEnabled ? "publishing" : "awaiting_review",
           publishGroupId: group.id,
           errorMessage: null,
         },

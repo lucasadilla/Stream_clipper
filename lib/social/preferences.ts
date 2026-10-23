@@ -7,6 +7,7 @@ import type {
 export type PublishingPreferencesView = {
   id: string | null;
   autoCreateReviewDraft: boolean;
+  publishingPaused: boolean;
   defaultPrivacy: "private" | "unlisted" | "public";
   tone: SocialContentTone;
   emojiLevel: EmojiLevel;
@@ -24,6 +25,7 @@ export function defaultPublishingPreferences(): PublishingPreferencesView {
   return {
     id: null,
     autoCreateReviewDraft: false,
+    publishingPaused: false,
     defaultPrivacy: "private",
     tone: "natural",
     emojiLevel: "low",

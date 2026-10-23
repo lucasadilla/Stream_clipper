@@ -21,6 +21,7 @@ export async function PATCH(
     const body = (await request.json()) as {
       editedContent?: SocialGeneratedContent;
       publishSettings?: SocialPublishSettings;
+      expectedVersion?: string;
     };
     const group = await updatePublishJob(userId, jobId, body);
     return jsonResponse({ group });

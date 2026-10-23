@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { PublishingSettingsWorkspace } from "@/components/social/PublishingSettingsWorkspace";
+import { PublishingHubWorkspace } from "@/components/social/PublishingHubWorkspace";
 
 export const metadata: Metadata = {
   title: "Publishing",
@@ -7,5 +7,5 @@ export const metadata: Metadata = {
 };
 
 export default function PublishingSettingsPage() {
-  return <PublishingSettingsWorkspace />;
+  return <PublishingHubWorkspace />;
 }
