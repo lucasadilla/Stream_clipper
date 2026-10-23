@@ -48,27 +48,6 @@ async function buildClipStudioPlayback(
     endTimeSeconds: number;
   }
 ): Promise<ClipStudioPlaybackSource> {
-  const source = await ensureClipSourceForRender(
-    clip.streamSessionId,
-    clip.startTimeSeconds,
-    clip.endTimeSeconds,
-    undefined,
-    { purpose: "preview" }
-  );
-  const sourceMedia = await prisma.sourceMedia.findUnique({
-    where: { id: source.sourceMediaId },
-    select: { filePath: true },
-  });
-  if (!sourceMedia) throw new Error("Clip preview source was not found");
-
-  const inputPath = resolveStoragePath(sourceMedia.filePath);
-  if (!existsSync(inputPath)) throw new Error("Clip preview source is missing");
-
-  const duration = Math.max(0.1, source.renderEnd - source.renderStart);
-  const requestedDuration = clip.endTimeSeconds - clip.startTimeSeconds;
-  if (duration < requestedDuration - 0.5) {
-    throw new ClipStudioPlaybackNotReadyError();
-  }
   // Invalidate previews previously encoded from keyframe-offset DASH muxes.
   const fileName = `studio-preview-av2-${clip.id}-${rangeToken(
     clip.startTimeSeconds
@@ -103,6 +82,28 @@ async function buildClipStudioPlayback(
     } catch {
       // Replace a partial cache atomically below.
     }
+  }
+
+  const source = await ensureClipSourceForRender(
+    clip.streamSessionId,
+    clip.startTimeSeconds,
+    clip.endTimeSeconds,
+    undefined,
+    { purpose: "preview" }
+  );
+  const sourceMedia = await prisma.sourceMedia.findUnique({
+    where: { id: source.sourceMediaId },
+    select: { filePath: true },
+  });
+  if (!sourceMedia) throw new Error("Clip preview source was not found");
+
+  const inputPath = resolveStoragePath(sourceMedia.filePath);
+  if (!existsSync(inputPath)) throw new Error("Clip preview source is missing");
+
+  const duration = Math.max(0.1, source.renderEnd - source.renderStart);
+  const requestedDuration = clip.endTimeSeconds - clip.startTimeSeconds;
+  if (duration < requestedDuration - 0.5) {
+    throw new ClipStudioPlaybackNotReadyError();
   }
 
   await ensureDir(path.dirname(outputPath));

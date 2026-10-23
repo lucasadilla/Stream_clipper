@@ -1,5 +1,8 @@
 "use client";
 
+import { operationIdentity } from "@/lib/clientOperationRecovery";
+import { preparePlatformFile, finishedPlatformStreamUrl } from "@/lib/platformExportClient";
+import { renderProgressMessage } from "@/lib/renderProgress";
 import { StudioChannelPresetPicker } from "@/components/social/ChannelPresetsWorkspace";
 import type { ChannelBranding } from "@/lib/social/channelPreset";
 import { socialDraftKey } from "@/lib/social/draftKey";
@@ -291,6 +294,9 @@ export function AgentClipStudioModal({
   onClipChange,
   onClose,
 }: AgentClipStudioModalProps) {
+  const masterRenderId = useRef<string | null>(null);
+  const mediaRevision = useRef(0);
+  const mediaSettingsRef = useRef("");
   const [channelBranding, setChannelBranding] = useState<ChannelBranding | undefined>(undefined);
   const [mounted, setMounted] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -437,6 +443,7 @@ export function AgentClipStudioModal({
   function changePlatformCaptions(platform: PlatformKey, enabled: boolean) {
     const next = { ...platformCaptions, [platform]: enabled };
     setPlatformCaptions(next);
+    if (enabled && !includeCaptions) { masterRenderId.current = null; setDownloadUrl(null); }
     setPlatformDownloadUrls((current) => ({ ...current, [platform]: undefined }));
     try { localStorage.setItem(`clip-platform-captions:${clip.id}`, JSON.stringify(next)); } catch { /* Keep the in-session choice. */ }
   }
@@ -1257,28 +1264,20 @@ export function AgentClipStudioModal({
     platformCaptionChunks.length,
   ]);
 
+  const mediaSettingsKey = operationIdentity({ clipId: clip.id, start: clip.startTimeSeconds, end: clip.endTimeSeconds,
+    includeCaptions, captionAppearance, channelBranding, captionDirectionPlan, platformCaptionEdits, speakerContext,
+    lookPreset, faceJobId, faceTrackingReady, manualReframeKeyframes, lockSubject, reactionEmphasis });
   useEffect(() => {
-    if (!open) return;
+    if (!open || mediaSettingsRef.current === mediaSettingsKey) return;
+    mediaSettingsRef.current = mediaSettingsKey;
+    mediaRevision.current++; masterRenderId.current = null;
     // A rendered URL is only valid for the caption configuration that made it.
     setDownloadUrl(null);
     setPlatformDownloadUrls({});
-  }, [
-    open,
-    includeCaptions,
-    captionAppearance,
-    channelBranding,
-    captionDirectionPlan,
-    platformCaptionEdits,
-    lookPreset,
-    faceJobId,
-    faceTrackingReady,
-    manualReframeKeyframes,
-    lockSubject,
-    reactionEmphasis,
-    clip.startTimeSeconds,
-    clip.endTimeSeconds,
-  ]);
+  }, [open, mediaSettingsKey]);
 
+  const finishedPreviewUrl = platformDownloadUrls[previewPlatform] ? finishedPlatformStreamUrl(platformDownloadUrls[previewPlatform]!) : null;
+  const progressMessage = renderProgressMessage(renderStage);
   const previewMeta = PLATFORM_PRESETS[previewPlatform];
   const thumbUrl = clipThumbnailApiUrl(clip.id);
   const selectedFaceRect =
@@ -1776,6 +1775,7 @@ export function AgentClipStudioModal({
 
   async function handleRenderDownload() {
     const preparedDownload = prepareFileDownload();
+    const revision = mediaRevision.current;
     setRendering(true);
     setActionError(null);
     setActionOk(null);
@@ -1812,8 +1812,11 @@ export function AgentClipStudioModal({
         undefined,
         undefined,
         selection,
-        channelBranding
+        channelBranding,
+        { startTimeSeconds: clip.startTimeSeconds, endTimeSeconds: clip.endTimeSeconds }
       );
+      if (revision !== mediaRevision.current) throw new Error("Your settings changed. Render the updated clip before downloading.");
+      masterRenderId.current = result.jobId;
       setDownloadUrl(result.downloadUrl);
       await preparedDownload.start(
         result.downloadUrl,
@@ -1829,8 +1832,11 @@ export function AgentClipStudioModal({
     }
   }
 
-  async function ensureRendered(): Promise<boolean> {
-    if (downloadUrl) return true;
+  async function ensureRendered(): Promise<string | null> {
+    if (masterRenderId.current) return masterRenderId.current;
+    const previous = downloadUrl && /^\/api\/render-jobs\/([^/]+)\/download/.exec(downloadUrl)?.[1];
+    if (previous) return previous;
+    const revision = mediaRevision.current;
     setRendering(true);
     setRenderStage("queued");
     setActionError(null);
@@ -1867,14 +1873,17 @@ export function AgentClipStudioModal({
         undefined,
         undefined,
         selection,
-        channelBranding
+        channelBranding,
+        { startTimeSeconds: clip.startTimeSeconds, endTimeSeconds: clip.endTimeSeconds }
       );
+      if (revision !== mediaRevision.current) throw new Error("Your settings changed. Render the updated clip before downloading.");
+      masterRenderId.current = result.jobId;
       setDownloadUrl(result.downloadUrl);
       onClipChange({ ...clip, status: "rendered" });
-      return true;
+      return result.jobId;
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Render failed");
-      return false;
+      throw err;
     } finally {
       setRendering(false);
     }
@@ -1883,70 +1892,24 @@ export function AgentClipStudioModal({
   async function preparePlatformDownload(platform: PlatformKey): Promise<string> {
     const existing = platformDownloadUrls[platform];
     if (existing) return existing;
-
+    const revision = mediaRevision.current;
     const ready = await ensureRendered();
-    if (!ready) throw new Error("The clip could not be rendered.");
+    if (!ready) throw new Error("The clip could not be rendered. Retry to resume your saved render.");
+    if (revision !== mediaRevision.current) throw new Error("Your settings changed. Prepare the updated preview before downloading.");
+    const url = await preparePlatformFile(clip.id, platform, {
+      platforms: [platform], sourceRenderJobId: ready, includeCaptions, burnSubtitles: includeCaptions,
+      captionOptions: platformCaptions, generateCopy: false, copyOverrides: { [platform]: platformCopies[platform] },
+    }, (progress, stage) => { setRenderProgress(progress); setRenderStage(stage); });
+    if (revision !== mediaRevision.current) throw new Error("Your settings changed. Prepare the updated preview before downloading.");
+    setPlatformDownloadUrls(current => ({ ...current, [platform]: url }));
+    return url;
+  }
 
-    const response = await fetch(`/api/clips/${clip.id}/platform-exports`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        selected: [platform],
-        platforms: [platform],
-        includeCaptions,
-        burnSubtitles: includeCaptions,
-        captionOptions: platformCaptions,
-        generateCopy: true,
-        copyOverrides: { [platform]: platformCopies[platform] },
-      }),
-    });
-    const body = (await response.json()) as {
-      error?: string;
-      pack?: { id?: string };
-    };
-    if (!response.ok || !body.pack?.id) {
-      throw new Error(body.error ?? "Could not prepare this platform export.");
-    }
-
-    for (let attempt = 0; attempt < 1500; attempt += 1) {
-      const packResponse = await fetch(
-        `/api/platform-export-packs/${body.pack.id}`,
-        { cache: "no-store" }
-      );
-      const packBody = (await packResponse.json()) as {
-        error?: string;
-        pack?: {
-          exports?: Array<{
-            platform: PlatformKey;
-            status: string;
-            progress: number;
-            downloadUrl: string | null;
-            errorMessage?: string | null;
-          }>;
-        };
-      };
-      if (!packResponse.ok) {
-        throw new Error(packBody.error ?? "Could not check the platform export.");
-      }
-      const item = packBody.pack?.exports?.find(
-        (candidate) => candidate.platform === platform
-      );
-      if (item) {
-        setRenderProgress(item.progress);
-        if (item.status === "completed" && item.downloadUrl) {
-          setPlatformDownloadUrls((current) => ({
-            ...current,
-            [platform]: item.downloadUrl!,
-          }));
-          return item.downloadUrl;
-        }
-        if (item.status === "failed") {
-          throw new Error(item.errorMessage ?? "Platform export failed.");
-        }
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 1200));
-    }
-    throw new Error("Timed out preparing the platform export.");
+  async function handleFinishedPreview() {
+    setDownloadingPlatform(previewPlatform); setActionError(null); setActionOk(null);
+    try { await preparePlatformDownload(previewPlatform); setActionOk("Finished preview ready. This is the exact video used for this platform’s download and post."); }
+    catch (error) { setActionError(error instanceof Error ? error.message : "Could not prepare the finished preview. Retry to resume."); }
+    finally { setDownloadingPlatform(null); }
   }
 
   async function handlePlatformPreviewDownload() {
@@ -2079,6 +2042,7 @@ export function AgentClipStudioModal({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          sourceRenderJobId: ready,
           selected: selectedPlatforms,
           platforms: selectedPlatforms,
           includeCaptions,
@@ -2646,8 +2610,7 @@ export function AgentClipStudioModal({
               <div className="w-full space-y-1.5 text-center">
                 <h3 className="text-base font-semibold">Platform preview</h3>
                 <p className="text-xs text-[var(--color-muted)]">
-                  Same look as Edit — framed for each app. Change the look on the
-                  Edit tab.
+                  Prepare a finished preview to check the exact video you will download or post.
                 </p>
               </div>
 
@@ -2668,13 +2631,13 @@ export function AgentClipStudioModal({
                     platform={previewPlatform}
                     lookPresetId={lookPreset}
                     frameUrl={thumbUrl}
-                    includeCaptions={platformCaptionsEnabled}
+                    includeCaptions={finishedPreviewUrl ? false : platformCaptionsEnabled}
                     captionCue={activePlatformCaptionCue}
                     captionTime={previewTime}
                     captionAppearance={captionAppearance}
                     copy={activePlatformCopy}
                   >
-                    {effectivePlaybackUrl ? (
+                    {finishedPreviewUrl ? <video key={finishedPreviewUrl} src={finishedPreviewUrl} controls playsInline preload="metadata" className="h-full w-full bg-black object-contain" aria-label={`Finished ${previewMeta.name} export`} /> : effectivePlaybackUrl ? (
                       <LookVideoStage
                         presetId={lookPreset}
                         playbackUrl={effectivePlaybackUrl}
@@ -2712,7 +2675,8 @@ export function AgentClipStudioModal({
                     ) : undefined}
                   </PlatformPhoneFrame>
 
-                  <div className="mx-auto w-full max-w-2xl rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-3">
+                  {finishedPreviewUrl && <p className="text-center text-xs text-[var(--color-accent)]">Finished export · Download and Post use this exact file.</p>}
+                  {!finishedPreviewUrl && <div className="mx-auto w-full max-w-2xl rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-3">
                     <div className="flex items-center gap-3">
                       <button
                         type="button"
@@ -2759,14 +2723,14 @@ export function AgentClipStudioModal({
                     <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-[var(--color-muted)]">
                       <span>
                         {effectivePlaybackUrl
-                          ? "Watch the selected clip inside the final post frame."
+                          ? "Quick editing preview. Prepare the finished preview to verify the export."
                           : preparingPlayback
                             ? "Preparing the selected clip preview…"
                             : "Preview video is not available yet."}
                       </span>
                       {durationHint && <span className="font-medium text-[var(--color-accent)]">{durationHint}</span>}
                     </div>
-                  </div>
+                  </div>}
                 </div>
 
                 <PlatformCopyEditor
@@ -2779,6 +2743,7 @@ export function AgentClipStudioModal({
                 />
               </div>
 
+              {(rendering || downloadingPlatform) && <OperationProgress title={progressMessage.title} detail={progressMessage.detail} progress={renderStage === "reconnecting" ? null : renderProgress || null} resetKey={`${clip.id}:platform-prepare`} className="w-full" />}
               <div className="flex w-full flex-col gap-4 border-y border-[var(--color-card-border)] bg-[#050805] px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex min-w-0 items-center gap-3">
                   <PlatformBrandIcon brand={previewPlatform} size="sm" />
@@ -2799,6 +2764,7 @@ export function AgentClipStudioModal({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
+                  <button type="button" disabled={Boolean(downloadingPlatform) || rendering || publishing || packing || analyzingFace} onClick={() => void handleFinishedPreview()} className="inline-flex h-10 items-center gap-2 border border-[var(--color-accent)]/50 px-3 text-xs font-semibold text-[var(--color-accent)] disabled:opacity-45">{finishedPreviewUrl ? "Finished preview ready" : "Prepare finished preview"}</button>
                   <label className="flex items-center gap-2 text-xs">
                     <input type="checkbox" checked={platformCaptionsEnabled}
                       disabled={Boolean(downloadingPlatform) || rendering || publishing || packing || analyzingFace}
@@ -2895,30 +2861,11 @@ export function AgentClipStudioModal({
                       : "Render & download"}
                   </Button>
                 </div>
+                {downloadUrl && !rendering && <div className="mt-4 space-y-2"><p className="text-xs text-[var(--color-accent)]">Finished general export · This player uses the exact downloadable file.</p><video src={`${downloadUrl}?inline=1`} controls playsInline preload="metadata" className="mx-auto max-h-96 w-full rounded bg-black" aria-label="Finished general export" /></div>}
                 {rendering && (
                   <OperationProgress
-                    title={
-                      renderStage === "quality_check"
-                        ? "Reviewing export"
-                        : "Rendering your video"
-                    }
-                    detail={
-                      renderStage === "queued"
-                        ? "Waiting for the render worker..."
-                        : renderStage === "captions"
-                          ? "Loading every caption in the final clip range..."
-                          : renderStage === "prepare_source" ||
-                              renderStage === "download_source" ||
-                              renderStage.startsWith("download_source_attempt_")
-                            ? "Preparing the highest-quality source media..."
-                            : renderStage === "cached_source" ||
-                                renderStage === "local_hd_source" ||
-                                renderStage === "source_ready"
-                              ? "Source ready. Starting the final encode..."
-                        : renderStage === "quality_check"
-                          ? "Checking framing, captions, and output quality..."
-                          : "Encoding the final high-quality video..."
-                    }
+                    title={progressMessage.title}
+                    detail={progressMessage.detail}
                     progress={renderProgress > 0 ? renderProgress : null}
                     resetKey={`${clip.id}:render`}
                     className="mt-4"

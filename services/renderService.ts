@@ -1,3 +1,4 @@
+import { findCompletedRenderForSpec } from "@/services/completedRenderReuseService";
 import { brandingSchema, brandingVideoFilter, type ChannelBranding } from "@/lib/social/channelPreset";
 import { brandingFontFile } from "@/services/social/brandingFontService";
 import path from "path";
@@ -1177,6 +1178,8 @@ export async function createRenderJobRecord(params: {
     (candidate) => storedRenderSpecHash(candidate.params) === specHash
   );
   if (duplicate) return duplicate.id;
+  const completed = await findCompletedRenderForSpec(params.streamSessionId, params.clipSuggestionId, specHash);
+  if (completed) return completed;
 
   const storedParams = {
     ...params.renderParams,

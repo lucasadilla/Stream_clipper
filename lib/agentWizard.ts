@@ -186,3 +186,8 @@ export function withAgentWizardState(
       : {};
   return { ...base, agentWizard: wizard };
 }
+
+/** Background discovery must never take away already usable clip cards. */
+export function showAgentClipResults(options: { step: AgentWizardStep; clipCount: number; finding: boolean; suggesting: boolean; transcriptReady: boolean; suggestRequested: boolean; waitingForStreamEnd: boolean }) {
+  return options.step === "pick" && !options.waitingForStreamEnd && (options.clipCount > 0 || (!options.finding && !options.suggesting && (options.transcriptReady || options.suggestRequested)));
+}

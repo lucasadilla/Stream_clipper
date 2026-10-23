@@ -1,3 +1,4 @@
+import { reclaimStaleRenderJobs } from "@/services/renderRecoveryService";
 import { randomUUID } from "crypto";
 import { prisma } from "@/lib/db";
 import { formatFfmpegProcessError } from "@/lib/ffmpeg";
@@ -110,44 +111,7 @@ export function isWorkerEnabled(): boolean {
   return true;
 }
 
-export async function reclaimStaleRenderJobs(): Promise<number> {
-  const cutoff = new Date(Date.now() - staleMs());
-  const stale = await prisma.renderJob.findMany({
-    where: {
-      status: "processing",
-      OR: [{ lockedAt: { lt: cutoff } }, { lockedAt: null, updatedAt: { lt: cutoff } }],
-    },
-    select: { id: true, attempts: true, maxAttempts: true },
-    take: 20,
-  });
-
-  let reclaimed = 0;
-  for (const job of stale) {
-    const nextStatus = job.attempts >= job.maxAttempts ? "failed" : "queued";
-    await prisma.renderJob.update({
-      where: { id: job.id },
-      data: {
-        status: nextStatus,
-        lockedAt: null,
-        lockedBy: null,
-        errorMessage:
-          nextStatus === "failed"
-            ? "Render timed out or worker restarted too many times"
-            : null,
-      },
-    });
-    await appendRenderJobLog(
-      job.id,
-      "reclaimed_after_restart",
-      nextStatus === "failed"
-        ? "Gave up after stale lock"
-        : "Re-queued after stale processing lock",
-      nextStatus === "failed" ? "error" : "warn"
-    );
-    reclaimed += 1;
-  }
-  return reclaimed;
-}
+export { reclaimStaleRenderJobs } from "@/services/renderRecoveryService";
 
 async function claimNextRenderJob(): Promise<string | null> {
   // Optimistic claim: pick oldest queued job and CAS to processing.
@@ -446,7 +410,7 @@ export async function runWorkerTick(): Promise<WorkerTickResult> {
       // Run maintenance sequentially. During a database interruption, launching
       // all four claims at once consumed multiple pool slots and delayed API
       // requests that were trying to recover at the same time.
-      const staleRenders = await reclaimStaleRenderJobs();
+      const staleRenders = await reclaimStaleRenderJobs(staleMs());
       const stalePlatformExports = await reclaimStalePlatformExports();
       const staleSocial = await reclaimStaleSocialPublishJobs();
       let staleFaceAnalyses = 0;

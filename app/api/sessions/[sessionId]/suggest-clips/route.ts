@@ -1,3 +1,4 @@
+import { ensureClipStudioPlayback } from "@/services/clipStudioPlaybackService";
 import { NextRequest } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
@@ -176,6 +177,11 @@ export async function POST(
       ...result.clips.map((c) => c.id),
       ...clips.slice(0, 3).map((c) => c.id),
     ].filter((id, i, arr) => arr.indexOf(id) === i);
+    // Warm only the first ranked moment. The source cache and in-flight guard
+    // let opening Studio reuse this work without extra AI or full-VOD analysis.
+    if (clips[0]) void ensureClipStudioPlayback(clips[0].id).catch(error => {
+      console.warn("[suggest-clips] first preview warmup deferred:", error instanceof Error ? error.message : error);
+    });
     void (async () => {
       await reclaimEphemeralStorage({
         keepSessionId: sessionId,
