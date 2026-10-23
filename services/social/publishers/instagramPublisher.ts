@@ -18,11 +18,13 @@ import type {
 } from "@/lib/social/types";
 import {
   buildPublicVideoUrl,
-  GRAPH,
   metaOAuthConfigured,
 } from "@/services/social/publishers/metaOAuth";
 
+import { fetchDirectInstagramProfile, instagramGraph, instagramOAuthConfigured, INSTAGRAM_LOGIN_STATE } from "./instagramOAuth";
+
 function pageToken(ctx: PublisherContext): string {
+  if (ctx.accountMetadata?.authType === INSTAGRAM_LOGIN_STATE) return ctx.accessToken;
   const meta = ctx.accountMetadata || {};
   if (typeof meta.pageAccessToken === "string" && meta.pageAccessToken) {
     return meta.pageAccessToken;
@@ -34,20 +36,20 @@ function igUserId(ctx: PublisherContext): string {
   return String(ctx.destinationId || ctx.accountMetadata?.igUserId || "");
 }
 
-async function createVideoContainer(igId: string, accessToken: string, request: PublishRequest): Promise<string> {
+async function createVideoContainer(graph: string, igId: string, accessToken: string, request: PublishRequest): Promise<string> {
   const params = new URLSearchParams({
     media_type: "REELS", video_url: buildPublicVideoUrl(request.media.filePath),
     caption: socialCaption(request.content),
     share_to_feed: String(request.settings.shareToFeed !== false), access_token: accessToken,
   });
-  const response = await socialFetch(`${GRAPH}/${igId}/media`, { method: "POST", body: params });
+  const response = await socialFetch(`${graph}/${igId}/media`, { method: "POST", body: params });
   const json = await response.json() as { id?: string; error?: { message?: string } };
   if (!response.ok || !json.id) throw new Error(json.error?.message || "Instagram could not prepare this video");
   return json.id;
 }
 
-async function containerStatus(containerId: string, token: string): Promise<string> {
-  const response = await socialFetch(`${GRAPH}/${containerId}?fields=status_code,status`, { headers: { Authorization: `Bearer ${token}` } });
+async function containerStatus(graph: string, containerId: string, token: string): Promise<string> {
+  const response = await socialFetch(`${graph}/${containerId}?fields=status_code,status`, { headers: { Authorization: `Bearer ${token}` } });
   const json = await response.json() as { status_code?: string; status?: string; error?: { message?: string } };
   if (!response.ok) throw new Error(json.error?.message || "Could not check Instagram processing");
   if (["ERROR", "EXPIRED"].includes(json.status_code || "")) throw new Error(json.status || "Instagram video processing failed");
@@ -55,6 +57,7 @@ async function containerStatus(containerId: string, token: string): Promise<stri
 }
 
 async function publishContainer(
+  graph: string,
   igId: string,
   containerId: string,
   accessToken: string,
@@ -64,7 +67,7 @@ async function publishContainer(
     creation_id: containerId,
     access_token: accessToken,
   });
-  const response = await socialFetch(`${GRAPH}/${igId}/media_publish`, {
+  const response = await socialFetch(`${graph}/${igId}/media_publish`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: params,
@@ -81,11 +84,12 @@ async function publishContainer(
 }
 
 async function fetchPermalink(
+  graph: string,
   mediaId: string,
   accessToken: string
 ): Promise<string | null> {
   const response = await socialFetch(
-    `${GRAPH}/${mediaId}?fields=permalink&access_token=${encodeURIComponent(accessToken)}`
+    `${graph}/${mediaId}?fields=permalink&access_token=${encodeURIComponent(accessToken)}`
   );
   const json = (await response.json()) as { permalink?: string };
   return response.ok ? json.permalink || null : null;
@@ -95,7 +99,9 @@ export const instagramPublisher: SocialPublisher = {
   platform: "instagram",
 
   async validateConnection(ctx) {
-    if (!canConnectPlatform("instagram") || !metaOAuthConfigured()) {
+    const graph = instagramGraph(ctx.accountMetadata);
+    const configured = ctx.accountMetadata?.authType === INSTAGRAM_LOGIN_STATE ? instagramOAuthConfigured() : metaOAuthConfigured();
+    if (!canConnectPlatform("instagram") || !configured) {
       return { ok: false, error: "Instagram publishing is not configured" };
     }
     const igId = igUserId(ctx);
@@ -108,8 +114,13 @@ export const instagramPublisher: SocialPublisher = {
     }
     try {
       const token = pageToken(ctx);
+      if (ctx.accountMetadata?.authType === INSTAGRAM_LOGIN_STATE) {
+        const profile = await fetchDirectInstagramProfile(token);
+        if (profile.id !== igId) return { ok: false, error: "Instagram account changed. Reconnect the intended account.", needsReauth: true };
+        return { ok: true, displayName: profile.name, username: `@${profile.username}`, avatarUrl: profile.profilePictureUrl || undefined };
+      }
       const response = await socialFetch(
-        `${GRAPH}/${igId}?fields=id,username,name&access_token=${encodeURIComponent(token)}`
+        `${graph}/${igId}?fields=id,username,name&access_token=${encodeURIComponent(token)}`
       );
       const json = (await response.json()) as {
         id?: string;
@@ -180,7 +191,7 @@ export const instagramPublisher: SocialPublisher = {
     }
     warnings.push({
       code: "pro_required",
-      message: "A professional Instagram account linked to a Facebook Page is required.",
+      message: "A Business or Creator Instagram account is required.",
       severity: "info",
     });
     return { ok: !warnings.some((w) => w.severity === "error"), warnings };
@@ -188,6 +199,7 @@ export const instagramPublisher: SocialPublisher = {
 
   async publish(ctx, request): Promise<PublishResult> {
     try {
+      const graph = instagramGraph(ctx.accountMetadata);
       const igId = igUserId(ctx);
       const token = pageToken(ctx);
       if (!igId) {
@@ -199,18 +211,18 @@ export const instagramPublisher: SocialPublisher = {
         };
       }
 
-      const containerId = request.existingUploadId || await createVideoContainer(igId, token, request);
+      const containerId = request.existingUploadId || await createVideoContainer(graph, igId, token, request);
       await request.checkpoint?.({ platformUploadId: containerId });
-      const code = await containerStatus(containerId, token);
+      const code = await containerStatus(graph, containerId, token);
       if (code === "PUBLISHED") {
         await request.checkpoint?.({ committing: true });
         return { success: false, errorCode: "outcome_unknown", errorMessage: "Instagram already published this container. Check the account before posting again." };
       }
       if (code !== "FINISHED") return { success: true, state: "processing", platformUploadId: containerId };
       await request.checkpoint?.({ committing: true });
-      const mediaId = await publishContainer(igId, containerId, token, request.checkpoint);
+      const mediaId = await publishContainer(graph, igId, containerId, token, request.checkpoint);
       await request.checkpoint?.({ platformPostId: mediaId, platformMediaId: mediaId, committing: false });
-      const permalink = await fetchPermalink(mediaId, token);
+      const permalink = await fetchPermalink(graph, mediaId, token);
       return { success: true, state: permalink ? "published" : "processing",
         platformUploadId: containerId, platformMediaId: mediaId, platformPostId: mediaId,
         platformPostUrl: permalink || undefined, rawSafeResponse: { containerId, mediaId } };
@@ -231,7 +243,7 @@ export const instagramPublisher: SocialPublisher = {
 
   async getPublishStatus(ctx, platformPostId): Promise<PublishStatus> {
     const token = pageToken(ctx);
-    const permalink = await fetchPermalink(platformPostId, token);
+    const permalink = await fetchPermalink(instagramGraph(ctx.accountMetadata), platformPostId, token);
     return {
       state: permalink ? "published" : "unknown",
       platformPostId,

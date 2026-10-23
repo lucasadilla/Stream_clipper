@@ -45,7 +45,8 @@ function xDefault(): SocialCapabilityStatus {
   return "not_configured";
 }
 
-function metaDefault(): SocialCapabilityStatus {
+function metaDefault(platform: SocialPlatform): SocialCapabilityStatus {
+  if (platform === "instagram" && process.env.INSTAGRAM_CLIENT_ID?.trim() && process.env.INSTAGRAM_CLIENT_SECRET?.trim()) return "development_only";
   if (process.env.META_APP_ID?.trim() && process.env.META_APP_SECRET?.trim()) {
     return "development_only";
   }
@@ -71,7 +72,7 @@ export function getPlatformCapability(
       : platform === "x"
         ? xDefault()
         : platform === "instagram" || platform === "facebook"
-          ? metaDefault()
+          ? metaDefault(platform)
           : platform === "tiktok"
             ? tiktokDefault()
             : "not_configured";
@@ -147,10 +148,14 @@ export function capabilityBanner(platform: SocialPlatform): string | null {
     (platform === "instagram" || platform === "facebook") &&
     (status === "development_only" || status === "awaiting_review")
   ) {
-    return "Connecting other businesses requires Meta approval. Development accounts can publish publicly to authorized Facebook Pages and linked Instagram professional accounts.";
+    return platform === "instagram"
+      ? "Instagram requires a Business or Creator account. Connecting accounts outside this app’s testers requires Meta approval."
+      : "Facebook publishing targets Pages you manage. Connecting other businesses requires Meta approval.";
   }
   if (platform === "instagram" && status !== "not_configured") {
-    return "Instagram requires a professional account linked to a Facebook Page.";
+    return process.env.INSTAGRAM_CLIENT_ID?.trim() && process.env.INSTAGRAM_CLIENT_SECRET?.trim()
+      ? "Instagram requires a Business or Creator account; a Facebook Page is not needed."
+      : "Instagram requires a professional account linked to a Facebook Page.";
   }
   if (platform === "facebook" && status !== "not_configured") {
     return "Facebook publishing targets Pages you manage, not personal profiles.";
