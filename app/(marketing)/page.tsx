@@ -9,6 +9,11 @@ import { AnimatedGradient } from "@/components/ui/animated-gradient";
 import { AuroraBackground } from "@/components/ui/aurora-background";
 import { MarketingMarquee } from "@/components/MarketingMarquee";
 import { getPublicPricingPlans } from "@/services/publicPricingService";
+import { LandingShowcase } from "@/components/LandingShowcase";
+import { getPublicImpact } from "@/services/publicImpactService";
+import { getPublicShowcase } from "@/services/showcaseService";
+
+export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   alternates: { canonical: "https://streamclipper.stream/" },
@@ -160,7 +165,7 @@ const structuredData = {
 };
 
 export default async function HomePage() {
-  const pricingPlans = await getPublicPricingPlans();
+  const [pricingPlans, impact, showcase] = await Promise.all([getPublicPricingPlans(), getPublicImpact(), getPublicShowcase()]);
   return (
     <div className="marketing-shell marketing-home overflow-hidden bg-[#020302]">
       <MarketingScrollMotion />
@@ -221,6 +226,7 @@ export default async function HomePage() {
         </div>
       </section>
 
+      <LandingShowcase initialImpact={impact} initialClips={showcase} />
       <MarketingMarquee />
 
       <section

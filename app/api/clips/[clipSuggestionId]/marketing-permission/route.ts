@@ -26,13 +26,17 @@ export async function PATCH(
       clip.streamSessionId,
       getBillingAccountIdFromRequest(request)
     );
-    const updated = await prisma.clipSuggestion.update({
-      where: { id: clipSuggestionId },
-      data: {
-        marketingApproved: approved,
-        marketingApprovedAt: approved ? new Date() : null,
-      },
-      select: { id: true, marketingApproved: true, marketingApprovedAt: true },
+    const updated = await prisma.$transaction(async tx => {
+      const clip = await tx.clipSuggestion.update({
+        where: { id: clipSuggestionId },
+        data: {
+          marketingApproved: approved,
+          marketingApprovedAt: approved ? new Date() : null,
+        },
+        select: { id: true, marketingApproved: true, marketingApprovedAt: true },
+      });
+      if (!approved) await tx.showcaseClip.updateMany({ where: { clipSuggestionId }, data: { status: "withdrawn", consentAt: null, approvedAt: null } });
+      return clip;
     });
     return jsonResponse({ clip: updated });
   } catch (error) {
