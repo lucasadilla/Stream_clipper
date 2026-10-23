@@ -40,6 +40,7 @@ export async function POST(
     const body = (await request.json()) as {
       action?: "validate" | "publish" | "schedule" | "cancel" | "unschedule";
       scheduledFor?: string;
+      consentJobIds?: string[];
     };
 
     if (body.action === "validate") {
@@ -60,6 +61,7 @@ export async function POST(
         userId,
         groupId: id,
         mode: "schedule",
+        consentJobIds: body.consentJobIds,
         scheduledFor,
       });
       return jsonResponse({ group });
@@ -69,6 +71,7 @@ export async function POST(
         userId,
         groupId: id,
         mode: "now",
+        consentJobIds: body.consentJobIds,
       });
       // Kick the in-process worker so local/dev publishes don't sit queued.
       void import("@/services/workerService")

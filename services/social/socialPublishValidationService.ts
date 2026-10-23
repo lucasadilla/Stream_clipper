@@ -1,5 +1,6 @@
 import { existsSync } from "fs";
 import { forcesPrivateUploads } from "@/lib/social/capabilities";
+import { socialCaption } from "@/lib/social/postText";
 import type {
   PreparedMedia,
   SocialGeneratedContent,
@@ -62,6 +63,16 @@ export function validateSocialPost(options: {
         severity: "warning",
       });
     }
+  }
+
+  if ((platform === "instagram" || platform === "tiktok") && socialCaption(content).length > 2200) {
+    warnings.push({ code: "caption_length", message: "Keep the caption and hashtags within 2,200 characters.", severity: "error" });
+  }
+  if (platform === "x" && (content.postText || content.caption || content.title).length > 280) {
+    warnings.push({ code: "post_length", message: "Keep the X post within 280 characters.", severity: "error" });
+  }
+  if (platform === "youtube" && content.description.length > 5000) {
+    warnings.push({ code: "description_length", message: "Keep the YouTube description within 5,000 characters.", severity: "error" });
   }
 
   return {

@@ -75,6 +75,8 @@ export function getPlatformCapability(
           : platform === "tiktok"
             ? tiktokDefault()
             : "not_configured";
+  // A deployment flag cannot substitute for an OAuth application.
+  if (fallback === "not_configured") return fallback;
   return parseStatus(process.env[ENV_KEYS[platform]], fallback);
 }
 
@@ -99,9 +101,12 @@ export function canPublishPlatform(platform: SocialPlatform): boolean {
 export function forcesPrivateUploads(platform: SocialPlatform): boolean {
   const status = getPlatformCapability(platform);
   return (
+    (platform === "youtube" || platform === "tiktok") &&
+    (
     status === "private_test_only" ||
     status === "development_only" ||
     status === "awaiting_review"
+    )
   );
 }
 
@@ -125,7 +130,7 @@ export function capabilityLabel(status: SocialCapabilityStatus): string {
 export function capabilityBanner(platform: SocialPlatform): string | null {
   const status = getPlatformCapability(platform);
   if (platform === "youtube" && status === "private_test_only") {
-    return "YouTube uploads may be restricted to private until the Google API project completes verification.";
+    return "YouTube uploads stay private until this app completes YouTube's API compliance audit.";
   }
   if (
     platform === "tiktok" &&
@@ -133,16 +138,16 @@ export function capabilityBanner(platform: SocialPlatform): string | null {
       status === "development_only" ||
       status === "awaiting_review")
   ) {
-    return "Unaudited TikTok apps can only publish as private (SELF_ONLY). Request video.publish / video.upload and pass TikTok’s audit for public posts.";
+    return "TikTok requires review of each post. Posts stay private until TikTok approves this app for public publishing.";
   }
   if (platform === "x" && (status === "development_only" || status === "awaiting_review")) {
-    return "X publishing requires API access with media.write and tweet.write. Configure X_CLIENT_ID / X_CLIENT_SECRET.";
+    return "Posting requires an X developer account with publishing access and available API credits. Posts follow your X account's visibility.";
   }
   if (
     (platform === "instagram" || platform === "facebook") &&
     (status === "development_only" || status === "awaiting_review")
   ) {
-    return "Meta apps need App Review for public publishing. Use a Facebook Page and a linked Instagram professional account.";
+    return "Connecting other businesses requires Meta approval. Development accounts can publish publicly to authorized Facebook Pages and linked Instagram professional accounts.";
   }
   if (platform === "instagram" && status !== "not_configured") {
     return "Instagram requires a professional account linked to a Facebook Page.";

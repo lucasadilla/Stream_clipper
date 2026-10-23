@@ -26,6 +26,13 @@ export interface PublishRequest {
   existingPostId?: string | null;
   /** Resume / reuse an X media id */
   existingMediaId?: string | null;
+  /** Persist identifiers before the next remote side effect. Never log upload URLs. */
+  checkpoint?: (checkpoint: {
+    platformUploadId?: string;
+    platformMediaId?: string;
+    platformPostId?: string;
+    committing?: boolean;
+  }) => Promise<void>;
 }
 
 export interface SocialPublisher {

@@ -63,6 +63,7 @@ function statusLabel(item: PlatformOverview) {
   if (item.capability === "private_test_only") return "Private test mode";
   if (item.capability === "development_only") return "Development mode";
   if (item.capability === "awaiting_review") return "Awaiting review";
+  if (item.capability === "not_configured") return "Setup in progress";
   return "Not connected";
 }
 
@@ -149,7 +150,7 @@ export function ConnectedAccountsWorkspace() {
   }
 
   const visiblePlatforms = platforms.filter(
-    (item) => item.canConnect || item.accounts.length > 0
+    (item) => item.platform !== "reddit" || item.accounts.length > 0
   );
 
   return (
@@ -209,14 +210,15 @@ export function ConnectedAccountsWorkspace() {
                               {statusLabel(item)}
                             </span>
                           </div>
-                          {hint && item.canConnect ? (
+                          {(item.capabilityBanner || hint || !item.canConnect) ? (
                             <p className="mt-1 text-sm text-white/50">
-                              {hint}
+                              {item.canConnect ? item.capabilityBanner || hint : "Account connections will be available when platform setup is complete."}
                             </p>
                           ) : null}
                         </div>
                       </div>
 
+                      {!item.canConnect ? <span className="text-xs text-white/45">Connection setup pending</span> : null}
                       {!hasAccounts && item.canConnect ? (
                         <a
                           href={`/api/social/accounts/${item.platform}/connect`}
@@ -285,6 +287,9 @@ export function ConnectedAccountsWorkspace() {
                                     "Set default"
                                   )}
                                 </button>
+                              ) : null}
+                              {item.canConnect && account.health !== "healthy" ? (
+                                <a href={`/api/social/accounts/${item.platform}/connect`} className="inline-flex h-9 items-center px-3 text-xs text-[var(--color-accent)]">Reconnect</a>
                               ) : null}
                               <button
                                 type="button"

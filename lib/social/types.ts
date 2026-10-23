@@ -60,6 +60,11 @@ export interface SocialPublishSettings {
   facebookFormat?: "reel" | "page_video";
   /** Direct post vs send to creator inbox drafts */
   tiktokMode?: "direct" | "inbox";
+  tiktokPrivacyLevel?: string;
+  postConsent?: boolean;
+  musicUsageConfirmed?: boolean;
+  brandedContent?: boolean;
+  brandOrganic?: boolean;
   playlistId?: string | null;
   [key: string]: unknown;
 }
@@ -94,6 +99,7 @@ export interface PreparedMedia {
 
 export interface PublishResult {
   success: boolean;
+  state?: "published" | "processing" | "awaiting_user";
   platformPostId?: string;
   platformMediaId?: string;
   platformUploadId?: string;
@@ -106,7 +112,7 @@ export interface PublishResult {
 }
 
 export interface PublishStatus {
-  state: "uploading" | "processing" | "published" | "failed" | "unknown";
+  state: "uploading" | "processing" | "published" | "awaiting_user" | "failed" | "unknown";
   platformPostId?: string;
   platformPostUrl?: string;
   privacyStatus?: string;

@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { socialExportTarget, needsSeparateSocialFormat } from "@/lib/social/exportTarget";
+import { EDITABLE_PUBLISH_STATUSES } from "@/lib/social/publishingPolicy";
+import type { CreatorInfo } from "@/services/social/publishers/tiktokPublisher";
 import { SiteLogo } from "@/components/layout/SiteLogo";
 import { SocialPlatformIcon } from "@/components/social/SocialPlatformIcon";
 import { cn } from "@/lib/cn";
@@ -72,6 +75,10 @@ const PLATFORM_LABEL: Record<SocialPlatform, string> = {
 
 function statusLabel(status: string) {
   switch (status) {
+    case "awaiting_consent": return "Needs your review";
+    case "awaiting_user": return "Finish in TikTok";
+    case "outcome_unknown": return "Check platform account";
+    case "draft": return "Draft";
     case "preparing_media":
       return "Preparing";
     case "uploading":
@@ -118,9 +125,9 @@ function settingsForAccount(
     return {
       tiktokMode: opts.tiktokMode,
       privacy: opts.privacy === "public" ? "public" : "private",
-      allowComments: true,
-      allowDuet: true,
-      allowStitch: true,
+      allowComments: false,
+      allowDuet: false,
+      allowStitch: false,
     };
   }
   if (platform === "facebook") {
@@ -135,7 +142,7 @@ function settingsForAccount(
   return {};
 }
 
-export function SocialPublishWorkspace({ clipId }: { clipId: string }) {
+export function SocialPublishWorkspace({ clipId, initialGroupId }: { clipId: string; initialGroupId?: string }) {
   const [clipTitle, setClipTitle] = useState("Clip");
   const [accounts, setAccounts] = useState<AccountRow[]>([]);
   const [banners, setBanners] = useState<PlatformBanner[]>([]);
@@ -156,11 +163,23 @@ export function SocialPublishWorkspace({ clipId }: { clipId: string }) {
   const [group, setGroup] = useState<PublishGroupView | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [preparingFormat, setPreparingFormat] = useState<string | null>(null);
   const [publishing, setPublishing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [prefs, setPrefs] = useState<PublishingPreferencesView | null>(null);
   const [ready, setReady] = useState(false);
   const autoDraftAttempted = useRef(false);
+  const draftRequestKey = useRef<string | null>(null);
+  const creatingDraft = useRef(false);
+  const draftSignature = useRef<string | null>(null);
+  const saveQueue = useRef<Promise<void>>(Promise.resolve());
+  const saveVersion = useRef(0);
+  const saveFailure = useRef(false);
+  const [savingCount, setSavingCount] = useState(0);
+  const [consents, setConsents] = useState<Record<string, boolean>>({});
+  const [creator, setCreator] = useState<CreatorInfo | null>(null);
+  const [creatorError, setCreatorError] = useState<string | null>(null);
+  const [tikTokPrivateOnly, setTikTokPrivateOnly] = useState(false);
 
   const publishableAccounts = useMemo(
     () =>
@@ -240,6 +259,15 @@ export function SocialPublishWorkspace({ clipId }: { clipId: string }) {
                   .slice(0, 1)
                   .map((a) => a.id);
         setSelectedAccountIds(seed);
+        if (initialGroupId) {
+          const response = await fetch(`/api/social/publish-groups/${encodeURIComponent(initialGroupId)}`, { cache: "no-store" });
+          const body = await response.json();
+          if (!response.ok || body.group?.clipSuggestionId !== clipId) throw new Error(body.error || "Publish draft does not belong to this clip");
+          if (cancelled) return;
+          setGroup(body.group);
+          setActiveJobId(body.group.jobs[0]?.id || null);
+          autoDraftAttempted.current = true;
+        }
         setReady(true);
       } catch (err) {
         if (!cancelled) {
@@ -252,7 +280,21 @@ export function SocialPublishWorkspace({ clipId }: { clipId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [clipId]);
+  }, [clipId, initialGroupId]);
+
+  useEffect(() => {
+    if (activeJob?.platform !== "tiktok") { setCreator(null); setCreatorError(null); return; }
+    let cancelled = false;
+    setCreator(null);
+    setCreatorError(null);
+    void fetch(`/api/social/accounts/${activeJob.account.id}/creator-info`, { cache: "no-store" })
+      .then(async (response) => {
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || "Could not check TikTok settings");
+        if (!cancelled) { setCreator(body.creator); setTikTokPrivateOnly(body.privateOnly); }
+      }).catch((err) => { if (!cancelled) setCreatorError(err instanceof Error ? err.message : "TikTok is unavailable"); });
+    return () => { cancelled = true; };
+  }, [activeJob?.id, activeJob?.account.id, activeJob?.platform]);
 
   const refreshGroup = useCallback(async (groupId: string) => {
     const response = await fetch(`/api/social/publish-groups/${groupId}`, {
@@ -283,6 +325,8 @@ export function SocialPublishWorkspace({ clipId }: { clipId: string }) {
   }, [group, refreshGroup]);
 
   const createDraft = useCallback(async () => {
+    if (creatingDraft.current) return;
+    creatingDraft.current = true;
     setCreating(true);
     setError(null);
     try {
@@ -300,21 +344,49 @@ export function SocialPublishWorkspace({ clipId }: { clipId: string }) {
           }),
         };
       });
+      const formats = Array.from(new Set(destinations.map((destination) => socialExportTarget(destination.platform, destination.settings)).filter((target) => needsSeparateSocialFormat(target))));
+      if (formats.length) {
+        setPreparingFormat("Preparing your platform formats…");
+        const response = await fetch(`/api/clips/${clipId}/platform-exports`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platforms: formats, includeCaptions: true, burnSubtitles: true, generateCopy: false, xQuoteCard: false }) });
+        const body = await response.json();
+        if (!response.ok || !body.pack?.id) throw new Error(body.error || "Could not prepare platform formats");
+        let completed = false;
+        for (let attempt = 0; attempt < 600; attempt++) {
+          const statusResponse = await fetch(`/api/platform-export-packs/${body.pack.id}`, { cache: "no-store" });
+          const statusBody = await statusResponse.json();
+          if (!statusResponse.ok) throw new Error(statusBody.error || "Could not check platform formats");
+          const exports = statusBody.pack?.exports as Array<{ platform: string; id: string; status: string; errorMessage?: string }> | undefined;
+          const failed = exports?.find((item) => item.status === "failed");
+          if (failed) throw new Error(failed.errorMessage || "Platform export failed");
+          if (exports?.length && exports.every((item) => item.status === "completed")) { completed = true; break; }
+          await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        }
+        if (!completed) throw new Error("Platform preparation is still running. Reopen the clip shortly to continue.");
+      }
+      const signature = JSON.stringify(destinations);
+      if (signature !== draftSignature.current || !draftRequestKey.current) {
+        draftSignature.current = signature;
+        draftRequestKey.current = crypto.randomUUID();
+      }
       const response = await fetch(
         `/api/social/clips/${clipId}/publish-groups`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ destinations }),
+          body: JSON.stringify({ destinations, requestKey: draftRequestKey.current ??= crypto.randomUUID() }),
         }
       );
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "Could not create draft");
       setGroup(body.group);
+      draftRequestKey.current = null;
+      window.history.replaceState(null, "", `/clips/${clipId}/publish?groupId=${encodeURIComponent(body.group.id)}`);
       setActiveJobId(body.group.jobs[0]?.id ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not create draft");
     } finally {
+      setPreparingFormat(null);
+      creatingDraft.current = false;
       setCreating(false);
     }
   }, [
@@ -329,26 +401,34 @@ export function SocialPublishWorkspace({ clipId }: { clipId: string }) {
   ]);
 
   useEffect(() => {
-    if (!ready || group || !prefs?.autoCreateReviewDraft) return;
+    if (!ready || group || initialGroupId || !prefs?.autoCreateReviewDraft) return;
     if (autoDraftAttempted.current) return;
     if (selectedAccountIds.length === 0) return;
     autoDraftAttempted.current = true;
     void createDraft();
-  }, [ready, group, prefs, selectedAccountIds, createDraft]);
+  }, [ready, group, initialGroupId, prefs, selectedAccountIds, createDraft]);
 
-  async function saveJobPatch(patch: {
-    editedContent?: SocialGeneratedContent;
-    publishSettings?: SocialPublishSettings;
-  }) {
-    if (!activeJob) return;
-    const response = await fetch(`/api/social/publish-jobs/${activeJob.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(patch),
+  function saveJobPatch(patch: { editedContent?: SocialGeneratedContent; publishSettings?: SocialPublishSettings; }) {
+    if (!activeJob || !EDITABLE_PUBLISH_STATUSES.includes(activeJob.status)) return;
+    const jobId = activeJob.id;
+    const version = ++saveVersion.current;
+    setConsents((current) => ({ ...current, [jobId]: false }));
+    setGroup((current) => current ? { ...current, jobs: current.jobs.map((job) => job.id === jobId ? {
+      ...job, ...(patch.editedContent ? { editedContent: patch.editedContent } : {}),
+      ...(patch.publishSettings ? { publishSettings: { ...job.publishSettings, ...patch.publishSettings } } : {}),
+    } : job) } : null);
+    setSavingCount((count) => count + 1);
+    saveQueue.current = saveQueue.current.then(async () => {
+      try {
+        const response = await fetch(`/api/social/publish-jobs/${jobId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || "Could not save the post");
+        if (version === saveVersion.current) { setGroup(body.group); saveFailure.current = false; }
+      } catch (err) {
+        saveFailure.current = true;
+        setError(err instanceof Error ? err.message : "Could not save the post");
+      } finally { setSavingCount((count) => count - 1); }
     });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.error || "Could not save");
-    setGroup(body.group);
   }
 
   async function regenerate() {
@@ -373,6 +453,9 @@ export function SocialPublishWorkspace({ clipId }: { clipId: string }) {
     setPublishing(true);
     setError(null);
     try {
+      await saveQueue.current;
+      if (saveFailure.current) throw new Error("Your last edit was not saved. Please edit it again before publishing.");
+      const consentJobIds = group.jobs.filter((job) => consents[job.id]).map((job) => job.id);
       const response = await fetch(`/api/social/publish-groups/${group.id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -380,9 +463,10 @@ export function SocialPublishWorkspace({ clipId }: { clipId: string }) {
           scheduleMode === "schedule"
             ? {
                 action: "schedule",
+                consentJobIds,
                 scheduledFor: new Date(scheduledFor).toISOString(),
               }
-            : { action: "publish" }
+            : { action: "publish", consentJobIds }
         ),
       });
       const body = await response.json();
@@ -629,7 +713,8 @@ export function SocialPublishWorkspace({ clipId }: { clipId: string }) {
               )}
             </div>
 
-            {!group && (
+            {preparingFormat && <p className="border border-[var(--color-card-border)] p-4 text-sm text-white/60">{preparingFormat}</p>}
+          {!group && (
               <button
                 type="button"
                 disabled={creating || selectedAccountIds.length === 0}
@@ -700,18 +785,37 @@ export function SocialPublishWorkspace({ clipId }: { clipId: string }) {
                   </h2>
                   <button
                     type="button"
+                    disabled={savingCount > 0 || !EDITABLE_PUBLISH_STATUSES.includes(activeJob.status)}
                     onClick={() => void regenerate()}
                     className="border border-[#21301f] px-2 py-1 text-[10px] font-semibold uppercase text-[#9aa49a] hover:border-[var(--color-accent)]"
                   >
                     Regenerate
                   </button>
                 </div>
-                {content.reasoningSummary && (
-                  <p className="mt-2 text-[11px] text-[#7d8877]">
-                    {content.reasoningSummary}
-                  </p>
-                )}
-                <div className="mt-4 grid gap-3">
+                <video key={activeJob.id} controls playsInline preload="metadata" src={`/api/social/publish-jobs/${activeJob.id}/preview`} className="mx-auto mt-4 max-h-[420px] w-full bg-black" aria-label="Exact video that will be posted" />
+                <fieldset disabled={!EDITABLE_PUBLISH_STATUSES.includes(activeJob.status)} className="mt-4 grid gap-3 disabled:opacity-60">
+                  {activePlatform === "tiktok" && (
+                    <div className="space-y-3 border border-[#21301f] p-3 text-sm">
+                      <p>Posting to {creator?.creator_nickname || activeJob.account.displayName || "your TikTok account"}</p>
+                      {creatorError ? <p className="text-red-300">{creatorError}</p> : !creator ? <p>Checking creator settings…</p> : <>
+                        <label className="block">Who can view this post?
+                          <select value={String(activeJob.publishSettings?.tiktokPrivacyLevel || "")} onChange={(e) => saveJobPatch({ publishSettings: { tiktokPrivacyLevel: e.target.value } })} className="mt-1 block w-full border border-[#21301f] bg-[#070a07] px-2 py-2">
+                            <option value="" disabled>Select visibility</option>
+                            {(creator.privacy_level_options || []).map((level) => <option key={level} value={level} disabled={(tikTokPrivateOnly && level !== "SELF_ONLY") || (activeJob.publishSettings?.brandedContent === true && level === "SELF_ONLY")}>{({ PUBLIC_TO_EVERYONE: "Everyone", MUTUAL_FOLLOW_FRIENDS: "Friends", FOLLOWER_OF_CREATOR: "Followers", SELF_ONLY: "Only me" } as Record<string, string>)[level] || level}</option>)}
+                          </select>
+                        </label>
+                        {tikTokPrivateOnly && <p className="text-xs text-white/50">Only me is available while this app awaits TikTok approval.</p>}
+                        {([ ["allowComments", "Allow comments", creator.comment_disabled], ["allowDuet", "Allow Duet", creator.duet_disabled], ["allowStitch", "Allow Stitch", creator.stitch_disabled] ] as const).map(([key, label, disabled]) => (
+                          <label key={key} className={disabled ? "flex gap-2 opacity-40" : "flex gap-2"}><input type="checkbox" disabled={disabled} checked={!disabled && activeJob.publishSettings?.[key] === true} onChange={(e) => saveJobPatch({ publishSettings: { [key]: e.target.checked } })} />{label}</label>
+                        ))}
+                        <label className="flex gap-2"><input type="checkbox" checked={activeJob.publishSettings?.brandOrganic === true} onChange={(e) => saveJobPatch({ publishSettings: { brandOrganic: e.target.checked } })} />Promotes my own brand or business</label>
+                        <label className="flex gap-2"><input type="checkbox" checked={activeJob.publishSettings?.brandedContent === true} onChange={(e) => saveJobPatch({ publishSettings: { brandedContent: e.target.checked } })} />Paid partnership / branded content</label>
+                        <label className="flex gap-2"><input type="checkbox" checked={activeJob.publishSettings?.musicUsageConfirmed === true} onChange={(e) => saveJobPatch({ publishSettings: { musicUsageConfirmed: e.target.checked } })} /><span>I agree to TikTok’s <a href="https://www.tiktok.com/legal/page/global/music-usage-confirmation/en" target="_blank" rel="noreferrer" className="underline">Music Usage Confirmation</a> and, for branded content, its <a href="https://www.tiktok.com/legal/page/global/bc-policy/en" target="_blank" rel="noreferrer" className="underline">Branded Content Policy</a>.</span></label>
+                        <label className="flex gap-2"><input type="checkbox" disabled={savingCount > 0 || activeJob.publishSettings?.musicUsageConfirmed !== true || (!activeJob.publishSettings?.tiktokPrivacyLevel && activeJob.publishSettings?.tiktokMode !== "inbox")} checked={consents[activeJob.id] === true} onChange={(e) => setConsents((current) => ({ ...current, [activeJob.id]: e.target.checked }))} />I reviewed this video and caption and authorize this TikTok post.</label>
+                        <p className="text-xs text-white/50">TikTok may take several minutes to process the upload.</p>
+                      </>}
+                    </div>
+                  )}
                   {activePlatform === "youtube" && (
                     <>
                       <label className="block text-[11px] text-[#7d8877]">
@@ -846,7 +950,7 @@ export function SocialPublishWorkspace({ clipId }: { clipId: string }) {
                       </label>
                     </>
                   )}
-                </div>
+                </fieldset>
               </div>
 
               {warnings.length > 0 && (
@@ -872,14 +976,7 @@ export function SocialPublishWorkspace({ clipId }: { clipId: string }) {
                 </div>
               )}
 
-              {![
-                "completed",
-                "queued",
-                "uploading",
-                "processing",
-                "publishing",
-              ].includes(activeJob.status) &&
-                group.status !== "scheduled" && (
+              {EDITABLE_PUBLISH_STATUSES.includes(activeJob.status) && group.status !== "scheduled" && (
                 <div className="border border-[var(--color-card-border)] bg-[#050705] p-4">
                   <div className="flex flex-wrap items-end gap-3">
                     <label className="text-[11px] text-[#7d8877]">
@@ -908,7 +1005,7 @@ export function SocialPublishWorkspace({ clipId }: { clipId: string }) {
                     )}
                     <button
                       type="button"
-                      disabled={publishing}
+                      disabled={publishing || savingCount > 0 || group.jobs.some((job) => job.platform === "tiktok" && EDITABLE_PUBLISH_STATUSES.includes(job.status) && !consents[job.id])}
                       onClick={() => void confirmPublish()}
                       className="bg-[var(--color-accent)] px-4 py-2 text-[11px] font-bold uppercase text-black disabled:opacity-40"
                     >

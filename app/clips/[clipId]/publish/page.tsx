@@ -9,9 +9,12 @@ export const metadata: Metadata = {
 
 export default async function PublishClipPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ clipId: string }>;
+  searchParams: Promise<{ groupId?: string }>;
 }) {
   const { clipId } = await params;
-  return <SocialPublishWorkspace clipId={clipId} />;
+  const { groupId } = await searchParams;
+  return <SocialPublishWorkspace clipId={clipId} initialGroupId={typeof groupId === "string" ? groupId : undefined} />;
 }

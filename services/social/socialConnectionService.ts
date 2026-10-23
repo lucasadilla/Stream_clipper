@@ -48,6 +48,7 @@ import {
   metaOAuthConfigured,
 } from "@/services/social/publishers/metaOAuth";
 import { hashOAuthState } from "@/lib/social/oauth";
+import { safeSocialRedirect } from "@/lib/social/publishingPolicy";
 
 function hashState(state: string) {
   return hashOAuthState(state);
@@ -170,7 +171,7 @@ export async function beginOAuthConnect(options: {
         options.platform === "tiktok"
           ? verifier
           : null,
-      redirectAfter: options.redirectAfter || "/settings/connected-accounts",
+      redirectAfter: safeSocialRedirect(options.redirectAfter),
       expiresAt: new Date(Date.now() + 10 * 60 * 1000),
     },
   });
@@ -192,29 +193,30 @@ export async function beginOAuthConnect(options: {
   };
 }
 
+async function consumeOAuthState(state: string, platform: SocialPlatform, userId: string) {
+  const record = await prisma.socialOAuthState.findUnique({ where: { stateHash: hashState(state) } });
+  const now = new Date();
+  if (!record || record.userId !== userId || record.platform !== platform || record.consumedAt || record.expiresAt <= now) {
+    throw new Error("Invalid or expired OAuth session. Connect the account again from Clipper.");
+  }
+  const consumed = await prisma.socialOAuthState.updateMany({
+    where: { id: record.id, userId, consumedAt: null, expiresAt: { gt: now } },
+    data: { consumedAt: now },
+  });
+  if (consumed.count !== 1) throw new Error("OAuth session has already been used");
+  return record;
+}
+
 export async function completeYouTubeOAuth(options: {
   state: string;
   code: string;
+  userId: string;
 }): Promise<{ redirectAfter: string; accountId: string }> {
-  const stateHash = hashState(options.state);
-  const record = await prisma.socialOAuthState.findUnique({
-    where: { stateHash },
-  });
-  if (!record || record.consumedAt || record.expiresAt < new Date()) {
-    throw new Error("Invalid or expired OAuth state");
-  }
-  if (record.platform !== "youtube" || !record.codeVerifier) {
-    throw new Error("Invalid OAuth session");
-  }
-
-  await prisma.socialOAuthState.update({
-    where: { id: record.id },
-    data: { consumedAt: new Date() },
-  });
+  const record = await consumeOAuthState(options.state, "youtube", options.userId);
 
   const tokens = await exchangeYouTubeCode({
     code: options.code,
-    codeVerifier: record.codeVerifier,
+    codeVerifier: record.codeVerifier!,
   });
   const channel = await fetchYouTubeChannel(tokens.accessToken);
 
@@ -272,7 +274,7 @@ export async function completeYouTubeOAuth(options: {
   });
 
   return {
-    redirectAfter: record.redirectAfter || "/settings/connected-accounts",
+    redirectAfter: safeSocialRedirect(record.redirectAfter),
     accountId: account.id,
   };
 }
@@ -280,25 +282,13 @@ export async function completeYouTubeOAuth(options: {
 export async function completeXOauth(options: {
   state: string;
   code: string;
+  userId: string;
 }): Promise<{ redirectAfter: string; accountId: string }> {
-  const stateHash = hashState(options.state);
-  const record = await prisma.socialOAuthState.findUnique({
-    where: { stateHash },
-  });
-  if (!record || record.consumedAt || record.expiresAt < new Date()) {
-    throw new Error("Invalid or expired OAuth state");
-  }
-  if (record.platform !== "x" || !record.codeVerifier) {
-    throw new Error("Invalid OAuth session");
-  }
-  await prisma.socialOAuthState.update({
-    where: { id: record.id },
-    data: { consumedAt: new Date() },
-  });
+  const record = await consumeOAuthState(options.state, "x", options.userId);
 
   const tokens = await exchangeXCode({
     code: options.code,
-    codeVerifier: record.codeVerifier,
+    codeVerifier: record.codeVerifier!,
   });
   const user = await fetchXUser(tokens.accessToken);
 
@@ -362,7 +352,7 @@ export async function completeXOauth(options: {
   });
 
   return {
-    redirectAfter: record.redirectAfter || "/settings/connected-accounts",
+    redirectAfter: safeSocialRedirect(record.redirectAfter),
     accountId: account.id,
   };
 }
@@ -370,25 +360,13 @@ export async function completeXOauth(options: {
 export async function completeTikTokOAuth(options: {
   state: string;
   code: string;
+  userId: string;
 }): Promise<{ redirectAfter: string; accountId: string }> {
-  const stateHash = hashState(options.state);
-  const record = await prisma.socialOAuthState.findUnique({
-    where: { stateHash },
-  });
-  if (!record || record.consumedAt || record.expiresAt < new Date()) {
-    throw new Error("Invalid or expired OAuth state");
-  }
-  if (record.platform !== "tiktok" || !record.codeVerifier) {
-    throw new Error("Invalid OAuth session");
-  }
-  await prisma.socialOAuthState.update({
-    where: { id: record.id },
-    data: { consumedAt: new Date() },
-  });
+  const record = await consumeOAuthState(options.state, "tiktok", options.userId);
 
   const tokens = await exchangeTikTokCode({
     code: options.code,
-    codeVerifier: record.codeVerifier,
+    codeVerifier: record.codeVerifier!,
   });
   let user: Awaited<ReturnType<typeof fetchTikTokUser>>;
   try {
@@ -472,7 +450,7 @@ export async function completeTikTokOAuth(options: {
   });
 
   return {
-    redirectAfter: record.redirectAfter || "/settings/connected-accounts",
+    redirectAfter: safeSocialRedirect(record.redirectAfter),
     accountId: account.id,
   };
 }
@@ -480,22 +458,10 @@ export async function completeTikTokOAuth(options: {
 export async function completeMetaOAuth(options: {
   state: string;
   code: string;
+  userId: string;
   platform: "facebook" | "instagram";
 }): Promise<{ redirectAfter: string; accountIds: string[] }> {
-  const stateHash = hashState(options.state);
-  const record = await prisma.socialOAuthState.findUnique({
-    where: { stateHash },
-  });
-  if (!record || record.consumedAt || record.expiresAt < new Date()) {
-    throw new Error("Invalid or expired OAuth state");
-  }
-  if (record.platform !== options.platform) {
-    throw new Error("Invalid OAuth session");
-  }
-  await prisma.socialOAuthState.update({
-    where: { id: record.id },
-    data: { consumedAt: new Date() },
-  });
+  const record = await consumeOAuthState(options.state, options.platform, options.userId);
 
   const tokens = await exchangeMetaCode({
     code: options.code,
@@ -642,7 +608,7 @@ export async function completeMetaOAuth(options: {
   }
 
   return {
-    redirectAfter: record.redirectAfter || "/settings/connected-accounts",
+    redirectAfter: safeSocialRedirect(record.redirectAfter),
     accountIds,
   };
 }
@@ -676,7 +642,16 @@ export async function setDefaultAccount(userId: string, accountId: string) {
   ]);
 }
 
+const contextRequests = new Map<string, Promise<Awaited<ReturnType<typeof loadPublisherContext>>>>();
 export async function getPublisherContext(accountId: string) {
+  const inFlight = contextRequests.get(accountId);
+  if (inFlight) return inFlight;
+  const request = loadPublisherContext(accountId);
+  contextRequests.set(accountId, request);
+  try { return await request; } finally { if (contextRequests.get(accountId) === request) contextRequests.delete(accountId); }
+}
+
+async function loadPublisherContext(accountId: string) {
   const tokens = await getDecryptedTokens(accountId);
   if (!tokens) {
     throw Object.assign(new Error("Social account is disconnected"), {

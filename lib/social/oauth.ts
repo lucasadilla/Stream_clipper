@@ -12,11 +12,10 @@ export function hashOAuthState(state: string) {
 }
 
 function mediaGrantSecret(): string {
-  return (
-    process.env.SOCIAL_TOKEN_ENCRYPTION_KEY?.trim() ||
-    process.env.AUTH_SECRET?.trim() ||
-    "clipper-dev-media-grant"
-  );
+  const secret = process.env.SOCIAL_TOKEN_ENCRYPTION_KEY?.trim() || process.env.AUTH_SECRET?.trim();
+  if (secret) return secret;
+  if (process.env.NODE_ENV === "production") throw new Error("Social media signing key is not configured");
+  return "clipper-dev-media-grant";
 }
 
 /** Short-lived signed grant so Meta can fetch a local video over HTTPS. */
@@ -41,8 +40,8 @@ export function createMediaGrant(options: {
 }
 
 export function verifyMediaGrant(token: string): { filePath: string } | null {
-  const [payload, sig] = token.split(".");
-  if (!payload || !sig) return null;
+  const [payload, sig, extra] = token.split(".");
+  if (!payload || !sig || extra) return null;
   const expected = createHmac("sha256", mediaGrantSecret())
     .update(payload)
     .digest("base64url");
