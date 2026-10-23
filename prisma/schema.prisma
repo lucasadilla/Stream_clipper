@@ -104,6 +104,7 @@ model User {
   socialPublishingPreferences SocialPublishingPreference[]
   socialPublishGroups         SocialPublishGroup[]
   streamAutomation            StreamAutomation?
+  showcaseClips               ShowcaseClip[]
 }
 
 model Account {
@@ -513,6 +514,7 @@ model ConnectedSocialAccount {
   user                      User                        @relation(fields: [userId], references: [id], onDelete: Cascade)
   preferences               SocialPublishingPreference[]
   publishJobs               SocialPublishJob[]
+  publicPostMetrics         PublicPostMetric[]
 
   @@unique([userId, platform, platformAccountId])
   @@index([userId, platform, isActive])
@@ -633,6 +635,63 @@ model SocialPublishEvent {
   publishJob SocialPublishJob @relation(fields: [publishJobId], references: [id], onDelete: Cascade)
 
   @@index([publishJobId, createdAt])
+}
+
+/// Private, deduplicated lifetime counts. Independent of clip/session retention.
+model PublicPostMetric {
+  id                       String   @id @default(cuid())
+  connectedSocialAccountId String
+  platform                 String
+  platformPostId           String
+  publishedAt              DateTime
+  views                    BigInt?
+  attemptedAt              DateTime?
+  fetchedAt                DateTime?
+  connectedSocialAccount ConnectedSocialAccount @relation(fields: [connectedSocialAccountId], references: [id], onDelete: Cascade)
+  @@unique([platform, platformPostId])
+  @@index([attemptedAt])
+  @@index([connectedSocialAccountId])
+}
+
+/// One durable daily refresh, claimed in small batches without blocking renders.
+model PublicImpactSnapshot {
+  id           String    @id
+  day          DateTime
+  phase        String    @default("discover")
+  cursor       String?
+  lockedBy     String?
+  lockedUntil  DateTime?
+  totalViews   BigInt?
+  countedPosts Int       @default(0)
+  knownPosts   Int       @default(0)
+  refreshedAt  DateTime?
+}
+
+/// A creator's explicit submission. Only approved rows have public media routes.
+model ShowcaseClip {
+  id             String    @id @default(cuid())
+  userId         String
+  platformExportId String  @unique
+  clipSuggestionId String
+  sourceGroup    String
+  sourceTitle    String
+  category       String    @default("other")
+  title          String
+  creatorName    String
+  platform       String
+  status         String    @default("pending")
+  videoPath      String
+  posterPath     String
+  sourceVideoPath String?
+  sourcePosterPath String?
+  durationSeconds Float
+  consentAt      DateTime?
+  approvedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([status, approvedAt])
+  @@index([userId, createdAt])
 }
 
 /// Hands-free live clipping configuration for one creator account.

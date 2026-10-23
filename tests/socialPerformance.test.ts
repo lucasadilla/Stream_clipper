@@ -75,4 +75,12 @@ describe("real provider performance", () => {
     await expect(fetchPostMetrics("youtube", "https://other.test", ctx, new Date(), null)).rejects.toThrow(/published video ID/);
     expect(m.http).not.toHaveBeenCalled();
   });
+  it("does not request optional watch-time or private playback metrics during a public view sweep", async () => {
+    m.http.mockResolvedValueOnce(json({ items: [{ id: "video", statistics: { viewCount: "17" } }] }));
+    expect(await fetchPostMetrics("youtube", "video", ctx, new Date(), "yt-analytics.readonly", { viewsOnly: true })).toMatchObject({ views: 17 });
+    expect(m.http).toHaveBeenCalledOnce();
+    m.http.mockResolvedValueOnce(json({ data: { id: "post", attachments: { media_keys: ["media"] } }, includes: { media: [{ type: "video", media_key: "media", public_metrics: { view_count: 9 } }] } }));
+    await fetchPostMetrics("x", "post", ctx, new Date(), null, { viewsOnly: true });
+    expect(String(m.http.mock.calls[1][0])).not.toContain("non_public_metrics");
+  });
 });
