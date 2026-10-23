@@ -160,7 +160,8 @@ export async function renderClip(
   onProgress?: (update: RenderProgressUpdate) => void,
   editorState?: EditorState,
   signal?: AbortSignal,
-  verticalLayout?: unknown
+  verticalLayout?: unknown,
+  branding?: import("@/lib/social/channelPreset").ChannelBranding
 ) {
   if (signal?.aborted) throw new RenderAbortedError();
   onProgress?.({ progress: 5, status: "queued" });
@@ -174,6 +175,7 @@ export async function renderClip(
         includeCaptions,
         format,
         captionAppearance,
+        branding,
         captionCues,
         editorState,
         verticalLayout: format === "vertical" ? verticalLayout : undefined,

@@ -7,7 +7,7 @@ import { probeMedia } from "@/lib/ffmpeg";
 import { decryptSecret, encryptSecret } from "@/lib/social/tokenCrypto";
 import { ACTIVE_PUBLISH_STATUSES, EDITABLE_PUBLISH_STATUSES, assertTikTokPostConsent, requiresPostReview, safePublishError, socialGroupStatus } from "@/lib/social/publishingPolicy";
 import { prisma } from "@/lib/db";
-import { isPreviewRenderJobParams } from "@/lib/renderJobSelection";
+import { selectLatestFinalRenderJob } from "@/lib/renderJobSelection";
 import { canPublishPlatform, forcesPrivateUploads } from "@/lib/social/capabilities";
 import type {
   PreparedMedia,
@@ -23,6 +23,9 @@ import { getPublisherContext } from "@/services/social/socialConnectionService";
 import { getSocialPublisher } from "@/services/social/publishers";
 import { validateSocialPost } from "@/services/social/socialPublishValidationService";
 import { getPublishingPreferences } from "@/services/social/socialPublishingPreferenceService";
+import { getChannelPreset } from "@/services/social/channelPresetService";
+import { getLatestCompletedFinalRenderJob } from "@/services/renderSelectionService";
+import { PUBLISHING_CONTROL_PLATFORM } from "./publishingControlService";
 import { getPostHogClient } from "@/lib/posthog-server";
 
 function unsealUploadId(value: string | null): string | null {
@@ -155,7 +158,7 @@ export async function resolvePublishMedia(options: {
   const match = options.platformExportId
     ? clip.platformExports.find((item) => item.id === options.platformExportId && item.platform === preferredExportKey && item.outputPath)
     : preferredExportKey
-    ? clip.platformExports.find((item) => item.platform === preferredExportKey && item.outputPath)
+    ? clip.platformExports.find((item) => item.platform === preferredExportKey && item.outputPath && !(item.exportSettings && typeof item.exportSettings === "object" && "channelPresetAccountId" in item.exportSettings))
     : null;
 
   if (options.platformExportId && !match) throw new Error("The selected platform export is not ready for this clip.");
@@ -165,9 +168,7 @@ export async function resolvePublishMedia(options: {
   }
 
   if (needsSeparateSocialFormat(preferredExportKey)) throw new Error("Prepare the selected platform format before posting this clip.");
-  const render = clip.renderJobs.find(
-    (job) => job.outputPath && !isPreviewRenderJobParams(job.params)
-  );
+  const render = selectLatestFinalRenderJob(clip.renderJobs) || await getLatestCompletedFinalRenderJob(clip.id);
   if (!render?.outputPath) {
     throw new Error("No completed render found for this clip");
   }
@@ -262,20 +263,24 @@ async function createPublishGroupInternal(options: {
       },
     });
     if (!account) throw new Error("Connected account not found");
+    const preset = await getChannelPreset(options.userId, account.id);
 
     if (dest.destinationId && dest.destinationId !== account.platformAccountId) throw new Error("Destination does not belong to the connected account.");
     const settings: SocialPublishSettings = {
       privacy: forcesPrivateUploads(dest.platform)
         ? "private"
-        : dest.settings?.privacy || prefs.defaultPrivacy || "private",
+        : dest.settings?.privacy || preset?.privacy || prefs.defaultPrivacy || "private",
       categoryId: dest.settings?.categoryId || "22",
       madeForKids: dest.settings?.madeForKids ?? false,
       notifySubscribers: dest.settings?.notifySubscribers ?? true,
       youtubeFormat:
-        dest.settings?.youtubeFormat || prefs.youtubeFormat || "shorts",
+        dest.settings?.youtubeFormat || preset?.youtubeFormat || prefs.youtubeFormat || "shorts",
       facebookFormat:
-        dest.settings?.facebookFormat || prefs.facebookFormat || "reel",
-      tiktokMode: dest.settings?.tiktokMode || prefs.tiktokMode || "direct",
+        dest.settings?.facebookFormat || preset?.facebookFormat || prefs.facebookFormat || "reel",
+      instagramFormat: dest.settings?.instagramFormat || preset?.instagramFormat || "reel",
+      tiktokMode: dest.settings?.tiktokMode || preset?.tiktokMode || prefs.tiktokMode || "direct",
+      shareToFeed: dest.settings?.shareToFeed ?? preset?.shareToFeed ?? true,
+      ...(preset ? { channelPresetName: preset.name, channelPresetLook: preset.look } : {}),
       ...dest.settings,
       postConsent: false,
     };
@@ -311,11 +316,16 @@ async function createPublishGroupInternal(options: {
         });
 
     if (!dest.content) generatedByPlatform.set(copyKey, content);
-    if (!dest.content && prefs.defaultHashtags.length) {
+    if (!dest.content && (prefs.defaultHashtags.length || preset?.defaultHashtags.length)) {
       const merged = Array.from(
-        new Set([...prefs.defaultHashtags, ...content.hashtags])
+        new Set([...prefs.defaultHashtags, ...(preset?.defaultHashtags || []), ...content.hashtags])
       );
       content = { ...content, hashtags: merged };
+    }
+    if (!dest.content && preset?.captionSuffix) {
+      content = { ...content, caption: [content.caption, preset.captionSuffix].filter(Boolean).join("\n\n"),
+        description: [content.description, preset.captionSuffix].filter(Boolean).join("\n\n"),
+        postText: [content.postText, preset.captionSuffix].filter(Boolean).join("\n\n") };
     }
 
     const validation = validateSocialPost({
@@ -412,19 +422,21 @@ export async function updatePublishJob(
   patch: {
     editedContent?: SocialGeneratedContent;
     publishSettings?: SocialPublishSettings;
+    expectedVersion?: string;
   }
 ) {
   const job = await prisma.socialPublishJob.findFirst({
     where: { id: jobId, publishGroup: { userId } },
   });
   if (!job) throw new Error("Publish job not found");
+  if (patch.expectedVersion && job.updatedAt.toISOString() !== patch.expectedVersion) throw new Error("This post changed. Reload it before saving edits.");
   if (!EDITABLE_PUBLISH_STATUSES.includes(job.status)) {
     throw new Error("Cannot edit a job that is already publishing or completed");
   }
 
   const content = patch.editedContent
     ? asContent(patch.editedContent, job.platform as SocialPlatform)
-    : asContent(job.editedContent, job.platform as SocialPlatform);
+    : asContent(job.editedContent ?? job.generatedContent, job.platform as SocialPlatform);
   const settings = patch.publishSettings
     ? { ...asSettings(job.publishSettings), ...patch.publishSettings }
     : asSettings(job.publishSettings);
@@ -788,7 +800,8 @@ export async function reclaimStaleSocialPublishJobs(): Promise<number> {
 
 export async function claimNextSocialPublishJob(): Promise<string | null> {
   const now = new Date();
-  const candidates = await prisma.socialPublishJob.findMany({ where: { lockedBy: null, OR: [
+  const unpaused = { user: { socialPublishingPreferences: { none: { platform: PUBLISHING_CONTROL_PLATFORM, autoPublishEnabled: true } } } };
+  const candidates = await prisma.socialPublishJob.findMany({ where: { publishGroup: unpaused, lockedBy: null, OR: [
     { status: "queued" }, { status: "scheduled", scheduledFor: { lte: now } },
     { status: "processing", scheduledFor: { lte: now } },
   ] }, orderBy: { createdAt: "asc" }, take: 8 });
@@ -799,6 +812,7 @@ export async function claimNextSocialPublishJob(): Promise<string | null> {
       continue;
     }
     const claimed = await prisma.socialPublishJob.updateMany({ where: {
+      publishGroup: unpaused,
       id: candidate.id, status: candidate.status, lockedBy: null,
       ...(candidate.status === "queued" ? {} : { scheduledFor: { lte: now } }),
     }, data: { status: "preparing_media", lockedAt: now, lockedBy: SOCIAL_WORKER_ID,
@@ -821,6 +835,11 @@ export async function executeSocialPublishJob(jobId: string): Promise<void> {
   const heartbeat = setInterval(() => { void ownedUpdate({ lockedAt: new Date() }).catch(() => undefined); }, 30_000);
   heartbeat.unref?.();
   try {
+    const group = await prisma.socialPublishGroup.findUniqueOrThrow({ where: { id: job.publishGroupId }, select: { userId: true } });
+    if ((await getPublishingPreferences(group.userId)).publishingPaused && !postId) {
+      await ownedUpdate({ status: "queued", lockedAt: null, lockedBy: null, attemptCount: { decrement: 1 } });
+      return;
+    }
     if (!canPublishPlatform(job.platform as SocialPlatform)) throw new Error("Publishing is unavailable for this platform. Check the connected account.");
     const settings = asSettings(job.publishSettings);
     if (requiresPostReview(job.platform as SocialPlatform)) assertTikTokPostConsent(settings);
@@ -859,6 +878,10 @@ export async function executeSocialPublishJob(jobId: string): Promise<void> {
       const remote = await publisher.validatePost(ctx, request);
       const warnings = [...validation.warnings, ...remote.warnings];
       if (!validation.ok || !remote.ok) throw new Error(warnings.find((w) => w.severity === "error")?.message || "Post validation failed");
+      if ((await getPublishingPreferences(group.userId)).publishingPaused) {
+        await ownedUpdate({ status: "queued", lockedAt: null, lockedBy: null, attemptCount: { decrement: 1 } });
+        return;
+      }
       await ownedUpdate({ status: "uploading", videoPath: media.filePath, platformExportId: media.platformExportId, validationWarnings: asJson(warnings) });
       result = await publisher.publish(ctx, request);
     }

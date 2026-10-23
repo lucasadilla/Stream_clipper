@@ -6,12 +6,15 @@ import { decryptSecret } from "@/lib/social/tokenCrypto";
 const m = vi.hoisted(() => ({
   jobs: [] as Record<string, unknown>[], group: null as Record<string, unknown> | null,
   publish: vi.fn(), status: vi.fn(), validate: vi.fn(), context: vi.fn(), generated: vi.fn(), events: vi.fn(),
-  createGroup: vi.fn(), media: vi.fn(), account: vi.fn(),
+  createGroup: vi.fn(), media: vi.fn(), account: vi.fn(), paused: false,
 }));
 function matches(row: Record<string, unknown>, where: Record<string, unknown>): boolean {
   return Object.entries(where).every(([key, value]) => {
     if (key === "OR") return (value as Record<string, unknown>[]).some((part) => matches(row, part));
-    if (key === "publishGroup") return true;
+    if (key === "publishGroup") {
+      const relation = value as Record<string, unknown>;
+      return !(relation.user && m.paused);
+    }
     const current = row[key];
     if (value && typeof value === "object" && !(value instanceof Date)) {
       const condition = value as { in?: unknown[]; lte?: Date; lt?: Date; gt?: Date; not?: unknown };
@@ -27,6 +30,7 @@ function matches(row: Record<string, unknown>, where: Record<string, unknown>): 
 function apply(row: Record<string, unknown>, data: Record<string, unknown>) {
   for (const [key, value] of Object.entries(data)) {
     if (value && typeof value === "object" && "increment" in value) row[key] = Number(row[key]) + Number((value as { increment: number }).increment);
+    else if (value && typeof value === "object" && "decrement" in value) row[key] = Number(row[key]) - Number((value as { decrement: number }).decrement);
     else if (value !== undefined) row[key] = structuredClone(value);
   }
   row.updatedAt = new Date();
@@ -65,7 +69,8 @@ vi.mock("@/lib/social/capabilities", () => ({ canPublishPlatform: () => true, fo
 vi.mock("@/services/social/socialContentGenerationService", () => ({ generateSocialContent: (...args: unknown[]) => m.generated(...args) }));
 vi.mock("@/services/social/socialConnectionService", () => ({ getPublisherContext: (...args: unknown[]) => m.context(...args) }));
 vi.mock("@/services/social/publishers", () => ({ getSocialPublisher: () => ({ publish: m.publish, getPublishStatus: m.status, validatePost: m.validate }) }));
-vi.mock("@/services/social/socialPublishingPreferenceService", () => ({ getPublishingPreferences: async () => defaultPublishingPreferences() }));
+vi.mock("@/services/social/channelPresetService", () => ({ getChannelPreset: async () => null }));
+vi.mock("@/services/social/socialPublishingPreferenceService", () => ({ getPublishingPreferences: async () => ({ ...defaultPublishingPreferences(), publishingPaused: m.paused }) }));
 vi.mock("@/lib/posthog-server", () => ({ getPostHogClient: () => ({ capture: vi.fn() }) }));
 import { claimNextSocialPublishJob, createPublishGroup, enqueuePublishGroup, executeSocialPublishJob, reclaimStaleSocialPublishJobs, retryPublishJob, updatePublishJob } from "@/services/social/socialPublishingService";
 
@@ -78,7 +83,7 @@ function job(id = "job", platform = "youtube") {
   };
 }
 beforeEach(() => {
-  vi.clearAllMocks(); m.jobs = [job()]; m.group = { id: "group", userId: "user", clipSuggestionId: "clip", status: "publishing", scheduledFor: null, createdAt: new Date(), updatedAt: new Date() };
+  vi.clearAllMocks(); m.paused = false; m.jobs = [job()]; m.group = { id: "group", userId: "user", clipSuggestionId: "clip", status: "publishing", scheduledFor: null, createdAt: new Date(), updatedAt: new Date() };
   m.publish.mockResolvedValue({ success: true, state: "published", platformPostId: "remote" });
   m.status.mockResolvedValue({ state: "processing" }); m.validate.mockResolvedValue({ ok: true, warnings: [] }); m.context.mockResolvedValue({ accessToken: "secret" });
   m.media.mockResolvedValue({ width: 1080, height: 1920, durationSeconds: 30, videoCodec: "h264" });
@@ -87,6 +92,23 @@ beforeEach(() => {
 });
 
 describe("durable social publishing worker", () => {
+  it("does not claim queued jobs while publishing is paused", async () => {
+    m.paused = true;
+    expect(await claimNextSocialPublishJob()).toBeNull();
+    expect(m.jobs[0]).toMatchObject({ status: "queued", attemptCount: 0 });
+  });
+  it("returns a claimed job to the queue if publishing is paused before execution", async () => {
+    const id = await claimNextSocialPublishJob(); m.paused = true;
+    await executeSocialPublishJob(id!);
+    expect(m.jobs[0]).toMatchObject({ status: "queued", attemptCount: 0, lockedBy: null });
+    expect(m.publish).not.toHaveBeenCalled(); expect(m.context).not.toHaveBeenCalled();
+  });
+  it("checks pause again after platform validation, before uploading", async () => {
+    m.validate.mockImplementation(async () => { m.paused = true; return { ok: true, warnings: [] }; });
+    await executeSocialPublishJob((await claimNextSocialPublishJob())!);
+    expect(m.jobs[0]).toMatchObject({ status: "queued", attemptCount: 0, lockedBy: null });
+    expect(m.publish).not.toHaveBeenCalled();
+  });
   it("checks an existing remote post instead of uploading a duplicate", async () => {
     m.jobs[0].platformPostId = "remote";
     const id = await claimNextSocialPublishJob(); await executeSocialPublishJob(id!);

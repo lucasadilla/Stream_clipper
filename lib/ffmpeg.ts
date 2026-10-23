@@ -983,6 +983,7 @@ export interface RenderShortOptions {
   subtitleFormat?: RenderFormat;
   outputHeight?: number;
   captionAppearance?: CaptionAppearance;
+  brandingFilter?: string;
   facecamRegion?: { x: number; y: number; width: number; height: number };
   /** Facecam-aware vertical layout (stacked / PiP / subject crop / center crop). */
   verticalLayout?: ResolvedVerticalLayout;
@@ -1285,7 +1286,7 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
   const duration = endTimeSeconds - startTimeSeconds;
   if (duration <= 0) throw new Error("Invalid clip duration");
 
-  const needsReencode = format === "vertical" || !!srtPath;
+  const needsReencode = format === "vertical" || !!srtPath || !!options.brandingFilter;
 
   if (!needsReencode) {
     await fastCutSegment(
@@ -1342,11 +1343,11 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
       activeSrtPath = undefined;
     }
 
-    if (format === "native" && activeSrtPath) {
+    if (format === "native" && (activeSrtPath || options.brandingFilter)) {
       await encodeWithFilters({
         inputPath: encodeInput,
         outputPath,
-        vf: subtitleFilter(activeSrtPath, subtitleFormat, outputHeight, captionAppearance),
+        vf: [activeSrtPath ? subtitleFilter(activeSrtPath, subtitleFormat, outputHeight, captionAppearance) : "", options.brandingFilter].filter(Boolean).join(","),
         outputHeight,
         withAudio: true,
         previewQuality,
@@ -1385,6 +1386,7 @@ export async function renderShort(options: RenderShortOptions): Promise<void> {
       vf += `,${subtitleFilter(activeSrtPath, subtitleFormat, height, captionAppearance)}`;
     }
 
+    if (options.brandingFilter) vf += `,${options.brandingFilter}`;
     await encodeWithFilters({
       inputPath: encodeInput,
       outputPath,
@@ -1441,6 +1443,7 @@ export interface RenderSequenceOptions {
   height: number;
   srtPath?: string;
   captionAppearance?: CaptionAppearance;
+  brandingFilter?: string;
   normalizeAudio?: boolean;
   denoiseAudio?: boolean;
   verticalBackground?: "crop" | "blur";
@@ -1594,6 +1597,10 @@ export async function renderSequence(options: RenderSequenceOptions): Promise<vo
     videoLabel = nextLabel;
   });
 
+  if (options.brandingFilter) {
+    filters.push(`[${videoLabel}]${options.brandingFilter}[vbrand]`);
+    videoLabel = "vbrand";
+  }
   let audioLabel = "acat";
   if (withAudio && (options.denoiseAudio || options.normalizeAudio)) {
     const audioFilters: string[] = [];

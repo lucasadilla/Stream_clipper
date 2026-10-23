@@ -2,6 +2,8 @@
 
 Clipper supports account connections and server-side video publishing for YouTube, TikTok, Instagram professional accounts, Facebook Pages, and X. Each destination has its own job and result. Public publishing additionally depends on each provider's app access and account permissions; a readiness environment flag does not grant those permissions.
 
+See [Publishing workspace](./publishing-workspace.md) for batch review, scheduling, channel styles and performance access.
+
 ## Production configuration
 
 Set `NEXT_PUBLIC_SITE_URL=https://streamclipper.stream`. Keep `AUTH_SECRET` stable: existing social account tokens and upload checkpoints are encrypted using `SOCIAL_TOKEN_ENCRYPTION_KEY`, or a key derived from `AUTH_SECRET`. Do not introduce a different encryption key without migrating existing encrypted values.

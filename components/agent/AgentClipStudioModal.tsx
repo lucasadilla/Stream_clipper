@@ -1,5 +1,7 @@
 "use client";
 
+import { StudioChannelPresetPicker } from "@/components/social/ChannelPresetsWorkspace";
+import type { ChannelBranding } from "@/lib/social/channelPreset";
 import { socialDraftKey } from "@/lib/social/draftKey";
 
 import {
@@ -289,6 +291,7 @@ export function AgentClipStudioModal({
   onClipChange,
   onClose,
 }: AgentClipStudioModalProps) {
+  const [channelBranding, setChannelBranding] = useState<ChannelBranding | undefined>(undefined);
   const [mounted, setMounted] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [tab, setTab] = useState<StudioTab>("edit");
@@ -1263,6 +1266,7 @@ export function AgentClipStudioModal({
     open,
     includeCaptions,
     captionAppearance,
+    channelBranding,
     captionDirectionPlan,
     platformCaptionEdits,
     lookPreset,
@@ -1807,7 +1811,8 @@ export function AgentClipStudioModal({
         },
         undefined,
         undefined,
-        selection
+        selection,
+        channelBranding
       );
       setDownloadUrl(result.downloadUrl);
       await preparedDownload.start(
@@ -1861,7 +1866,8 @@ export function AgentClipStudioModal({
         },
         undefined,
         undefined,
-        selection
+        selection,
+        channelBranding
       );
       setDownloadUrl(result.downloadUrl);
       onClipChange({ ...clip, status: "rendered" });
@@ -2860,6 +2866,8 @@ export function AgentClipStudioModal({
 
           {tab === "export" && (
             <div className="mx-auto max-w-2xl space-y-6">
+              <StudioChannelPresetPicker disabled={rendering || packing || publishing || analyzingFace} onApply={(preset) => { onCaptionAppearanceChange(preset.captionAppearance); onIncludeCaptionsChange(preset.captionsEnabled); setLookPreset(preset.look); setChannelBranding(preset.branding); setActionOk(`Applied ${preset.name}. Render again to include this style and branding.`); }} />
+              {channelBranding?.text && <p className="text-xs text-[var(--color-muted)]">Brand label on next export: {channelBranding.text}</p>}
               <div className="rounded-xl border border-[var(--color-card-border)] bg-[var(--color-card)] p-4">
                 <h3 className="text-sm font-semibold">Download</h3>
                 <p className="mt-1 text-xs text-[var(--color-muted)]">

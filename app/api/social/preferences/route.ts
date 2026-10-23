@@ -27,6 +27,9 @@ export async function PUT(request: NextRequest) {
   try {
     const userId = await requireAuthUserId(request);
     const body = (await request.json()) as Partial<PublishingPreferencesView>;
+    // Pause/resume has its own explicit action and cannot be changed by a stale
+    // defaults form submitted from another tab.
+    delete body.publishingPaused;
     const preferences = await upsertPublishingPreferences(userId, body);
     return jsonResponse({ preferences });
   } catch (error) {

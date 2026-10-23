@@ -1,3 +1,4 @@
+import { brandingSchema } from "@/lib/social/channelPreset";
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
 import { createRenderJobRecord } from "@/services/renderService";
@@ -205,7 +206,9 @@ export async function POST(
       });
     }
 
+    const branding = brandingSchema.optional().parse((body as { branding?: unknown }).branding);
     const renderParams = {
+      branding,
       streamSessionId: clip.streamSessionId,
       sourceMediaId: sourceMedia?.id,
       clipSuggestionId: clip.id,
