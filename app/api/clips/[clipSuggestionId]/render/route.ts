@@ -151,6 +151,11 @@ export async function POST(
       throw err;
     }
 
+    const expectedRange = (body as { expectedRange?: { startTimeSeconds?: number; endTimeSeconds?: number } }).expectedRange;
+    if (expectedRange && (expectedRange.startTimeSeconds !== clip.startTimeSeconds || expectedRange.endTimeSeconds !== clip.endTimeSeconds)) {
+      return errorResponse("The clip range changed. Reopen the clip before rendering.", 409);
+    }
+
     if (
       editorState.segments.length > 0 &&
       !sequenceFitsRange(editorState.segments, {

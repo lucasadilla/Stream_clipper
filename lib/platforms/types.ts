@@ -60,6 +60,8 @@ export interface PlatformExportSettings {
 }
 
 export interface CreatePlatformExportPackInput {
+  /** Exact master chosen in Studio; never silently substitute another render. */
+  sourceRenderJobId?: string;
   /** Server-selected channel style, pinned to this export pack. */
   channelPreset?: { accountId: string; preset: import("@/lib/social/channelPreset").ChannelPreset };
   captionOptions?: Partial<Record<PlatformKey, boolean>>;

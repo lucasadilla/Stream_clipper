@@ -82,6 +82,7 @@ function parseInput(value: unknown): CreatePlatformExportPackInput {
   }
   return {
     platforms,
+    sourceRenderJobId: typeof raw.sourceRenderJobId === "string" ? raw.sourceRenderJobId.slice(0, 160) : undefined,
     includeCaptions: raw.includeCaptions !== false,
     burnSubtitles: raw.burnSubtitles !== false,
     generateCopy: raw.generateCopy !== false,

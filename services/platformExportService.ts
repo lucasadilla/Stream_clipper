@@ -206,7 +206,9 @@ export async function createPlatformExportPack(
       `Clips must be ${MAX_CLIP_SECONDS / 60} minutes or shorter`
     );
   }
-  const renderJob = await getLatestCompletedFinalRenderJob(clip.id);
+  const renderJob = input.sourceRenderJobId
+    ? await prisma.renderJob.findFirst({ where: { id: input.sourceRenderJobId, clipSuggestionId: clip.id, streamSessionId: clip.streamSessionId, status: "completed", outputPath: { not: null } } })
+    : await getLatestCompletedFinalRenderJob(clip.id);
   if (!renderJob?.outputPath || !fileExists(renderJob.outputPath)) {
     throw new Error("Render the clip before creating platform exports");
   }
@@ -217,14 +219,37 @@ export async function createPlatformExportPack(
   if (platforms.length === 0) throw new Error("Choose at least one platform");
 
   const sourceParams = parseRenderJobParams(renderJob.params);
+  if (sourceParams?.preview || sourceParams?.platformTarget) throw new Error("Choose a completed general render for this clip");
   if (!sourceParams) throw new Error("Render the clip again before creating platform exports");
 
+  if (Math.abs(sourceParams.startTimeSeconds - clip.startTimeSeconds) > 0.001 || Math.abs(sourceParams.endTimeSeconds - clip.endTimeSeconds) > 0.001) {
+    throw new Error("The clip range changed after this render. Render the updated clip before creating platform exports.");
+  }
+  const requestHash = renderSpecHash({ sourceRenderJobId: renderJob.id, input: { ...input, platforms: [...platforms].sort() } });
   // Every destination is encoded from the original media with its own framing
   // and caption choice. Never try to remove burned text from a finished MP4.
   return prisma.$transaction(async (tx) => {
+    // A lost POST response must not create duplicate packs or repeat paid copy.
+    // Lock only this request for the short database preparation transaction.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`platform-pack:${requestHash}`}, 0))`;
+    const reusable = await tx.platformExportPack.findFirst({ where: { clipSuggestionId: clip.id,
+      exports: { some: { exportSettings: { path: ["requestHash"], equals: requestHash } } } },
+      orderBy: { createdAt: "desc" }, include: { exports: { include: { renderJob: { select: { progress: true } } } }, clipSuggestion: true } });
+    if (reusable && reusable.exports.length === platforms.length && reusable.exports.every(item =>
+      item.status !== "failed" && item.status !== "cancelled" && (item.status !== "completed" || Boolean(item.outputPath && fileExists(item.outputPath))))) return reusable;
     const exports = [];
     for (const platform of platforms) {
       const copyOverride = input.copyOverrides?.[platform];
+      const finished = reusable?.exports.find(item => item.platform === platform && item.status === "completed" && item.outputPath && fileExists(item.outputPath));
+      if (finished) {
+        exports.push({ clipSuggestionId: clip.id, streamSessionId: clip.streamSessionId, platform,
+          renderJobId: finished.renderJobId, presetName: finished.presetName, status: "completed", progress: 100,
+          outputPath: finished.outputPath, thumbnailPath: finished.thumbnailPath, width: finished.width, height: finished.height,
+          durationSeconds: finished.durationSeconds, fileSizeBytes: finished.fileSizeBytes, completedAt: finished.completedAt,
+          ...copyData(copyOverride || storedCopyData(finished)), exportSettings: toJsonValue(finished.exportSettings),
+          validationWarnings: toJsonValue(finished.validationWarnings) });
+        continue;
+      }
       const style = input.channelPreset?.preset;
       const captions = input.captionOptions?.[platform] ?? style?.captionsEnabled;
       const settings = platformSettings(platform, {
@@ -267,7 +292,7 @@ export async function createPlatformExportPack(
         platform,
         presetName: PLATFORM_PRESETS[platform].name,
         ...(copyOverride ? copyData(copyOverride) : {}),
-        exportSettings: toJsonValue({ ...settings, ...(input.channelPreset ? { channelPresetAccountId: input.channelPreset.accountId, channelPresetHash: renderSpecHash(input.channelPreset.preset) } : {}) }),
+        exportSettings: toJsonValue({ ...settings, requestHash, sourceRenderJobId: renderJob.id, ...(input.channelPreset ? { channelPresetAccountId: input.channelPreset.accountId, channelPresetHash: renderSpecHash(input.channelPreset.preset) } : {}) }),
       });
     }
     return tx.platformExportPack.create({

@@ -42,6 +42,7 @@ import {
   LIVE_NOW_SUGGESTION_CAP,
   readAgentWizardState,
   resolveAgentDisplayStep,
+  showAgentClipResults,
   type AgentWizardState,
 } from "@/lib/agentWizard";
 import {
@@ -161,6 +162,9 @@ export function AgentWorkspace({
     readCaptionAppearancePreference
   );
   const sourceStarted = useRef(false);
+  const sourceRequestSequence = useRef(0);
+  const [sourceRetry, setSourceRetry] = useState(0);
+  const [transcriptionRetry, setTranscriptionRetry] = useState(0);
   const transcribeInFlight = useRef(false);
   const suggestStarted = useRef(false);
   const rollingInFlight = useRef(false);
@@ -253,6 +257,7 @@ export function AgentWorkspace({
   useEffect(() => {
     if (sourceStarted.current) return;
     sourceStarted.current = true;
+    const sequence = ++sourceRequestSequence.current;
     setSourceDownloading(true);
     const abort = new AbortController();
     const timeout = window.setTimeout(
@@ -268,6 +273,7 @@ export function AgentWorkspace({
       signal: abort.signal,
     })
       .then(({ ok, data }) => {
+        if (sequence !== sourceRequestSequence.current) return;
         if (!ok) {
           setSourceError(
             data.error
@@ -287,9 +293,10 @@ export function AgentWorkspace({
         void loadSession().catch(() => {});
       })
       .catch((err) => {
+        if (sequence !== sourceRequestSequence.current) return;
         if (err instanceof DOMException && err.name === "AbortError") {
           setSourceError(
-            "Source download is taking too long. Refresh to retry, or try a shorter clip of the stream."
+            "The source request lost its connection or took too long. Retry source download to reuse any media already captured."
           );
           return;
         }
@@ -301,9 +308,9 @@ export function AgentWorkspace({
       })
       .finally(() => {
         window.clearTimeout(timeout);
-        setSourceDownloading(false);
+        if (sequence === sourceRequestSequence.current) setSourceDownloading(false);
       });
-  }, [sessionId, loadSession]);
+  }, [sessionId, loadSession, sourceRetry]);
 
   const isLive =
     session?.liveStatus === "live" || session?.liveStatus === "upcoming";
@@ -592,7 +599,7 @@ export function AgentWorkspace({
       cancelled = true;
       clearInterval(id);
     };
-  }, [sessionId, session?.id, transcriptionBehind]);
+  }, [sessionId, session?.id, transcriptionBehind, transcriptionRetry]);
 
   // Observe committed transcript chunks while the longer POST request is still
   // transcribing. This keeps time and percentage moving instead of updating in bursts.
@@ -730,6 +737,30 @@ export function AgentWorkspace({
     runSuggest,
     persistWizard,
   ]);
+
+  useEffect(() => {
+    if (!suggesting && !getMoreLoading) return;
+    const controller = new AbortController(); let inFlight = false;
+    const poll = async () => {
+      if (inFlight) return; inFlight = true;
+      try {
+        const { ok, data } = await fetchJson<{ clips?: ClipSuggestionData[] }>(`/api/sessions/${sessionId}/clips`, { signal: controller.signal });
+        if (ok && data.clips && !controller.signal.aborted) setClips(current => mergeClipSuggestions(current, data.clips!));
+      } catch { /* The generation and its persisted results survive a read failure. */ }
+      finally { inFlight = false; }
+    };
+    void poll(); const timer = window.setInterval(() => void poll(), 1500);
+    return () => { controller.abort(); window.clearInterval(timer); };
+  }, [suggesting, getMoreLoading, sessionId]);
+
+  function retryPreparation() {
+    if (sourceError) { sourceStarted.current = false; setSourceError(null); setSourceRetry(value => value + 1); return; }
+    if (transcriptionError) { setTranscriptionError(null); setTranscriptionStatus("Resuming transcription from saved progress…"); setTranscriptionRetry(value => value + 1); return; }
+    suggestStarted.current = false; setSuggestionError(null);
+    void persistWizard({ suggestRequested: false });
+    void runSuggest({ throughSeconds: transcribedSeconds });
+  }
+  const recoveryLabel = sourceError ? "Retry source download" : transcriptionError ? "Retry transcription" : "Retry finding clips";
 
   // Live mode treats provider failures as transient and retries the same wave.
   useEffect(() => {
@@ -1115,6 +1146,7 @@ export function AgentWorkspace({
             (findingClips ||
               awaitingSuggestRetry ||
               !transcriptReady ||
+              Boolean(sourceError) ||
               Boolean(transcriptionError) ||
               Boolean(suggestionError) ||
               suggesting) &&
@@ -1133,31 +1165,21 @@ export function AgentWorkspace({
                 sourceDownloading={sourceDownloading && recordedSeconds <= 0}
                 startedAt={prepareStartedAt}
               />
-              {!suggesting && (transcriptionError || suggestionError) && (
+              {!suggesting && !sourceDownloading && (sourceError || transcriptionError || suggestionError) && (
                 <Button
                   type="button"
-                  onClick={() => {
-                    suggestStarted.current = false;
-                    setTranscriptionError(null);
-                    setSuggestionError(null);
-                    void persistWizard({ suggestRequested: false });
-                    void runSuggest({ throughSeconds: transcribedSeconds });
-                  }}
+                  onClick={retryPreparation}
                 >
-                  Retry finding clips
+                  {recoveryLabel}
                 </Button>
               )}
             </div>
           )}
 
-          {displayStep === "pick" &&
-            !findingClips &&
-            !suggesting &&
-            (transcriptReady ||
-              visibleClips.length > 0 ||
-              wizard.suggestRequested) &&
-            !(wizard.cadence === "after_stream" && !streamEnded) && (
+          {showAgentClipResults({ step: displayStep, clipCount: visibleClips.length, finding: findingClips, suggesting, transcriptReady, suggestRequested: wizard.suggestRequested, waitingForStreamEnd: wizard.cadence === "after_stream" && !streamEnded }) && (
             <div className="space-y-4">
+              {(sourceError || transcriptionError || suggestionError) && <div role="status" className="flex flex-wrap items-center justify-between gap-3 rounded border border-orange-300/30 bg-orange-300/5 p-3 text-xs text-orange-200"><p>{sourceError || transcriptionError || suggestionError} Your existing clips and edits are preserved.</p><Button disabled={suggesting || sourceDownloading} onClick={retryPreparation}>{recoveryLabel}</Button></div>}
+              {(suggesting || getMoreLoading || transcriptionBehind) && <p role="status" className="text-xs text-[var(--color-muted)]">You can open these clips now. {suggesting || getMoreLoading ? "More moments are being prepared in the background." : "The rest of the transcript is still processing."}</p>}
               {newClipNotice && (
                 <p className="rounded border border-[#65d8c1]/30 bg-[#65d8c1]/10 px-3 py-2 text-xs text-[#8ee9d5]">
                   New clip suggestion
@@ -1539,13 +1561,6 @@ function buildVerticalSelection(
   };
 }
 
-const FINDING_CLIP_TIPS = [
-  "Scoring punchy moments…",
-  "Ranking by clip-worthiness…",
-  "Picking titles and thumbnails…",
-  "Almost there…",
-] as const;
-
 function TranscriptionProgressCard({
   transcribedSeconds,
   recordedSeconds,
@@ -1572,8 +1587,8 @@ function TranscriptionProgressCard({
       : "Preparing your video";
   const detail = finding
     ? recordedSeconds > 0
-      ? `Transcript ready · scoring moments from ${formatSeconds(recordedSeconds)}`
-      : "Scoring punchy moments…"
+      ? `Finding complete moments in ${formatSeconds(transcribedSeconds)} of transcribed video`
+      : "Finding complete moments and writing their titles…"
     : downloading
       ? "Fetching a lightweight copy for transcription. Long VODs can take a few minutes…"
       : `${formatSeconds(transcribedSeconds)} of ${formatSeconds(recordedSeconds)} ready`;
@@ -1584,17 +1599,7 @@ function TranscriptionProgressCard({
         title={title}
         detail={detail}
         progress={finding || downloading ? null : progressPct}
-        stages={
-          finding
-            ? FINDING_CLIP_TIPS
-            : downloading
-              ? [
-                  "Connecting to the stream host…",
-                  "Downloading video and audio…",
-                  "Almost ready to transcribe…",
-                ]
-              : []
-        }
+        stages={[]}
         resetKey={`${phase}-${downloading ? "dl" : "tx"}`}
         startedAt={startedAt}
       />

@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { getRenderJob, failRenderJob } from "@/services/renderService";
-import { serveStorageFile } from "@/lib/storage";
+import { serveStorageFile, serveStorageFileInline } from "@/lib/storage";
 import { errorResponse } from "@/lib/utils";
 import { inspectDeliverableVideo } from "@/services/deliverableVideoService";
 import { videoDownloadFilename } from "@/lib/downloadFilename";
@@ -37,6 +37,7 @@ export async function GET(
       return errorResponse(message, inspection.sizeBytes === 0 ? 404 : 409);
     }
 
+    if (request.nextUrl.searchParams.get("inline") === "1") return serveStorageFileInline(job.outputPath, request);
     return serveStorageFile(
       job.outputPath,
       videoDownloadFilename(

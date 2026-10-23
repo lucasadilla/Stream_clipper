@@ -1,3 +1,4 @@
+import { operationKey, rememberedOperation, rememberOperation, operationDelay } from "@/lib/clientOperationRecovery";
 import { triggerFileDownload } from "@/lib/clientDownload";
 import { videoDownloadFilename } from "@/lib/downloadFilename";
 import { clipDownloadUrl, renderJobDownloadUrl } from "@/lib/downloadUrls";
@@ -70,6 +71,7 @@ export async function pollRenderJob(
   const started = Date.now();
   const timeoutMs = 30 * 60 * 1000;
   let consecutiveErrors = 0;
+  let lastSuccess = Date.now();
 
   while (Date.now() - started < timeoutMs) {
     if (signal?.aborted) throw new RenderAbortedError();
@@ -77,7 +79,7 @@ export async function pollRenderJob(
     let status = "queued";
     let progress = 0;
     try {
-      const res = await fetch(`/api/render-jobs/${jobId}`, { signal });
+      const res = await fetch(`/api/render-jobs/${jobId}`, { cache: "no-store", signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000) });
       const data = (await res.json()) as {
         job?: {
           status: string;
@@ -89,11 +91,13 @@ export async function pollRenderJob(
         };
         error?: string;
       };
+      if ([401, 403, 404].includes(res.status)) throw new RenderJobFailedError(data.error || "This render is no longer accessible. Reopen the clip to try again.");
       if (!res.ok || !data.job) {
         throw new Error(data.error ?? "Failed to poll render job");
       }
 
       consecutiveErrors = 0;
+      lastSuccess = Date.now();
       status = data.job.status;
       progress = data.job.progress;
 
@@ -110,45 +114,34 @@ export async function pollRenderJob(
           qualityReview: data.job.qualityReview ?? null,
         };
       }
-      if (status === "failed") {
+      if (status === "failed" || status === "cancelled") {
         throw new RenderJobFailedError(
           data.job.errorMessage ?? "Render failed"
         );
       }
     } catch (err) {
-      if (isAbortError(err) || signal?.aborted) throw new RenderAbortedError();
+      if (err instanceof RenderAbortedError || signal?.aborted) throw new RenderAbortedError();
       // A failed job is a final server result, not a temporary polling error.
       // Retrying it used to reset the retry counter on every successful GET,
       // leaving the UI polling forever after the worker had already failed.
       if (err instanceof RenderJobFailedError) throw err;
       consecutiveErrors += 1;
       // Dev recompile / brief network blips should not kill a long encode.
-      if (consecutiveErrors >= 8) throw err;
+      onProgress?.({ progress, status: "processing", stage: "reconnecting" });
+      if (Date.now() - lastSuccess >= 2 * 60_000) throw new Error("Connection interrupted. Your render is saved on the server. Retry to resume the same job.");
     }
 
     // Faster while queued / early progress; ease off during long encodes.
     const delayMs =
       consecutiveErrors > 0
-        ? 1200
+        ? Math.min(15_000, 1200 * 2 ** Math.min(4, consecutiveErrors - 1))
         : status === "queued" || progress < 55
           ? 350
           : 900;
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(resolve, delayMs);
-      if (!signal) return;
-      const onAbort = () => {
-        clearTimeout(timer);
-        reject(new RenderAbortedError());
-      };
-      if (signal.aborted) {
-        onAbort();
-        return;
-      }
-      signal.addEventListener("abort", onAbort, { once: true });
-    });
+    await operationDelay(delayMs, signal).catch(() => { throw new RenderAbortedError(); });
   }
 
-  throw new Error("Timed out waiting for render");
+  throw new Error("This render is still saved on the server. Reopen the clip and retry to resume checking its progress.");
 }
 
 export async function renderClip(
@@ -161,50 +154,45 @@ export async function renderClip(
   editorState?: EditorState,
   signal?: AbortSignal,
   verticalLayout?: unknown,
-  branding?: import("@/lib/social/channelPreset").ChannelBranding
+  branding?: import("@/lib/social/channelPreset").ChannelBranding,
+  expectedRange?: { startTimeSeconds: number; endTimeSeconds: number }
 ) {
   if (signal?.aborted) throw new RenderAbortedError();
   onProgress?.({ progress: 5, status: "queued" });
 
+  const requestBody = { includeCaptions, format, captionAppearance, branding, captionCues, editorState,
+    verticalLayout: format === "vertical" ? verticalLayout : undefined, expectedRange };
+  // A range is required for browser recovery, so an edited trim cannot resume an older cut.
+  const key = expectedRange ? await operationKey("render", { clipId, ...requestBody }) : null;
+  let jobId = rememberedOperation(key);
+  if (jobId) {
+    onProgress?.({ progress: 0, status: "processing", stage: "resuming" });
+    try {
+      const result = await pollRenderJob(jobId, onProgress, signal);
+      return { jobId, ...result };
+    } catch (error) {
+      if (!(error instanceof RenderJobFailedError)) throw error;
+      rememberOperation(key, null); jobId = null;
+    }
+  }
   let res: Response;
   try {
-    res = await fetch(`/api/clips/${clipId}/render`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        includeCaptions,
-        format,
-        captionAppearance,
-        branding,
-        captionCues,
-        editorState,
-        verticalLayout: format === "vertical" ? verticalLayout : undefined,
-      }),
-      signal,
-    });
+    res = await fetch(`/api/clips/${clipId}/render`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(requestBody), signal });
   } catch (err) {
     if (isAbortError(err) || signal?.aborted) throw new RenderAbortedError();
     throw err;
   }
-  const data = (await res.json()) as {
-    jobId?: string;
-    downloadUrl?: string;
-    status?: string;
-    error?: string;
-  };
-
-  if (!res.ok) {
-    throw new Error(data.error ?? "Render failed");
-  }
-
-  const jobId = data.jobId!;
+  const data = await res.json() as { jobId?: string; error?: string; status?: string };
+  if (!res.ok || !data.jobId) throw new Error(data.error || "Could not start the render. Your edits are saved; try again.");
+  jobId = data.jobId;
+  rememberOperation(key, jobId);
   onProgress?.({ progress: 10, status: data.status ?? "queued" });
 
   const polled = await pollRenderJob(jobId, onProgress, signal);
 
   return {
     jobId,
-    downloadUrl: polled.downloadUrl ?? data.downloadUrl ?? clipDownloadUrl(clipId),
+    downloadUrl: polled.downloadUrl,
     qualityReview: polled.qualityReview ?? null,
   };
 }
