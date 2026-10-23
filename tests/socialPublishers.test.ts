@@ -92,6 +92,25 @@ describe("X API v2", () => {
 });
 
 describe("Meta publishing", () => {
+  it("validates the professional account returned by a direct Instagram token", async () => {
+    vi.stubEnv("INSTAGRAM_CLIENT_ID", "direct"); vi.stubEnv("INSTAGRAM_CLIENT_SECRET", "secret");
+    const direct = { ...ctx, accountMetadata: { authType: "instagram_login", igUserId: "1234" } };
+    http.mockResolvedValueOnce(json({ data: [{ id: "app-scoped", user_id: "1234", username: "creator" }] }));
+    expect(await instagramPublisher.validateConnection(direct)).toMatchObject({ ok: true, username: "@creator" });
+    http.mockResolvedValueOnce(json({ user_id: "another-account", username: "other" }));
+    expect(await instagramPublisher.validateConnection(direct)).toMatchObject({ ok: false, needsReauth: true });
+  });
+  it("publishes a directly connected Instagram account through Instagram Graph at every step", async () => {
+    const direct = { ...ctx, accountMetadata: { authType: "instagram_login", igUserId: "1234", pageAccessToken: "stale-page-token" } };
+    http.mockResolvedValueOnce(json({ id: "container" })).mockResolvedValueOnce(json({ status_code: "FINISHED" }))
+      .mockResolvedValueOnce(json({ id: "media" })).mockResolvedValueOnce(json({ permalink: "https://www.instagram.com/reel/direct/" }));
+    expect(await instagramPublisher.publish(direct, request("instagram"))).toMatchObject({ success: true, state: "published" });
+    expect(http.mock.calls.every(([url]) => new URL(String(url)).hostname === "graph.instagram.com")).toBe(true);
+    expect(http.mock.calls[0][1].body.get("access_token")).toBe("test-token");
+    http.mockResolvedValueOnce(json({ permalink: "https://www.instagram.com/reel/direct/" }));
+    expect((await instagramPublisher.getPublishStatus(direct, "media")).state).toBe("published");
+    expect(String(http.mock.calls[4][0])).toContain("graph.instagram.com");
+  });
   it("keeps an Instagram container in processing without a fake permalink", async () => {
     http.mockResolvedValueOnce(json({ id: "container1" })).mockResolvedValueOnce(json({ status_code: "IN_PROGRESS" }));
     const r = request("instagram"); r.settings.instagramFormat = "feed";

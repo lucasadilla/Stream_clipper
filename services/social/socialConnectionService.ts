@@ -49,6 +49,10 @@ import {
 } from "@/services/social/publishers/metaOAuth";
 import { hashOAuthState } from "@/lib/social/oauth";
 import { safeSocialRedirect } from "@/lib/social/publishingPolicy";
+import {
+  buildInstagramAuthUrl, exchangeInstagramCode, fetchDirectInstagramProfile,
+  instagramOAuthConfigured, INSTAGRAM_LOGIN_STATE, refreshInstagramAccessToken,
+} from "@/services/social/publishers/instagramOAuth";
 
 function hashState(state: string) {
   return hashOAuthState(state);
@@ -58,6 +62,7 @@ function oauthConfigured(platform: SocialPlatform): boolean {
   if (platform === "youtube") return youtubeOAuthConfigured();
   if (platform === "x") return xOAuthConfigured();
   if (platform === "tiktok") return tiktokOAuthConfigured();
+  if (platform === "instagram" && instagramOAuthConfigured()) return true;
   if (platform === "instagram" || platform === "facebook") {
     return metaOAuthConfigured();
   }
@@ -160,6 +165,7 @@ export async function beginOAuthConnect(options: {
 
   const state = randomBytes(24).toString("base64url");
   const { verifier, challenge } = createPkcePair();
+  const directInstagram = options.platform === "instagram" && instagramOAuthConfigured();
   await prisma.socialOAuthState.create({
     data: {
       userId: options.userId,
@@ -170,7 +176,7 @@ export async function beginOAuthConnect(options: {
         options.platform === "x" ||
         options.platform === "tiktok"
           ? verifier
-          : null,
+          : directInstagram ? INSTAGRAM_LOGIN_STATE : null,
       redirectAfter: safeSocialRedirect(options.redirectAfter),
       expiresAt: new Date(Date.now() + 10 * 60 * 1000),
     },
@@ -185,6 +191,7 @@ export async function beginOAuthConnect(options: {
   if (options.platform === "tiktok") {
     return { url: buildTikTokAuthUrl({ state, codeChallenge: challenge }) };
   }
+  if (directInstagram) return { url: buildInstagramAuthUrl(state) };
   return {
     url: buildMetaAuthUrl({
       state,
@@ -463,6 +470,27 @@ export async function completeMetaOAuth(options: {
 }): Promise<{ redirectAfter: string; accountIds: string[] }> {
   const record = await consumeOAuthState(options.state, options.platform, options.userId);
 
+  if (options.platform === "instagram" && record.codeVerifier === INSTAGRAM_LOGIN_STATE) {
+    const tokens = await exchangeInstagramCode(options.code);
+    const profile = await fetchDirectInstagramProfile(tokens.accessToken);
+    const existingDefault = await prisma.connectedSocialAccount.findFirst({
+      where: { userId: record.userId, platform: "instagram", isActive: true, isDefault: true },
+    });
+    const details = {
+      displayName: profile.name, username: `@${profile.username}`, avatarUrl: profile.profilePictureUrl,
+      encryptedAccessToken: encryptSecret(tokens.accessToken), encryptedRefreshToken: null,
+      tokenExpiresAt: tokens.expiresAt, grantedScopes: tokens.scope,
+      accountMetadata: { authType: INSTAGRAM_LOGIN_STATE, igUserId: profile.id, username: profile.username },
+      isActive: true, lastValidatedAt: new Date(), connectionError: null,
+    };
+    const account = await prisma.connectedSocialAccount.upsert({
+      where: { userId_platform_platformAccountId: { userId: record.userId, platform: "instagram", platformAccountId: profile.id } },
+      create: { userId: record.userId, platform: "instagram", platformAccountId: profile.id, ...details, isDefault: !existingDefault },
+      update: details,
+    });
+    return { redirectAfter: safeSocialRedirect(record.redirectAfter), accountIds: [account.id] };
+  }
+
   const tokens = await exchangeMetaCode({
     code: options.code,
     platform: options.platform,
@@ -660,6 +688,19 @@ async function loadPublisherContext(accountId: string) {
   }
 
   let accessToken = tokens.accessToken;
+  // Instagram renews its long-lived access token directly, with no refresh token.
+  // Renew while still valid; waiting until expiration makes recovery impossible.
+  if (tokens.platform === "instagram" && tokens.accountMetadata?.authType === INSTAGRAM_LOGIN_STATE && tokensExpireSoon(tokens.expiresAt, 7 * 24 * 60 * 60 * 1000)) {
+    try {
+      const refreshed = await refreshInstagramAccessToken(accessToken);
+      await storeAccountTokens({ accountId, accessToken: refreshed.accessToken, expiresAt: refreshed.expiresAt });
+      accessToken = refreshed.accessToken;
+    } catch {
+      const message = "Your Instagram connection needs to be renewed. Reconnect your account.";
+      await prisma.connectedSocialAccount.update({ where: { id: accountId }, data: { connectionError: message } });
+      throw Object.assign(new Error(message), { code: "needs_reauth" });
+    }
+  }
   if (tokensExpireSoon(tokens.expiresAt) && tokens.refreshToken) {
     if (tokens.platform === "youtube") {
       try {
