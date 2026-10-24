@@ -22,7 +22,7 @@ async function read(url: string, token: string, init?: RequestInit): Promise<Jso
 }
 
 /** Only requests statistics for the stored provider post ID, never an arbitrary URL. */
-export async function fetchPostMetrics(platform: string, id: string, ctx: PublisherContext, postedAt: Date, scopes: string | null, options: { viewsOnly?: boolean } = {}): Promise<PostMetrics> {
+export async function fetchPostMetrics(platform: string, id: string, ctx: PublisherContext, postedAt: Date, scopes: string | null): Promise<PostMetrics> {
   if (!/^[\w-]{1,100}$/.test(id)) throw new Error("This upload doesn't have a published video ID yet.");
   const metrics = emptyPostMetrics(), token = ctx.accessToken;
   if (platform === "youtube") {
@@ -31,7 +31,7 @@ export async function fetchPostMetrics(platform: string, id: string, ctx: Publis
     if (!video) throw new Error("YouTube hasn't returned this video's statistics yet.");
     const stats = obj(video.statistics);
     metrics.views = number(stats.viewCount); metrics.likes = number(stats.likeCount); metrics.comments = number(stats.commentCount);
-    if (!options.viewsOnly && scopes?.includes("yt-analytics.readonly")) {
+    if (scopes?.includes("yt-analytics.readonly")) {
       const params = new URLSearchParams({ ids: "channel==MINE", startDate: postedAt.toISOString().slice(0, 10), endDate: new Date().toISOString().slice(0, 10), metrics: "averageViewDuration,averageViewPercentage,shares", filters: `video==${id}` });
       try {
         const report = await read(`https://youtubeanalytics.googleapis.com/v2/reports?${params}`, token);
@@ -55,11 +55,11 @@ export async function fetchPostMetrics(platform: string, id: string, ctx: Publis
     metrics.note = "TikTok's publishing API does not provide audience retention."; return metrics;
   }
   if (platform === "x") {
-    const recent = !options.viewsOnly && Date.now() - postedAt.getTime() < 29 * 86400000;
+    const recent = Date.now() - postedAt.getTime() < 29 * 86400000;
     const params = new URLSearchParams({ "tweet.fields": "public_metrics,attachments", expansions: "attachments.media_keys", "media.fields": recent ? "type,public_metrics,non_public_metrics" : "type,public_metrics" });
     let data: Json;
     try { data = await read(`https://api.x.com/2/tweets/${id}?${params}`, token); }
-    catch (error) { if (!recent) throw error; params.set("media.fields", "type,public_metrics"); data = await read(`https://api.x.com/2/tweets/${id}?${params}`, token); }
+    catch { params.set("media.fields", "type,public_metrics"); data = await read(`https://api.x.com/2/tweets/${id}?${params}`, token); }
     if (!obj(data.data).id) throw new Error("X hasn't returned this post's statistics.");
     const stats = obj(obj(data.data).public_metrics);
     const keys = obj(obj(data.data).attachments).media_keys;
@@ -73,13 +73,11 @@ export async function fetchPostMetrics(platform: string, id: string, ctx: Publis
   }
   if (platform === "instagram") {
     const graph = instagramGraph(ctx.accountMetadata);
-    if (!options.viewsOnly) {
-      const data = await read(`${graph}/${id}?fields=id,like_count,comments_count`, token);
-      metrics.likes = number(data.like_count); metrics.comments = number(data.comments_count);
-    }
+    const data = await read(`${graph}/${id}?fields=id,like_count,comments_count`, token);
+    metrics.likes = number(data.like_count); metrics.comments = number(data.comments_count);
     // Insights access is optional; its absence must not erase available counts.
     try {
-      const insights = await read(`${graph}/${id}/insights?metric=${options.viewsOnly ? "views" : "views,shares,saved"}`, token);
+      const insights = await read(`${graph}/${id}/insights?metric=views,shares,saved`, token);
       for (const metric of list(insights.data)) {
         const value = number(list(metric.values)[0]?.value);
         if (metric.name === "views") metrics.views = value;

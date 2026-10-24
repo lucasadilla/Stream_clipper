@@ -12,7 +12,6 @@ import { cn } from "@/lib/cn";
 const HERO_HASH = "#clip-now";
 
 const NAV_LINKS = [
-  { href: "/#made-with-clipper", label: "Made with Clipper", hash: "#made-with-clipper" },
   { href: "/#clip-now", label: "Clip now", hash: HERO_HASH },
   { href: "/#features", label: "Features", hash: "#features" },
   { href: "/#how-it-works", label: "Workflow", hash: "#how-it-works" },

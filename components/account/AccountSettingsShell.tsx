@@ -9,7 +9,6 @@ export const ACCOUNT_SETTINGS_TABS = [
   { href: "/settings/autopilot", label: "Autopilot" },
   { href: "/settings/publishing", label: "Publishing" },
   { href: "/settings/channel-presets", label: "Channel presets" },
-  { href: "/settings/showcase", label: "Get featured" },
   { href: "/profile", label: "Profile" },
 ] as const;
 

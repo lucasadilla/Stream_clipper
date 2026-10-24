@@ -9,9 +9,9 @@ import { AnimatedGradient } from "@/components/ui/animated-gradient";
 import { AuroraBackground } from "@/components/ui/aurora-background";
 import { MarketingMarquee } from "@/components/MarketingMarquee";
 import { getPublicPricingPlans } from "@/services/publicPricingService";
-import { LandingShowcase } from "@/components/LandingShowcase";
+import { HeroShorts } from "@/components/HeroShorts";
+import { HeroViewCount } from "@/components/HeroViewCount";
 import { getPublicImpact } from "@/services/publicImpactService";
-import { getPublicShowcase } from "@/services/showcaseService";
 
 export const dynamic = "force-dynamic";
 
@@ -165,7 +165,7 @@ const structuredData = {
 };
 
 export default async function HomePage() {
-  const [pricingPlans, impact, showcase] = await Promise.all([getPublicPricingPlans(), getPublicImpact(), getPublicShowcase()]);
+  const [pricingPlans, impact] = await Promise.all([getPublicPricingPlans(), getPublicImpact()]);
   return (
     <div className="marketing-shell marketing-home overflow-hidden bg-[#020302]">
       <MarketingScrollMotion />
@@ -222,11 +222,11 @@ export default async function HomePage() {
             </div>
           </div>
 
-          <div className="hidden lg:block" aria-hidden="true" />
+          <HeroShorts />
         </div>
+        <div className="relative z-[1] mx-auto max-w-[1440px] px-4 pb-5 sm:px-6 lg:absolute lg:inset-x-0 lg:bottom-5 lg:px-8 lg:pb-0"><HeroViewCount initialImpact={impact} /></div>
       </section>
 
-      <LandingShowcase initialImpact={impact} initialClips={showcase} />
       <MarketingMarquee />
 
       <section

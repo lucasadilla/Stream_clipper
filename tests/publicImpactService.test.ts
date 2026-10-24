@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const m = vi.hoisted(() => ({
   snapshot: { upsert: vi.fn(), updateMany: vi.fn(), findUnique: vi.fn(), findUniqueOrThrow: vi.fn(), update: vi.fn() },
-  metrics: { createMany: vi.fn(), findMany: vi.fn(), update: vi.fn(), aggregate: vi.fn(), count: vi.fn() },
-  jobs: { findMany: vi.fn() }, fetchMetrics: vi.fn(), context: vi.fn(),
+  metrics: { createMany: vi.fn(), findMany: vi.fn(), update: vi.fn() },
+  accounts: { findMany: vi.fn(), findFirst: vi.fn() }, query: vi.fn(), page: vi.fn(), context: vi.fn(),
 }));
-vi.mock("@/lib/db", () => ({ prisma: { publicImpactSnapshot: m.snapshot, publicPostMetric: m.metrics, socialPublishJob: m.jobs } }));
-vi.mock("@/services/social/socialPerformanceService", () => ({ fetchPostMetrics: m.fetchMetrics }));
+vi.mock("@/lib/db", () => ({ prisma: { publicImpactSnapshot: m.snapshot, publicAccountMetric: m.metrics, connectedSocialAccount: m.accounts, $queryRaw: m.query } }));
+vi.mock("@/services/social/accountViewsService", async importOriginal => ({ ...await importOriginal<typeof import("@/services/social/accountViewsService")>(), fetchAccountViewsPage: m.page }));
 vi.mock("@/services/social/socialConnectionService", () => ({ getPublisherContext: m.context }));
 import { getPublicImpact, refreshPublicImpactBatch } from "@/services/publicImpactService";
 const now = new Date("2026-10-23T16:00:00Z"), day = new Date("2026-10-23T00:00:00Z");
@@ -14,47 +14,53 @@ beforeEach(() => {
   m.snapshot.updateMany.mockResolvedValue({ count: 1 });
   m.snapshot.findUniqueOrThrow.mockResolvedValue({ day, phase: "metrics", cursor: null });
   m.metrics.findMany.mockResolvedValue([]); m.context.mockResolvedValue({ accessToken: "secret" });
-  m.metrics.aggregate.mockResolvedValue({ _sum: { views: BigInt(123) }, _count: { id: 1 }, _max: { fetchedAt: now } }); m.metrics.count.mockResolvedValue(2);
+  m.query.mockResolvedValue([{ totalViews: "123", countedAccounts: BigInt(1), knownAccounts: BigInt(2), refreshedAt: now }]);
+  m.accounts.findFirst.mockResolvedValue({ id: "a", platform: "youtube", platformAccountId: "channel", grantedScopes: null });
 });
-describe("daily public view collection", () => {
-  it("makes public reads from the snapshot only, exposing no private identities", async () => {
-    m.snapshot.findUnique.mockResolvedValue({ totalViews: BigInt(123), countedPosts: 1, knownPosts: 2, refreshedAt: now, lockedBy: "private-worker", cursor: "private-post" });
-    expect(await getPublicImpact()).toEqual({ totalViews: "123", countedPosts: 1, knownPosts: 2, refreshedAt: now.toISOString() });
-    expect(m.fetchMetrics).not.toHaveBeenCalled(); expect(m.jobs.findMany).not.toHaveBeenCalled();
+describe("daily connected-account views", () => {
+  it("serves a stored total without querying providers or exposing private identities", async () => {
+    m.snapshot.findUnique.mockResolvedValue({ totalViews: BigInt(123), countedAccounts: 1, knownAccounts: 2, refreshedAt: now, lockedBy: "private", cursor: "account" });
+    expect(await getPublicImpact()).toEqual({ totalViews: "123", countedAccounts: 1, knownAccounts: 2, refreshedAt: now.toISOString() });
+    expect(m.page).not.toHaveBeenCalled(); expect(m.accounts.findMany).not.toHaveBeenCalled();
   });
-  it("does no provider work if another instance has the lease or today is already complete", async () => {
+  it("does no work when today's sweep is complete or another instance holds the lease", async () => {
     m.snapshot.updateMany.mockResolvedValueOnce({ count: 0 });
     expect(await refreshPublicImpactBatch(now)).toBe(false);
-    expect(m.metrics.findMany).not.toHaveBeenCalled(); expect(m.fetchMetrics).not.toHaveBeenCalled();
-    expect(m.snapshot.updateMany.mock.calls[0][0].where.AND[0].OR).toContainEqual({ day: { lt: day } });
+    expect(m.metrics.findMany).not.toHaveBeenCalled();
   });
-  it("discovers only completed owned-provider posts and deduplicates database records", async () => {
+  it("discovers connected accounts, including those with no Clipper publishing jobs", async () => {
     m.snapshot.findUniqueOrThrow.mockResolvedValue({ day, phase: "discover", cursor: "cursor" });
-    m.jobs.findMany.mockResolvedValue([{ id: "j1", connectedSocialAccountId: "a1", platform: "youtube", platformPostId: "p1", completedAt: now, createdAt: now }]);
-    expect(await refreshPublicImpactBatch(now)).toBe(true);
-    expect(m.jobs.findMany.mock.calls[0][0].where).toMatchObject({ status: "completed", platformPostId: { not: null }, connectedSocialAccount: { isActive: true }, id: { gt: "cursor" } });
-    expect(m.metrics.createMany.mock.calls[0][0]).toMatchObject({ skipDuplicates: true, data: [{ platform: "youtube", platformPostId: "p1" }] });
-    expect(m.snapshot.update.mock.calls[0][0].data).toMatchObject({ cursor: "j1", phase: "metrics" });
-    expect(m.fetchMetrics).not.toHaveBeenCalled();
-  });
-  it("preserves the previous count on provider failure and records a real zero on success", async () => {
-    m.metrics.findMany.mockResolvedValue(["failure", "zero"].map(id => ({ id, connectedSocialAccountId: "a", platform: "youtube", platformPostId: id, publishedAt: now, connectedSocialAccount: { grantedScopes: null } })));
-    m.fetchMetrics.mockRejectedValueOnce(new Error("token=secret")); m.fetchMetrics.mockResolvedValueOnce({ views: 0 });
+    m.accounts.findMany.mockResolvedValue([{ id: "a", platform: "youtube", platformAccountId: "channel" }]);
     await refreshPublicImpactBatch(now);
-    expect(m.metrics.update.mock.calls.find(call => call[0].where.id === "failure")?.[0].data).toEqual({ attemptedAt: now });
-    expect(m.metrics.update.mock.calls.find(call => call[0].where.id === "zero")?.[0].data).toMatchObject({ views: BigInt(0), attemptedAt: now });
-    expect(m.fetchMetrics.mock.calls[0].at(-1)).toEqual({ viewsOnly: true });
+    expect(m.accounts.findMany.mock.calls[0][0].where).toEqual({ isActive: true, id: { gt: "cursor" } });
+    expect(m.metrics.createMany.mock.calls[0][0]).toEqual({ skipDuplicates: true, data: [{ platform: "youtube", platformAccountId: "channel" }] });
   });
-  it("publishes one completed sweep, summing latest lifetime counts rather than adding snapshots", async () => {
+  it("persists a partial account scan without replacing the previous published lifetime count", async () => {
+    m.metrics.findMany.mockResolvedValue([{ id: "metric", platform: "tiktok", platformAccountId: "account", scanDay: null }]);
+    m.page.mockResolvedValue({ views: BigInt(17), cursor: "next", seen: ["video"], items: 1 });
     await refreshPublicImpactBatch(now);
-    expect(m.snapshot.update.mock.calls[0][0].data).toMatchObject({ phase: "complete", totalViews: BigInt(123), countedPosts: 1, knownPosts: 2 });
-    expect(m.snapshot.updateMany.mock.calls.at(-1)?.[0]).toMatchObject({ data: { lockedBy: null, lockedUntil: null } });
+    const data = m.metrics.update.mock.calls[0][0].data;
+    expect(data.scanState).toMatchObject({ total: "17", cursor: "next", items: 1 });
+    expect(data.views).toBeUndefined(); expect(data.attemptedAt).toBeUndefined();
   });
-  it("restarts discovery on the next UTC day without resetting the visible total", async () => {
-    m.snapshot.findUniqueOrThrow.mockResolvedValue({ day: new Date("2026-10-22"), phase: "complete", totalViews: BigInt(123) });
-    m.snapshot.update.mockResolvedValue({ day, phase: "discover", cursor: null }); m.jobs.findMany.mockResolvedValue([]);
+  it("resumes the next page and publishes only a completed account sum", async () => {
+    m.metrics.findMany.mockResolvedValue([{ id: "metric", platform: "tiktok", platformAccountId: "account", scanDay: day, scanState: { total: "17", cursor: "next", seen: ["video"], pages: 1, items: 1 } }]);
+    m.page.mockResolvedValue({ views: BigInt(23), cursor: null, seen: ["video", "second"], items: 1 });
     await refreshPublicImpactBatch(now);
-    expect(m.snapshot.update.mock.calls[0][0].data).toEqual({ day, phase: "discover", cursor: null });
-    expect(m.metrics.aggregate).not.toHaveBeenCalled();
+    expect(m.page.mock.calls[0][2]).toMatchObject({ total: "17", cursor: "next" });
+    expect(m.metrics.update.mock.calls[0][0].data).toMatchObject({ views: BigInt(40), attemptedAt: now, scanState: {} });
+  });
+  it("retains a complete count on permission errors, and never adds an error as zero", async () => {
+    m.metrics.findMany.mockResolvedValue([{ id: "metric", platform: "youtube", platformAccountId: "channel" }]);
+    m.page.mockRejectedValue(new Error("permission error containing secret"));
+    await refreshPublicImpactBatch(now);
+    expect(m.metrics.update.mock.calls[0][0].data).toEqual({ attemptedAt: now, scanState: {} });
+  });
+  it("aggregates only active provider identities once, replacing rather than incrementing the snapshot", async () => {
+    await refreshPublicImpactBatch(now);
+    expect(String(m.query.mock.calls[0][0])).toContain('EXISTS');
+    expect(String(m.query.mock.calls[0][0])).toContain('"isActive" = true');
+    expect(m.snapshot.update.mock.calls[0][0].data).toMatchObject({ phase: "complete", totalViews: BigInt(123), countedAccounts: 1, knownAccounts: 2 });
+    expect(m.snapshot.updateMany.mock.calls.at(-1)?.[0].data).toEqual({ lockedBy: null, lockedUntil: null });
   });
 });
