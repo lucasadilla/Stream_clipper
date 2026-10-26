@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { preserveSessionDeliverables } from "@/services/clipLibraryArchiveService";
 import {
   deleteSessionStorage,
   formatBytes,
@@ -160,7 +161,9 @@ export async function clearSessionStorage(
   if (!exists) throw new Error("Session not found");
 
   await prepareSessionForDeletion(streamSessionId);
+  await preserveSessionDeliverables(streamSessionId);
   const storage = await deleteSessionStorage(streamSessionId);
+  if (storage.fullyRemoved) await prisma.sourceMedia.updateMany({ where: { streamSessionId }, data: { sizeBytes: BigInt(0) } });
 
   return {
     freedBytes: storage.freedBytes,
@@ -171,8 +174,8 @@ export async function clearSessionStorage(
 }
 
 /**
- * Remove session from DB always. Files are best-effort; locked folders are
- * quarantined under storage/.orphaned/ instead of blocking delete.
+ * Remove raw workspace files. Retain metadata referenced by saved clips;
+ * otherwise delete the session. Locked folders are quarantined under .orphaned/.
  */
 export async function deleteStreamSession(
   streamSessionId: string
@@ -184,10 +187,15 @@ export async function deleteStreamSession(
   if (!session) throw new Error("Session not found");
 
   await prepareSessionForDeletion(streamSessionId);
+  await preserveSessionDeliverables(streamSessionId);
 
   const storage = await deleteSessionStorage(streamSessionId);
+  if (storage.fullyRemoved) await prisma.sourceMedia.updateMany({ where: { streamSessionId }, data: { sizeBytes: BigInt(0) } });
 
-  await prisma.streamSession.delete({ where: { id: streamSessionId } });
+  const retained = await prisma.clipLibraryItem.count({ where: { sourceSessionId: streamSessionId, purgedAt: null } });
+  if (retained) {
+    await prisma.streamSession.update({ where: { id: streamSessionId }, data: { liveStatus: REPLACED_SESSION_STATUS, activeLiveChatId: null, concurrentViewers: null } });
+  } else await prisma.streamSession.delete({ where: { id: streamSessionId } });
 
   return {
     freedBytes: storage.freedBytes,
@@ -219,7 +227,9 @@ export async function retireStreamSession(
   }
 
   await prepareSessionForDeletion(streamSessionId);
+  await preserveSessionDeliverables(streamSessionId);
   const storage = await deleteSessionStorage(streamSessionId);
+  if (storage.fullyRemoved) await prisma.sourceMedia.updateMany({ where: { streamSessionId }, data: { sizeBytes: BigInt(0) } });
 
   await prisma.streamSession.update({
     where: { id: streamSessionId },

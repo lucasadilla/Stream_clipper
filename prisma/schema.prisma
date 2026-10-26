@@ -50,6 +50,7 @@ model StreamSession {
   chatTracking        ChatTrackingState?
   liveRecording       LiveRecordingState?
   billingAccount      BillingAccount?      @relation(fields: [billingAccountId], references: [id], onDelete: SetNull)
+  libraryClips        ClipLibraryItem[]
 
   @@index([billingAccountId])
   @@index([youtubeVideoId])
@@ -77,6 +78,7 @@ model BillingAccount {
 
   user            User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
   streamSessions  StreamSession[]
+  libraryClips    ClipLibraryItem[]
   creatorBetaCode CreatorBetaCode? @relation("CreatorBetaCodeRedemption")
 
   @@index([status])
@@ -411,6 +413,7 @@ model RenderJob {
   completedAt      DateTime?
   logs             Json?
   qualityReview    Json?
+  libraryState     String    @default("pending") // pending | saved | ignored | missing
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
@@ -422,6 +425,7 @@ model RenderJob {
   @@index([streamSessionId, status])
   @@index([status, lockedAt])
   @@index([status, createdAt])
+  @@index([status, libraryState, updatedAt])
 }
 
 model PlatformExportPack {
@@ -469,6 +473,7 @@ model PlatformExport {
   height             Int?
   durationSeconds    Float?
   fileSizeBytes      BigInt?
+  libraryState       String   @default("pending")
   errorMessage       String?   @db.Text
   lockedAt           DateTime?
   lockedBy           String?
@@ -484,6 +489,7 @@ model PlatformExport {
   socialPublishJobs SocialPublishJob[]
 
   @@unique([exportPackId, platform])
+  @@index([status, libraryState, updatedAt])
   @@index([status, createdAt])
   @@index([clipSuggestionId, createdAt])
   @@index([streamSessionId, status])
@@ -566,6 +572,7 @@ model SocialPublishGroup {
   id               String    @id @default(cuid())
   userId           String
   clipSuggestionId String
+  libraryItemId    String?
   status           String    @default("draft") // draft | awaiting_review | scheduled | publishing | partially_completed | completed | failed | cancelled
   scheduledFor     DateTime?
   createdAt        DateTime  @default(now())
@@ -573,9 +580,11 @@ model SocialPublishGroup {
 
   user User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   jobs SocialPublishJob[]
+  libraryItem ClipLibraryItem? @relation(fields: [libraryItemId], references: [id], onDelete: SetNull)
 
   @@index([userId, createdAt])
   @@index([clipSuggestionId, createdAt])
+  @@index([libraryItemId])
   @@index([status, scheduledFor])
 }
 
@@ -633,6 +642,57 @@ model SocialPublishEvent {
   publishJob SocialPublishJob @relation(fields: [publishJobId], references: [id], onDelete: Cascade)
 
   @@index([publishJobId, createdAt])
+}
+
+/// Finished videos survive workspace replacement and source retention cleanup.
+model ClipLibraryItem {
+  id               String    @id
+  billingAccountId String
+  sourceSessionId  String?
+  sourceClipId     String?
+  title            String
+  postingCaption   String?   @db.Text
+  sourceTitle      String?
+  sourceUrl        String?
+  sourcePlatform   String
+  durationSeconds  Float
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  deletedAt        DateTime?
+  purgedAt         DateTime?
+  lockedBy         String?
+  lockedUntil      DateTime?
+
+  billingAccount BillingAccount @relation(fields: [billingAccountId], references: [id], onDelete: Cascade)
+  sourceSession  StreamSession? @relation(fields: [sourceSessionId], references: [id], onDelete: SetNull)
+  assets         ClipLibraryAsset[]
+  publishGroups  SocialPublishGroup[]
+
+  @@index([billingAccountId, deletedAt, createdAt])
+  @@index([deletedAt, purgedAt])
+  @@index([sourceSessionId])
+}
+
+model ClipLibraryAsset {
+  id               String   @id
+  itemId           String
+  originKind       String   // render | platform
+  originId         String
+  platform         String   // general or the actual saved platform format
+  includeCaptions  Boolean
+  status           String   @default("saving") // saving | ready | missing
+  outputPath       String?
+  thumbnailPath    String?
+  fileSizeBytes    BigInt?
+  width            Int?
+  height           Int?
+  durationSeconds  Float?
+  createdAt        DateTime @default(now())
+  savedAt          DateTime?
+
+  item ClipLibraryItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  @@unique([originKind, originId])
+  @@index([itemId, savedAt])
 }
 
 /// Public channel catalog. Pins and source mappings survive daily metadata refreshes.

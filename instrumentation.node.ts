@@ -110,5 +110,7 @@ export async function startBackgroundWorker(): Promise<void> {
     startPublicImpactPoller();
     const { startFeaturedShortsPoller } = await import("@/services/landingFeaturedService");
     startFeaturedShortsPoller();
+    const { startClipLibraryPoller } = await import("@/services/clipLibraryArchiveService");
+    startClipLibraryPoller();
   }
 }
