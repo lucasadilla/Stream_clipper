@@ -1,0 +1,31 @@
+# Hero Shorts and connected-account views
+
+The existing landing-page design is preserved. Three real public Shorts from `@StreamClipperAdmin` occupy the existing right-hand hero column. The heading, copy, fonts, particles, navigation, and following sections retain their original structure. There is no separate showcase, illustration, category filter, or creator submission workflow.
+
+The curated videos are in `lib/heroShorts.ts`. Their public Shorts links and original portrait thumbnails were checked directly on the channel. Images load first; selecting a clip mounts its YouTube privacy-enhanced player. Only one player is mounted at a time. Closing it or pressing Escape restores the poster. No video downloads, re-encoding, or AI calls are involved.
+
+The hero now adds small daily view counts beneath each Short, an **Original → Short** comparison, and **Try a sample** beside the URL input. The public Ben Affleck comparison uses the original interview `HzraLR2VkNM` at 22:06, verified against its public timestamped transcript; the excerpt includes lead-in context rather than claiming frame-synchronized playback. Switching formats unmounts the previous player. The dialog traps focus natively, supports Escape, and restores focus when closed.
+
+`/sample` is an isolated prepared workspace using the real 70-second featured Short. Visitors can adjust a bounded in/out selection, choose preset sections, preview the selected range and compare the original. It has no session-creation, transcription, render or publishing calls. Existing captions are explicitly identified as burned in; editing, export and publishing require a user's own video. It never replaces the visitor's actual session.
+
+Signed-in visitors also see **Continue your last session**. Only a session ID is remembered locally. `/api/sessions/recent` revalidates it against the signed-in user's billing account, excludes replaced sessions, and falls back to their latest workspace. It does not calculate disk usage or include private media paths. Responses are private and never cached.
+
+## Featured video refresh and pinning
+
+`LandingFeaturedVideo` stores the public channel catalog, actual views, eligible status, optional original-video mapping, and up to three pinned positions. `LandingFeatureRefresh` provides a multi-instance lease and cadence. The worker checks hourly and refreshes at most once per 24 hours, with a one-hour retry after failure. Requests use the existing server-side `YOUTUBE_API_KEY`, or an existing YouTube read-only OAuth connection; no new credentials or expanded scopes are required. A refresh reads the latest 50 channel uploads plus up to 200 cached records and all pins, batching video metadata requests. It uses no YouTube search calls, AI, proxy bandwidth, video downloads or processing. Missing statistics preserve the last known views. API failures preserve the prior catalog; successful refreshes hide removed/private/non-embeddable videos. Public page visits only read stored data.
+
+YouTube's public metadata does not directly identify every upload as a Short. Auto eligibility therefore requires a verified original featured ID, an explicit #shorts title/description/tag, or a completed Clipper publish with a vertical export. Other uploads of up to 180 seconds appear in the owner editor for confirmation; duration alone never qualifies a video. One unpinned position favors the newest eligible clip; the remaining positions use top view counts. All picks are limited to `UC7nH5awEsodH0wuAAbWN8kw`.
+
+`/settings/landing` lets the owner pin/unpin positions, enable/disable automatic candidates and attach the actual original YouTube ID and moment. The hero's management link is only visible to an authorized owner. Access requires an active connection to @StreamClipperAdmin, or the optional server-only `LANDING_EDITOR_USER_IDS` comma-separated allowlist of Auth.js user IDs. Every editor request rechecks authorization; writes require same-origin JSON, validated IDs/ranges, distinct pins and an atomic pin replacement. The featured channel still needs connecting for channel-owner editing and inclusion in the account-wide counter. Featuring its public videos is independent of that connection.
+
+The hero displays one small counter: **Views produced with Stream Clipper: [total]**, followed by **Updated daily**. As requested, its scope is the total views of **connected accounts**, including content posted outside Clipper. It is not a claim that every counted video was created in Clipper. The tooltip identifies that scope and last refresh; unknown counts are not fabricated.
+
+## Daily collector
+
+The independent worker timer sweeps once per UTC day. A durable lease, heartbeat, account cursor, and per-account pagination resume after restarts. Provider account IDs are deduplicated across Clipper users. Only active connections contribute to the next completed snapshot. The previous total remains visible throughout a refresh or temporary provider outage.
+
+YouTube uses the channel's lifetime `statistics.viewCount` in one request. TikTok sums all public videos through `video.list`. Instagram walks media and reads `views` insights. Facebook walks Page videos and reads lifetime video views. X walks the owned post timeline, deduplicates media, and uses video views; it refuses to present a truncated timeline as a lifetime total. All pagination is built against fixed provider hosts; provider `next` URLs are not fetched.
+
+Non-YouTube providers need analytics permissions already granted by the account owner, and platform access/billing where required. A missing permission, incomplete history, or unavailable metric retains that account's last complete count rather than replacing it with a partial sum or zero. Accounts without a complete available count are excluded. No new OAuth scopes are silently requested. Views from different platforms are not unique viewers.
+
+Public requests read stored aggregate values only. They never query providers, reveal tokens/account identities, or trigger AI. Counter metadata and video playback stay separate. Additive Prisma tables: `PublicAccountMetric`, `PublicImpactSnapshot`; production's existing startup applies them with `prisma db push`.

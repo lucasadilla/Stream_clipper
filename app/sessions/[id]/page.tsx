@@ -1,4 +1,5 @@
 import { SessionPageClient } from "./SessionPageClient";
+import { RememberSession } from "@/components/RememberSession";
 
 export default async function SessionPage({
   params,
@@ -6,5 +7,5 @@ export default async function SessionPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  return <SessionPageClient sessionId={id} />;
+  return <><RememberSession id={id} /><SessionPageClient sessionId={id} /></>;
 }

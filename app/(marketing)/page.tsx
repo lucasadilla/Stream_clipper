@@ -9,6 +9,13 @@ import { AnimatedGradient } from "@/components/ui/animated-gradient";
 import { AuroraBackground } from "@/components/ui/aurora-background";
 import { MarketingMarquee } from "@/components/MarketingMarquee";
 import { getPublicPricingPlans } from "@/services/publicPricingService";
+import { HeroShorts } from "@/components/HeroShorts";
+import { HeroViewCount } from "@/components/HeroViewCount";
+import { getPublicImpact } from "@/services/publicImpactService";
+import { getFeaturedShorts } from "@/services/landingFeaturedService";
+import { LandingQuickLinks } from "@/components/LandingQuickLinks";
+
+export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   alternates: { canonical: "https://streamclipper.stream/" },
@@ -160,7 +167,7 @@ const structuredData = {
 };
 
 export default async function HomePage() {
-  const pricingPlans = await getPublicPricingPlans();
+  const [pricingPlans, impact, shorts] = await Promise.all([getPublicPricingPlans(), getPublicImpact(), getFeaturedShorts()]);
   return (
     <div className="marketing-shell marketing-home overflow-hidden bg-[#020302]">
       <MarketingScrollMotion />
@@ -202,6 +209,7 @@ export default async function HomePage() {
 
             <div id="analyze" data-scroll-reveal="hero" className="mt-7 max-w-2xl">
               <StreamUrlInput />
+              <LandingQuickLinks />
             </div>
 
             <div data-scroll-reveal="hero" className="hero-signal-strip mt-6 grid max-w-2xl grid-cols-1 gap-px overflow-hidden border border-[var(--color-card-border)] bg-[var(--color-card-border)] sm:grid-cols-3">
@@ -217,8 +225,9 @@ export default async function HomePage() {
             </div>
           </div>
 
-          <div className="hidden lg:block" aria-hidden="true" />
+          <HeroShorts shorts={shorts} />
         </div>
+        <div className="relative z-[1] mx-auto max-w-[1440px] px-4 pb-5 sm:px-6 lg:absolute lg:inset-x-0 lg:bottom-5 lg:px-8 lg:pb-0"><HeroViewCount initialImpact={impact} /></div>
       </section>
 
       <MarketingMarquee />

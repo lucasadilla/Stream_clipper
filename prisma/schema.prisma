@@ -635,6 +635,59 @@ model SocialPublishEvent {
   @@index([publishJobId, createdAt])
 }
 
+/// Public channel catalog. Pins and source mappings survive daily metadata refreshes.
+model LandingFeaturedVideo {
+  id                 String   @id
+  title              String
+  poster             String
+  views              BigInt?
+  publishedAt        DateTime
+  durationSeconds    Float
+  eligible           Boolean  @default(false)
+  available          Boolean  @default(true)
+  pinSlot            Int?     @unique
+  sourceVideoId      String?
+  sourceStartSeconds Float?
+  sourceEndSeconds   Float?
+  refreshedAt        DateTime
+}
+
+model LandingFeatureRefresh {
+  id          String    @id
+  attemptedAt DateTime?
+  refreshedAt DateTime?
+  lockedUntil DateTime?
+  lockedBy    String?
+}
+
+/// One complete lifetime count per provider account, independent of source retention.
+model PublicAccountMetric {
+  id                String    @id @default(cuid())
+  platform          String
+  platformAccountId String
+  views             BigInt?
+  attemptedAt       DateTime?
+  fetchedAt         DateTime?
+  scanDay           DateTime?
+  scanState         Json?
+  @@unique([platform, platformAccountId])
+  @@index([attemptedAt])
+}
+
+/// A durable daily sweep; the previous public total remains visible while it runs.
+model PublicImpactSnapshot {
+  id              String    @id
+  day             DateTime
+  phase           String    @default("discover")
+  cursor          String?
+  lockedBy        String?
+  lockedUntil     DateTime?
+  totalViews      BigInt?
+  countedAccounts Int       @default(0)
+  knownAccounts   Int       @default(0)
+  refreshedAt     DateTime?
+}
+
 /// Hands-free live clipping configuration for one creator account.
 model StreamAutomation {
   id                          String    @id @default(cuid())

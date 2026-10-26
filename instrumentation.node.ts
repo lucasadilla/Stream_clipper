@@ -106,5 +106,9 @@ export async function startBackgroundWorker(): Promise<void> {
   );
   if (isWorkerEnabled()) {
     startWorkerPoller();
+    const { startPublicImpactPoller } = await import("@/services/publicImpactService");
+    startPublicImpactPoller();
+    const { startFeaturedShortsPoller } = await import("@/services/landingFeaturedService");
+    startFeaturedShortsPoller();
   }
 }
