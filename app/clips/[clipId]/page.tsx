@@ -1,4 +1,5 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
+import { prisma } from "@/lib/db";
 import type { Metadata } from "next";
 import { ClipShareView } from "@/components/ClipShareView";
 import { getClipSharePayload } from "@/services/clipShareService";
@@ -11,6 +12,7 @@ export async function generateMetadata({
   params,
 }: ClipPageProps): Promise<Metadata> {
   const { clipId } = await params;
+  if (await prisma.clipLibraryItem.findUnique({ where: { id: clipId }, select: { id: true } })) return { title: "Saved clip", robots: { index: false, follow: false } };
   const clip = await getClipSharePayload(clipId);
   if (!clip) {
     return { title: "Clip not found", robots: { index: false, follow: false } };
@@ -43,6 +45,7 @@ export async function generateMetadata({
 
 export default async function ClipSharePage({ params }: ClipPageProps) {
   const { clipId } = await params;
+  if (await prisma.clipLibraryItem.findUnique({ where: { id: clipId }, select: { id: true } })) redirect(`/library?clip=${encodeURIComponent(clipId)}`);
   const clip = await getClipSharePayload(clipId);
   if (!clip) notFound();
 

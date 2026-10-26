@@ -1,4 +1,5 @@
 import path from "path";
+import { archiveCompletedPlatformExport } from "@/services/clipLibraryArchiveService";
 import fs from "fs/promises";
 import { existsSync } from "fs";
 import { randomUUID } from "crypto";
@@ -644,6 +645,8 @@ export async function executePlatformExport(platformExportId: string) {
       completedAt: new Date(),
     },
   });
+  try { await archiveCompletedPlatformExport(platformExportId); }
+  catch { console.warn("[library] Platform export will be saved on retry; workspace copy retained."); }
   await updatePackStatus(platformExport.exportPackId);
 }
 

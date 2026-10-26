@@ -28,6 +28,7 @@
 /storage/frames/**
 /storage/renders/**
 /storage/audio/**
+/storage/library/**
 !storage/uploads/.gitkeep
 !storage/frames/.gitkeep
 !storage/renders/.gitkeep

@@ -41,6 +41,7 @@ export async function runRetentionCleanup(
       where: {
         billingAccountId: account.id,
         createdAt: { lt: cutoff },
+        NOT: { AND: [{ liveStatus: "replaced" }, { libraryClips: { some: { purgedAt: null } } }] },
       },
       orderBy: { createdAt: "asc" },
       take: limit,
@@ -89,7 +90,8 @@ export async function getAccountStoredMediaBytes(
     where: { streamSession: { billingAccountId } },
     select: { sizeBytes: true },
   });
-  return media.reduce((sum, row) => {
+  const saved = await prisma.clipLibraryAsset.aggregate({ where: { status: "ready", item: { billingAccountId, purgedAt: null } }, _sum: { fileSizeBytes: true } });
+  return Number(saved._sum.fileSizeBytes ?? 0) + media.reduce((sum, row) => {
     const n =
       typeof row.sizeBytes === "bigint"
         ? Number(row.sizeBytes)

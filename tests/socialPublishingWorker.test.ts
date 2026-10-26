@@ -36,6 +36,7 @@ function apply(row: Record<string, unknown>, data: Record<string, unknown>) {
   row.updatedAt = new Date();
 }
 vi.mock("@/lib/db", () => ({ prisma: {
+  clipLibraryItem: { findUnique: vi.fn(async () => null) },
   streamAutomationClip: { updateMany: vi.fn(async () => ({ count: 0 })) },
   socialPublishJob: {
     findUnique: vi.fn(async ({ where }: { where: { id: string } }) => structuredClone(m.jobs.find((j) => j.id === where.id) || null)),

@@ -12,9 +12,9 @@ export default async function PublishClipPage({
   searchParams,
 }: {
   params: Promise<{ clipId: string }>;
-  searchParams: Promise<{ groupId?: string }>;
+  searchParams: Promise<{ groupId?: string; library?: string }>;
 }) {
   const { clipId } = await params;
-  const { groupId } = await searchParams;
-  return <SocialPublishWorkspace clipId={clipId} initialGroupId={typeof groupId === "string" ? groupId : undefined} />;
+  const { groupId, library } = await searchParams;
+  return <SocialPublishWorkspace clipId={clipId} initialGroupId={typeof groupId === "string" ? groupId : undefined} libraryMode={library === "1"} />;
 }
