@@ -1,6 +1,8 @@
 "use client";
 import Link from "next/link";
-import { useState } from "react";
+import { useRef, useState } from "react";
+import posthog from "posthog-js";
+import { captureClientAttribution } from "@/lib/clientAttribution";
 import { sampleShort } from "@/lib/heroShorts";
 import { SAMPLE_DURATION, sampleRange, sampleTimestamp } from "@/lib/sampleTimeline";
 import { VideoComparison } from "@/components/VideoComparison";
@@ -12,7 +14,18 @@ export function SampleWorkspace() {
   const [range, setRange] = useState({ start: 0, end: SAMPLE_DURATION });
   const [play, setPlay] = useState<{ start: number; end: number; revision: number } | null>(null);
   const [compare, setCompare] = useState(false);
+  const started = useRef(false);
   const select = (start: number, end: number) => { setPlay(null); setRange(sampleRange(start, end)); };
+  const preview = () => {
+    setPlay({ ...range, revision: Date.now() });
+    if (started.current) return;
+    started.current = true;
+    const attribution = captureClientAttribution();
+    posthog.capture("sample_preview_started", {
+      content_id: attribution.marketingContentId,
+      source: attribution.utmSource,
+    });
+  };
   return <div className={styles.workspace}>
     <header className={styles.header}>
       <div><p className={styles.eyebrow}>Clipper / prepared sample</p><h1>Find the moment. Make the cut.</h1>
@@ -23,7 +36,7 @@ export function SampleWorkspace() {
       <div className={styles.stage}>
         {play ? <iframe key={play.revision} src={`https://www.youtube-nocookie.com/embed/${short.id}?autoplay=1&playsinline=1&rel=0&start=${play.start}&end=${play.end}`}
           title="Selected sample clip" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" referrerPolicy="strict-origin-when-cross-origin" allowFullScreen />
-          : <button className={styles.poster} onClick={() => setPlay({ ...range, revision: Date.now() })} aria-label="Play sample selection">
+          : <button className={styles.poster} onClick={preview} aria-label="Play sample selection">
             {/* Original YouTube portrait thumbnail; no video processing runs in this sample. */}
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src={short.poster} alt={short.title} /><span>Play selection ▶</span>
@@ -36,7 +49,7 @@ export function SampleWorkspace() {
         <div className={styles.selection} aria-hidden="true"><span style={{ left: `${range.start / SAMPLE_DURATION * 100}%`, width: `${(range.end - range.start) / SAMPLE_DURATION * 100}%` }} /></div>
         <label>Start <output>{sampleTimestamp(range.start)}</output><input type="range" aria-label="Selection start" min="0" max={SAMPLE_DURATION - 1} step="1" value={range.start} onChange={event => select(Number(event.target.value), range.end)} /></label>
         <label>End <output>{sampleTimestamp(range.end)}</output><input type="range" aria-label="Selection end" min={range.start + 1} max={SAMPLE_DURATION} step="1" value={range.end} onChange={event => select(range.start, Number(event.target.value))} /></label>
-        <div className={styles.actions}><button className={styles.primary} onClick={() => setPlay({ ...range, revision: Date.now() })}>Preview {range.end - range.start}s selection</button>
+        <div className={styles.actions}><button className={styles.primary} onClick={preview}>Preview {range.end - range.start}s selection</button>
           <button onClick={() => { setPlay(null); setCompare(true); }}>Original → Short</button>
           <button onClick={() => select(0, SAMPLE_DURATION)}>Reset</button></div>
         <p className={styles.eyebrow}>02 / See the finished result</p>

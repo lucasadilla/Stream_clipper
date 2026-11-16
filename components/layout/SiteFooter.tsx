@@ -11,6 +11,7 @@ const FOOTER_LINKS = {
     { href: "/#analyze", label: "Start clipping" },
   ],
   Editor: [
+    { href: "/guides", label: "Guides & editing examples" },
     { href: "/#sessions", label: "Active session" },
     { href: "/#features", label: "Timeline editor" },
     { href: "/#features", label: "Transcript search" },
