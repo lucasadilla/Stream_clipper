@@ -1,5 +1,7 @@
 import Link from "next/link";
+import { PlatformBrandIcon } from "@/components/brand/PlatformBrandIcon";
 import { SiteLogo } from "@/components/layout/SiteLogo";
+import { CLIPPER_SOCIALS } from "@/lib/clipperSocials";
 
 const FOOTER_LINKS = {
   Product: [
@@ -11,6 +13,8 @@ const FOOTER_LINKS = {
     { href: "/#analyze", label: "Start clipping" },
   ],
   Editor: [
+    { href: "/guides", label: "Guides & editing examples" },
+    { href: "/compare", label: "Compare clipping tools" },
     { href: "/#sessions", label: "Active session" },
     { href: "/#features", label: "Timeline editor" },
     { href: "/#features", label: "Transcript search" },
@@ -34,6 +38,19 @@ export function SiteFooter() {
               Live streams into searchable timelines, captioned cuts, and native
               or vertical exports.
             </p>
+            <nav aria-label="Clipper social profiles" className="mt-4">
+              <ul className="flex flex-wrap gap-2">
+                {CLIPPER_SOCIALS.map(profile => (
+                  <li key={profile.brand}>
+                    <a href={profile.href} target="_blank" rel="noopener noreferrer"
+                      aria-label={`Clipper on ${profile.label}`} title={profile.label}
+                      className="inline-flex size-10 items-center justify-center rounded-md border border-[var(--color-card-border)] transition-colors hover:border-[var(--color-accent)] focus-visible:outline-2 focus-visible:outline-[var(--color-accent)]">
+                      <PlatformBrandIcon brand={profile.brand} size="sm" variant="mark" />
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </nav>
           </div>
 
           {Object.entries(FOOTER_LINKS).map(([title, links]) => (

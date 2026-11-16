@@ -17,6 +17,7 @@ const NAV_LINKS = [
   { href: "/#how-it-works", label: "Workflow", hash: "#how-it-works" },
   { href: "/#pricing", label: "Pricing", hash: "#pricing" },
   { href: "/#sessions", label: "Sessions", hash: "#sessions" },
+  { href: "/guides", label: "Guides", hash: null },
   { href: "/#faq", label: "FAQ", hash: "#faq" },
 ] as const;
 
@@ -46,17 +47,17 @@ function scrollToSection(hash: string, behavior: ScrollBehavior = "smooth") {
 }
 
 function DesktopNav({
-  onHome,
+  pathname,
   activeHash,
-  hoveredHash,
+  hoveredHref,
   onHover,
   onHoverEnd,
   onNavigate,
 }: {
-  onHome: boolean;
+  pathname: string;
   activeHash: string;
-  hoveredHash: string | null;
-  onHover: (hash: string) => void;
+  hoveredHref: string | null;
+  onHover: (href: string) => void;
   onHoverEnd: () => void;
   onNavigate: (hash: string, event?: React.MouseEvent) => void;
 }) {
@@ -68,17 +69,18 @@ function DesktopNav({
         onMouseLeave={onHoverEnd}
       >
         {NAV_LINKS.map((link) => {
-          const active = onHome && activeHash === link.hash;
-          const hovered = hoveredHash === link.hash && !active;
+          const active = link.hash ? pathname === "/" && activeHash === link.hash : pathname === link.href || pathname.startsWith(`${link.href}/`);
+          const hovered = hoveredHref === link.href && !active;
 
           return (
             <Link
               key={link.href}
               href={link.href}
-              onMouseEnter={() => onHover(link.hash)}
-              onClick={(event) => onNavigate(link.hash, event)}
+              onMouseEnter={() => onHover(link.href)}
+              onClick={(event) => { if (link.hash) onNavigate(link.hash, event); }}
+              aria-current={pathname === link.href ? "page" : active ? "location" : undefined}
               className={cn(
-                "relative z-10 rounded-full px-5 py-2.5 text-base font-medium transition-colors duration-200 xl:px-6",
+                "relative z-10 rounded-full px-3 py-2.5 text-sm font-medium transition-colors duration-200 xl:px-5 xl:text-base",
                 active
                   ? "text-[#071006]"
                   : "text-white/70 hover:text-white"
@@ -110,12 +112,12 @@ function DesktopNav({
 }
 
 function MobileNavLinks({
-  onHome,
+  pathname,
   activeHash,
   onNavigate,
   onClose,
 }: {
-  onHome: boolean;
+  pathname: string;
   activeHash: string;
   onNavigate: (hash: string, event?: React.MouseEvent) => void;
   onClose: () => void;
@@ -123,7 +125,7 @@ function MobileNavLinks({
   return (
     <nav aria-label="Mobile navigation" className="flex flex-col gap-1">
       {NAV_LINKS.map((link, index) => {
-        const active = onHome && activeHash === link.hash;
+        const active = link.hash ? pathname === "/" && activeHash === link.hash : pathname === link.href || pathname.startsWith(`${link.href}/`);
         return (
           <motion.div
             key={link.href}
@@ -135,9 +137,10 @@ function MobileNavLinks({
             <Link
               href={link.href}
               onClick={(event) => {
-                onNavigate(link.hash, event);
+                if (link.hash) onNavigate(link.hash, event);
                 onClose();
               }}
+              aria-current={pathname === link.href ? "page" : active ? "location" : undefined}
               className={cn(
                 "relative block overflow-hidden rounded-lg px-4 py-3.5 text-base font-medium",
                 active
@@ -168,7 +171,7 @@ export function SiteHeader() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
   const [activeHash, setActiveHash] = useState("");
-  const [hoveredHash, setHoveredHash] = useState<string | null>(null);
+  const [hoveredHref, setHoveredHref] = useState<string | null>(null);
   const scrollLockRef = useRef(false);
   const scrollUnlockTimerRef = useRef<number | null>(null);
 
@@ -218,7 +221,7 @@ export function SiteHeader() {
 
   useEffect(() => {
     setMenuOpen(false);
-    setHoveredHash(null);
+    setHoveredHref(null);
   }, [pathname]);
 
   useEffect(() => {
@@ -269,8 +272,8 @@ export function SiteHeader() {
   useEffect(() => {
     if (!onHome) return;
 
-    const sections = NAV_LINKS.map((link) =>
-      document.getElementById(link.hash.slice(1))
+    const sections = NAV_LINKS.map(({ hash }) =>
+      hash ? document.getElementById(hash.slice(1)) : null
     ).filter((el): el is HTMLElement => Boolean(el));
 
     if (!sections.length) return;
@@ -355,11 +358,11 @@ export function SiteHeader() {
 
           <div className="hidden overflow-visible py-1 lg:flex lg:justify-center">
             <DesktopNav
-              onHome={onHome}
+              pathname={pathname}
               activeHash={activeHash}
-              hoveredHash={hoveredHash}
-              onHover={setHoveredHash}
-              onHoverEnd={() => setHoveredHash(null)}
+              hoveredHref={hoveredHref}
+              onHover={setHoveredHref}
+              onHoverEnd={() => setHoveredHref(null)}
               onNavigate={navigateToSection}
             />
           </div>
@@ -417,7 +420,7 @@ export function SiteHeader() {
             >
               <div className="mx-auto max-w-[1440px] px-4 py-3 sm:px-6">
                 <MobileNavLinks
-                  onHome={onHome}
+                  pathname={pathname}
                   activeHash={activeHash}
                   onNavigate={navigateToSection}
                   onClose={() => setMenuOpen(false)}

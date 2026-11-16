@@ -60,12 +60,16 @@ function PostHogNavigationTracker() {
   }, [pathname, search]);
 
   useEffect(() => {
+    if (pathname === "/sample" || pathname === "/guides" || pathname === "/compare" || pathname?.startsWith("/guides/") ||
+        pathname?.startsWith("/case-studies/") || pathname?.startsWith("/compare/")) {
+      captureClientAttribution();
+    }
     if (pathname !== "/" || typeof window === "undefined") return;
     const key = "clipper_landing_viewed";
     if (window.sessionStorage.getItem(key)) return;
     window.sessionStorage.setItem(key, "1");
     posthog.capture("landing_page_viewed", captureClientAttribution());
-  }, [pathname]);
+  }, [pathname, search]);
 
   return null;
 }
