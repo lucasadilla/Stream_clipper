@@ -1,4 +1,5 @@
 import type { Metadata, MetadataRoute } from "next";
+import { comparisonIndex, comparisons } from "@/lib/editorialComparisons";
 import { getPublicSiteUrl } from "@/lib/publicOrigin";
 
 type EditorialPage = {
@@ -28,12 +29,6 @@ export const resources = {
   path: "/guides",
   title: "Clipper Guides and Editing Examples",
   description: "Learn to cut, caption, and reframe interviews and gaming streams for YouTube Shorts, TikTok, and Reels.",
-};
-
-export const comparison = {
-  path: "/compare/clipper-vs-opusclip",
-  title: "Clipper vs. OpusClip for Stream and Video Highlights",
-  description: "Compare Clipper and OpusClip for live editing, clip discovery, framing, export, and how each plan measures usage.",
 };
 
 // Enable after the source and finished clip are cleared for this page.
@@ -136,7 +131,7 @@ export function youtubeEmbedUrl(youtubeId: string): string {
 }
 
 export function editorialSitemap(siteUrl: string): MetadataRoute.Sitemap {
-  const pages = [resources, comparison, ...(interviewCase.approved ? [interviewCase] : [])];
+  const pages = [resources, comparisonIndex, ...comparisons, ...(interviewCase.approved ? [interviewCase] : [])];
   return [
     ...pages.map(page => ({ url: siteUrl + page.path })),
     ...guides.map(guide => ({

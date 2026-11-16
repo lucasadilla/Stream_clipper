@@ -3,16 +3,20 @@ import type { ReactNode } from "react";
 import { EditorialAction } from "@/components/EditorialAction";
 import styles from "./EditorialPage.module.css";
 
-export function EditorialPage({ title, description, category, children }: {
+export function EditorialPage({
+  title, description, category, parentHref = "/guides", parentLabel = "Guides & examples", children,
+}: {
   title: string;
   description: string;
   category?: string;
+  parentHref?: string;
+  parentLabel?: string;
   children: ReactNode;
 }) {
   return (
     <article className={styles.page}>
       {category && <nav className={styles.breadcrumb} aria-label="Breadcrumb">
-        <Link href="/guides">Guides &amp; examples</Link><span aria-hidden="true">/</span><span>{category}</span>
+        <Link href={parentHref}>{parentLabel}</Link><span aria-hidden="true">/</span><span>{category}</span>
       </nav>}
       <header className={styles.header}>
         <h1>{title}</h1>

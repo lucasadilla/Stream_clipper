@@ -1,6 +1,6 @@
 # Clipper SEO launch
 
-The first release contains the guides hub, two written tutorials and a documented OpusClip comparison. Turn on the interview case study after the original excerpt and finished Short are cleared for that page. The case route returns 404 until approval and is kept out of links and the sitemap. The gaming case study needs its own source and approved published results.
+The first release contains the guides hub, two written tutorials and documented comparisons with OpusClip, Eklipse, quso.ai and Descript. Turn on the interview case study after the original excerpt and finished Short are cleared for that page. The case route returns 404 until approval and is kept out of links and the sitemap. The gaming case study needs its own source and approved published results.
 
 ## Record the two walkthroughs
 

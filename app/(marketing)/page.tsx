@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { ParticleEditingHero } from "@/components/ParticleEditingHero";
 import { SessionStorageList } from "@/components/SessionStorageList";
 import { StreamUrlInput } from "@/components/YouTubeUrlInput";
@@ -14,6 +15,7 @@ import { HeroViewCount } from "@/components/HeroViewCount";
 import { getPublicImpact } from "@/services/publicImpactService";
 import { getFeaturedShorts } from "@/services/landingFeaturedService";
 import { LandingQuickLinks } from "@/components/LandingQuickLinks";
+import { CLIPPER_SOCIALS } from "@/lib/clipperSocials";
 
 export const dynamic = "force-dynamic";
 
@@ -136,6 +138,7 @@ const structuredData = {
       "@id": "https://streamclipper.stream/#organization",
       name: "Clipper",
       url: "https://streamclipper.stream/",
+      sameAs: CLIPPER_SOCIALS.map(profile => profile.href),
     },
     {
       "@type": "SoftwareApplication",
@@ -387,10 +390,15 @@ export default async function HomePage() {
                 Pay for finished videos.
               </h2>
             </div>
-            <p data-scroll-reveal="right" className="max-w-2xl text-xl leading-8 text-[var(--color-muted)] sm:text-2xl sm:leading-9">
-              Pick the monthly video volume that fits your workflow. A clip
-              counts once, even when you export or publish it everywhere.
-            </p>
+            <div data-scroll-reveal="right" className="max-w-2xl">
+              <p className="text-xl leading-8 text-[var(--color-muted)] sm:text-2xl sm:leading-9">
+                Pick the monthly video volume that fits your workflow. A clip
+                counts once, even when you export or publish it everywhere.
+              </p>
+              <Link href="/compare" className="mt-4 inline-block text-sm font-semibold text-[var(--color-accent)] hover:underline">
+                Compare clipping tools <span aria-hidden="true">→</span>
+              </Link>
+            </div>
           </div>
 
           <div className="mt-14 grid gap-4 md:grid-cols-2 xl:grid-cols-4">

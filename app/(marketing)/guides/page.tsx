@@ -1,15 +1,16 @@
 import Link from "next/link";
 import { EditorialNextStep, EditorialPage } from "@/components/EditorialPage";
 import styles from "@/components/EditorialPage.module.css";
-import { comparison, editorialMetadata, guides, interviewCase, resources } from "@/lib/editorialContent";
+import { comparisonIndex } from "@/lib/editorialComparisons";
+import { editorialMetadata, guides, interviewCase, resources } from "@/lib/editorialContent";
 
 export const metadata = editorialMetadata(resources);
 
 export default function GuidesIndex() {
   const entries = [
     ...guides,
-    { ...comparison, topic: "Tool comparison" },
     ...(interviewCase.approved ? [{ ...interviewCase, topic: "Case study" }] : []),
+    { ...comparisonIndex, title: "Compare clipping tools", topic: "Comparisons" },
   ];
   return (
     <EditorialPage title="Guides & editing examples" description={resources.description}>

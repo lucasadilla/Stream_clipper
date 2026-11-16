@@ -60,7 +60,7 @@ function PostHogNavigationTracker() {
   }, [pathname, search]);
 
   useEffect(() => {
-    if (pathname === "/sample" || pathname?.startsWith("/guides/") ||
+    if (pathname === "/sample" || pathname === "/guides" || pathname === "/compare" || pathname?.startsWith("/guides/") ||
         pathname?.startsWith("/case-studies/") || pathname?.startsWith("/compare/")) {
       captureClientAttribution();
     }
