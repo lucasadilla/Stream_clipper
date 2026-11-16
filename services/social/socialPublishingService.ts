@@ -1,4 +1,5 @@
 import { socialExportTarget, needsSeparateSocialFormat } from "@/lib/social/exportTarget";
+import { withActiveLibraryClip } from "@/services/clipLibraryLeaseService";
 import type { Prisma } from "@prisma/client";
 import { createHash, randomUUID } from "crypto";
 import { existsSync } from "fs";
@@ -155,6 +156,17 @@ export async function resolvePublishMedia(options: {
   const clip = await loadClipContext(options.clipSuggestionId);
   const preferredExportKey = socialExportTarget(options.platform, options);
 
+  const saved = await prisma.clipLibraryItem.findUnique({ where: { id: clip.id }, include: { assets: { where: { status: "ready" }, orderBy: { savedAt: "desc" } } } });
+  if (saved) {
+    if (saved.deletedAt || saved.purgedAt) throw new Error("Restore this clip from My Clips before posting it.");
+    const exact = saved.assets.find(asset => asset.platform === preferredExportKey && (!options.platformExportId || asset.originKind === "platform" && asset.originId === options.platformExportId));
+    const vertical = ["youtube_shorts", "tiktok", "instagram_reels", "facebook_reels"].includes(preferredExportKey ?? "");
+    const general = !options.platformExportId && preferredExportKey !== "instagram_feed" ? saved.assets.find(asset => asset.platform === "general" && asset.width && asset.height && (vertical ? asset.height > asset.width : asset.width >= asset.height)) : null;
+    const asset = exact ?? general;
+    if (asset?.outputPath) return inspectPublishMedia(resolveStoragePath(asset.outputPath), asset.originKind === "platform" ? asset.originId : null);
+    throw new Error("This format was not saved. Choose a saved format, or prepare it in the active studio first.");
+  }
+
   const match = options.platformExportId
     ? clip.platformExports.find((item) => item.id === options.platformExportId && item.platform === preferredExportKey && item.outputPath)
     : preferredExportKey
@@ -237,6 +249,8 @@ async function createPublishGroupInternal(options: {
   const existing = await getPublishGroup(groupId, options.userId);
   if (existing) return existing;
   const clip = await loadClipContext(options.clipSuggestionId);
+  const savedDetails = await prisma.clipLibraryItem.findUnique({ where: { id: clip.id }, select: { id: true, postingCaption: true, deletedAt: true, purgedAt: true } });
+  if (savedDetails?.deletedAt || savedDetails?.purgedAt) throw new Error("Restore this clip from My Clips before posting it.");
   const transcript = await gatherTranscript(
     clip.streamSessionId,
     clip.startTimeSeconds,
@@ -296,9 +310,11 @@ async function createPublishGroupInternal(options: {
     });
 
     const copyKey = `${dest.platform}:${settings.youtubeFormat}:${settings.instagramFormat}`;
+    const libraryCopy = savedDetails?.postingCaption ? { title: clip.title, caption: savedDetails.postingCaption,
+      description: savedDetails.postingCaption, postText: savedDetails.postingCaption, hashtags: [] } : null;
     let content = dest.content
       ? asContent(dest.content, dest.platform)
-      : generatedByPlatform.get(copyKey) ?? await generateSocialContent({
+      : libraryCopy ? asContent(libraryCopy, dest.platform) : generatedByPlatform.get(copyKey) ?? await generateSocialContent({
           platform: dest.platform,
           clipTitle: clip.title,
           clipReason: clip.reason,
@@ -349,6 +365,7 @@ async function createPublishGroupInternal(options: {
   try {
     await prisma.socialPublishGroup.create({ data: {
       id: groupId, userId: options.userId, clipSuggestionId: options.clipSuggestionId,
+      ...(savedDetails ? { libraryItemId: savedDetails.id } : {}),
       status: "awaiting_review", jobs: { create: jobs },
     } });
   } catch (error) {
@@ -523,7 +540,12 @@ export async function validatePublishGroup(userId: string, groupId: string) {
   return getPublishGroup(groupId, userId);
 }
 
-export async function enqueuePublishGroup(options: {
+export async function enqueuePublishGroup(options: Parameters<typeof enqueuePublishGroupInternal>[0]) {
+  const group = await prisma.socialPublishGroup.findFirst({ where: { id: options.groupId, userId: options.userId }, select: { clipSuggestionId: true } });
+  if (!group) throw new Error("Publish group not found");
+  return withActiveLibraryClip(group.clipSuggestionId, () => enqueuePublishGroupInternal(options));
+}
+async function enqueuePublishGroupInternal(options: {
   userId: string;
   groupId: string;
   mode: "now" | "schedule";
@@ -728,6 +750,12 @@ export async function listScheduledPublishGroups(userId: string) {
 }
 
 export async function retryPublishJob(userId: string, jobId: string) {
+  const job = await prisma.socialPublishJob.findFirst({ where: { id: jobId, publishGroup: { userId } }, select: { status: true, publishGroup: { select: { clipSuggestionId: true } } } });
+  if (!job) throw new Error("Publish job not found");
+  if (job.status !== "failed") throw new Error("Only a failed post can be retried.");
+  return withActiveLibraryClip(job.publishGroup.clipSuggestionId, () => retryPublishJobInternal(userId, jobId));
+}
+async function retryPublishJobInternal(userId: string, jobId: string) {
   const job = await prisma.socialPublishJob.findFirst({
     where: { id: jobId, publishGroup: { userId } },
   });

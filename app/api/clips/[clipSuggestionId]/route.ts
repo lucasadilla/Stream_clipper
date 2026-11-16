@@ -10,6 +10,7 @@ import {
   SessionAccessError,
 } from "@/services/sessionAccessService";
 import { VERTICAL_LAYOUTS } from "@/lib/verticalLayout";
+import { ownedLibraryItem } from "@/services/clipLibraryService";
 
 export async function GET(
   _request: NextRequest,
@@ -17,10 +18,12 @@ export async function GET(
 ) {
   try {
     const { clipSuggestionId } = await params;
+    if (await prisma.clipLibraryItem.findUnique({ where: { id: clipSuggestionId }, select: { id: true } })) await ownedLibraryItem(_request, clipSuggestionId);
     const clip = await getClipSharePayload(clipSuggestionId);
     if (!clip) return errorResponse("Clip not found", 404);
     return jsonResponse({ clip });
   } catch (error) {
+    if (error instanceof SessionAccessError) return errorResponse(error.message, error.status);
     const message =
       error instanceof Error ? error.message : "Failed to load clip";
     return errorResponse(message, 500);

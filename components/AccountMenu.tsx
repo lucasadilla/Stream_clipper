@@ -138,6 +138,7 @@ export function AccountMenu() {
               <p className="mt-1 truncate text-xs text-white/45">{account.email}</p>
             )}
           </div>
+          <Link role="menuitem" href="/library" onClick={() => setOpen(false)} className="flex items-center justify-between px-4 py-3 text-sm font-medium text-white/75 transition-colors hover:bg-white/[0.04] hover:text-white">My Clips</Link>
           <Link
             role="menuitem"
             href="/profile"

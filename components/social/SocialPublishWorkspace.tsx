@@ -142,7 +142,7 @@ function settingsForAccount(
   return {};
 }
 
-export function SocialPublishWorkspace({ clipId, initialGroupId }: { clipId: string; initialGroupId?: string }) {
+export function SocialPublishWorkspace({ clipId, initialGroupId, libraryMode = false }: { clipId: string; initialGroupId?: string; libraryMode?: boolean }) {
   const [clipTitle, setClipTitle] = useState("Clip");
   const [accounts, setAccounts] = useState<AccountRow[]>([]);
   const [banners, setBanners] = useState<PlatformBanner[]>([]);
@@ -167,7 +167,7 @@ export function SocialPublishWorkspace({ clipId, initialGroupId }: { clipId: str
   const [publishing, setPublishing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [prefs, setPrefs] = useState<PublishingPreferencesView | null>(null);
-  const [useChannelDefaults, setUseChannelDefaults] = useState(true);
+  const [useChannelDefaults, setUseChannelDefaults] = useState(!libraryMode);
   const [ready, setReady] = useState(false);
   const autoDraftAttempted = useRef(false);
   const draftRequestKey = useRef<string | null>(null);
@@ -207,7 +207,7 @@ export function SocialPublishWorkspace({ clipId, initialGroupId }: { clipId: str
     async function load() {
       try {
         const [clipRes, accountsRes, prefsRes] = await Promise.all([
-          fetch(`/api/clips/${clipId}`),
+          fetch(libraryMode ? `/api/library/${clipId}` : `/api/clips/${clipId}`),
           fetch("/api/social/accounts"),
           fetch("/api/social/preferences"),
         ]);
@@ -222,7 +222,7 @@ export function SocialPublishWorkspace({ clipId, initialGroupId }: { clipId: str
           throw new Error(prefsBody.error || "Could not load preferences");
         if (cancelled) return;
 
-        setClipTitle(clipBody.clip?.title || "Clip");
+        setClipTitle(clipBody.item?.title || clipBody.clip?.title || "Clip");
         const preferences = prefsBody.preferences as PublishingPreferencesView;
         setPrefs(preferences);
         setPrivacy(preferences.defaultPrivacy);
@@ -281,7 +281,7 @@ export function SocialPublishWorkspace({ clipId, initialGroupId }: { clipId: str
     return () => {
       cancelled = true;
     };
-  }, [clipId, initialGroupId]);
+  }, [clipId, initialGroupId, libraryMode]);
 
   useEffect(() => {
     if (activeJob?.platform !== "tiktok") { setCreator(null); setCreatorError(null); return; }
@@ -347,7 +347,7 @@ export function SocialPublishWorkspace({ clipId, initialGroupId }: { clipId: str
         };
       });
       const formats = Array.from(new Set(destinations.map((destination) => socialExportTarget(destination.platform, destination.settings)).filter((target) => needsSeparateSocialFormat(target))));
-      if (formats.length) {
+      if (formats.length && !libraryMode) {
         setPreparingFormat("Preparing your platform formats…");
         const response = await fetch(`/api/clips/${clipId}/platform-exports`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platforms: formats, includeCaptions: true, burnSubtitles: true, generateCopy: false, xQuoteCard: false }) });
         const body = await response.json();
@@ -382,7 +382,7 @@ export function SocialPublishWorkspace({ clipId, initialGroupId }: { clipId: str
       if (!response.ok) throw new Error(body.error || "Could not create draft");
       setGroup(body.group);
       draftRequestKey.current = null;
-      window.history.replaceState(null, "", `/clips/${clipId}/publish?groupId=${encodeURIComponent(body.group.id)}`);
+      window.history.replaceState(null, "", `/clips/${clipId}/publish?${libraryMode ? "library=1&" : ""}groupId=${encodeURIComponent(body.group.id)}`);
       setActiveJobId(body.group.jobs[0]?.id ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not create draft");
@@ -401,6 +401,7 @@ export function SocialPublishWorkspace({ clipId, initialGroupId }: { clipId: str
     tiktokMode,
     youtubeFormat,
     useChannelDefaults,
+    libraryMode,
   ]);
 
   useEffect(() => {
@@ -552,10 +553,10 @@ export function SocialPublishWorkspace({ clipId, initialGroupId }: { clipId: str
               Accounts
             </Link>
             <Link
-              href={`/clips/${clipId}/export`}
+              href={libraryMode ? "/library" : `/clips/${clipId}/export`}
               className="border border-[#21301f] px-3 py-1.5 text-[11px] font-semibold uppercase text-[#9aa49a] hover:border-[var(--color-accent)] hover:text-white"
             >
-              Exports
+              {libraryMode ? "My Clips" : "Exports"}
             </Link>
           </div>
         </div>
@@ -716,7 +717,8 @@ export function SocialPublishWorkspace({ clipId, initialGroupId }: { clipId: str
               )}
             </div>
 
-            {!group && <label className="mt-4 flex gap-2 text-xs text-white/70"><input type="checkbox" checked={useChannelDefaults} disabled={creating} onChange={(event) => setUseChannelDefaults(event.target.checked)} />Use each channel’s saved posting defaults. Uncheck to use the settings above.</label>}
+            {!group && !libraryMode && <label className="mt-4 flex gap-2 text-xs text-white/70"><input type="checkbox" checked={useChannelDefaults} disabled={creating} onChange={(event) => setUseChannelDefaults(event.target.checked)} />Use each channel’s saved posting defaults. Uncheck to use the settings above.</label>}
+            {libraryMode && <p className="mt-4 text-xs leading-5 text-white/60">Posts reuse your saved videos exactly. Choose a format saved in My Clips; prepare new formats in the active studio.</p>}
             {preparingFormat && <p className="border border-[var(--color-card-border)] p-4 text-sm text-white/60">{preparingFormat}</p>}
           {!group && (
               <button

@@ -73,15 +73,14 @@ export async function requireClipAccessForUser(
   });
   if (!clip) throw new SessionAccessError("Clip not found", 404);
 
-  await ensureSessionBillingAccess(
-    clip.streamSessionId,
-    getBillingAccountIdFromRequest(request)
-  );
-
   const billing = await prisma.billingAccount.findFirst({
     where: { userId },
-    select: { id: true },
   });
+  const saved = await prisma.clipLibraryItem.findUnique({ where: { id: clipSuggestionId }, select: { billingAccountId: true, deletedAt: true, purgedAt: true } });
+  if (saved) {
+    if (!billing || saved.billingAccountId !== billing.id || saved.deletedAt || saved.purgedAt) throw new SessionAccessError("Saved clip not found", 404);
+    if (!hasAppAccess(billing)) throw new SessionAccessError("An active subscription is required to publish. Saved downloads remain available in My Clips.", 402);
+  } else await ensureSessionBillingAccess(clip.streamSessionId, getBillingAccountIdFromRequest(request));
   if (
     billing &&
     clip.streamSession.billingAccountId &&

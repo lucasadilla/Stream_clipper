@@ -1,4 +1,5 @@
 import { findCompletedRenderForSpec } from "@/services/completedRenderReuseService";
+import { archiveCompletedRender } from "@/services/clipLibraryArchiveService";
 import { brandingSchema, brandingVideoFilter, type ChannelBranding } from "@/lib/social/channelPreset";
 import { brandingFontFile } from "@/services/social/brandingFontService";
 import path from "path";
@@ -474,6 +475,11 @@ async function completeRenderJob(input: {
       logs: logs as unknown as Prisma.InputJsonValue,
     },
   });
+
+  if (!input.params.preview) {
+    try { await archiveCompletedRender(input.jobId); }
+    catch { console.warn("[library] Finished render will be saved on retry; workspace copy retained."); }
+  }
 
   if (input.params.clipSuggestionId && !input.params.preview) {
     await prisma.clipSuggestion.update({
